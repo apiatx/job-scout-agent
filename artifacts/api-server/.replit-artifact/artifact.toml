@@ -5,21 +5,18 @@ version = "1.0.0"
 id = "3B4_FFSkEVBkAeYMFRJ2e"
 
 [[services]]
-localPort = 3000
+localPort = 8080
 name = "API Server"
 paths = ["/"]
 
 [services.development]
 run = "pnpm --filter @workspace/api-server run dev"
 
-[services.production]
-build = "pnpm --filter @workspace/api-server run build && pnpm --filter @workspace/api-server run build:client"
-
 [services.production.run]
-args = ["node", "artifacts/api-server/dist/index.cjs"]
+args = ["node", "--import", "tsx", "artifacts/api-server/src/index.ts"]
 
 [services.production.run.env]
-PORT = "3000"
+PORT = "8080"
 
 [services.production.health.startup]
 path = "/api/healthz"
