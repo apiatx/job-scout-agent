@@ -1,14 +1,13 @@
 import app from "./app";
 
 const port = Number(process.env["PORT"]) || 8080;
-const FRONTEND_PORT = 25906;
 
 app.listen(port, () => {
   console.log(`Server listening on port ${port}`);
 });
 
-if (port !== FRONTEND_PORT) {
-  app.listen(FRONTEND_PORT, () => {
-    console.log(`Frontend also served on port ${FRONTEND_PORT}`);
+if (process.env.NODE_ENV !== "production" && port !== 5000) {
+  app.listen(5000, () => {
+    console.log(`Preview also available on port 5000`);
   });
 }
