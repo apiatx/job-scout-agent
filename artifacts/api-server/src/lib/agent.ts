@@ -92,7 +92,7 @@ Respond ONLY with a JSON object (no markdown, no extra text):
         return null;
       }
     },
-    { concurrency: 3, retries: 3 }
+    { concurrency: 10, retries: 2 }
   );
 
   return results.filter((r): r is JobMatch => r !== null);

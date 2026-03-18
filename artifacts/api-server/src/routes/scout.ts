@@ -6,22 +6,19 @@ import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapePlainWebsite, scrapeWorkda
 import { scoreJobsWithClaude } from "../lib/agent.js";
 import { sendEmailViaGmail, buildDigestEmail } from "../lib/gmail.js";
 
+// On startup, mark any stale "running" records (from a previous crash/restart) as failed
+db.update(scoutRunsTable)
+  .set({ status: "failed", error: "Server restarted — run was abandoned", completedAt: new Date() })
+  .where(eq(scoutRunsTable.status, "running"))
+  .then(() => {})
+  .catch(console.error);
+
+let scoutRunning = false;
+
 const WORKDAY_COMPANIES = [
   { slug: "cisco", domain: "cisco.wd5.myworkdayjobs.com", name: "Cisco" },
-  { slug: "dell", domain: "dell.wd1.myworkdayjobs.com", name: "Dell Technologies" },
-  { slug: "hpe", domain: "hpe.wd5.myworkdayjobs.com", name: "HPE" },
-  { slug: "intel", domain: "intel.wd1.myworkdayjobs.com", name: "Intel" },
-  { slug: "amd", domain: "amd.wd5.myworkdayjobs.com", name: "AMD" },
-  { slug: "micron", domain: "micron.wd1.myworkdayjobs.com", name: "Micron" },
-  { slug: "seagate", domain: "seagate.wd1.myworkdayjobs.com", name: "Seagate" },
-  { slug: "marvell", domain: "marvell.wd1.myworkdayjobs.com", name: "Marvell" },
-  { slug: "vertiv", domain: "vertiv.wd1.myworkdayjobs.com", name: "Vertiv" },
-  { slug: "equinix", domain: "equinix.wd1.myworkdayjobs.com", name: "Equinix" },
-  { slug: "fortinet", domain: "fortinet.wd1.myworkdayjobs.com", name: "Fortinet" },
-  { slug: "f5", domain: "f5.wd5.myworkdayjobs.com", name: "F5" },
-  { slug: "nutanix", domain: "nutanix.wd1.myworkdayjobs.com", name: "Nutanix" },
-  { slug: "extremenetworks", domain: "extremenetworks.wd5.myworkdayjobs.com", name: "Extreme Networks" },
-  { slug: "ciena", domain: "ciena.wd5.myworkdayjobs.com", name: "Ciena" },
+  { slug: "nvidia", domain: "nvidia.wd5.myworkdayjobs.com", name: "NVIDIA", careerSite: "NVIDIAExternalCareerSite" },
+  { slug: "dell", domain: "dell.wd1.myworkdayjobs.com", name: "Dell Technologies", careerSite: "ExternalNonPublic" },
 ];
 
 const router: IRouter = Router();
@@ -33,10 +30,19 @@ router.get("/scout/status", async (_req, res): Promise<void> => {
     .orderBy(desc(scoutRunsTable.startedAt))
     .limit(20);
 
-  res.json(GetScoutStatusResponse.parse(runs));
+  const serialized = runs.map((r) => ({
+    ...r,
+    completedAt: r.completedAt instanceof Date ? r.completedAt.toISOString() : r.completedAt,
+  }));
+  res.json(GetScoutStatusResponse.parse(serialized));
 });
 
 router.post("/scout/run", async (_req, res): Promise<void> => {
+  if (scoutRunning) {
+    res.status(409).json({ error: "A scout run is already in progress. Please wait for it to finish." });
+    return;
+  }
+
   const [run] = await db
     .insert(scoutRunsTable)
     .values({ status: "running", jobsFound: 0, emailSent: false })
@@ -49,7 +55,8 @@ router.post("/scout/run", async (_req, res): Promise<void> => {
     message: "Scout run started in background",
   }));
 
-  runScoutInBackground(run.id).catch(console.error);
+  scoutRunning = true;
+  runScoutInBackground(run.id).catch(console.error).finally(() => { scoutRunning = false; });
 });
 
 async function runScoutInBackground(runId: number) {
@@ -93,20 +100,39 @@ async function runScoutInBackground(runId: number) {
 
     console.log(`\n--- Scanning ${WORKDAY_COMPANIES.length} Workday companies ---`);
     for (const company of WORKDAY_COMPANIES) {
-      const jobs = await scrapeWorkdayJobs(company.slug, company.domain, company.name);
+      const jobs = await scrapeWorkdayJobs(company.slug, company.domain, company.name, company.careerSite);
       allJobs.push(...jobs);
     }
 
     console.log(`\nTotal: scraped ${allJobs.length} job listings across all companies`);
 
-    if (allJobs.length === 0) {
+    // Pre-filter to sales-relevant titles before hitting Claude — avoids scoring
+    // thousands of engineering/PM/marketing roles. Kept narrow so Claude only sees
+    // a small set of plausible AE / Sales Director roles.
+    const SALES_INCLUDE = /\b(account\s+executive|sales\s+director|director\s+of\s+sales|vp\s+of?\s+sales|regional\s+sales|territory\s+sales|named\s+account|major\s+account|strategic\s+account|enterprise\s+account)\b/i;
+    const SALES_EXCLUDE = /\b(engineer|developer|software|scientist|analyst|marketing|designer|recruiter|\bhr\b|finance|accounting|legal|product\s+manager|program\s+manager|project\s+manager|intern|coordinator|specialist|support|customer\s+success|operations|architect|data\b|cloud\s+sales\s+engineer)\b/i;
+
+    const filteredJobs = allJobs.filter((job) => {
+      const t = job.title;
+      return SALES_INCLUDE.test(t) && !SALES_EXCLUDE.test(t);
+    });
+
+    // Hard cap: never send more than 80 jobs to Claude regardless of filter output
+    const MAX_CLAUDE_JOBS = 80;
+    const jobsToScore = filteredJobs.length > MAX_CLAUDE_JOBS
+      ? filteredJobs.slice(0, MAX_CLAUDE_JOBS)
+      : filteredJobs;
+
+    console.log(`Pre-filter: ${filteredJobs.length} of ${allJobs.length} jobs matched; sending ${jobsToScore.length} to Claude`);
+
+    if (jobsToScore.length === 0) {
       await db.update(scoutRunsTable)
         .set({ status: "completed", jobsFound: 0, completedAt: new Date() })
         .where(eq(scoutRunsTable.id, runId));
       return;
     }
 
-    const matches = await scoreJobsWithClaude(allJobs, {
+    const matches = await scoreJobsWithClaude(jobsToScore, {
       targetRoles: criteria.targetRoles || [],
       industries: criteria.industries || [],
       minSalary: criteria.minSalary,

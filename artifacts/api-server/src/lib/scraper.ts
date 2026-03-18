@@ -26,7 +26,7 @@ export async function scrapeGreenhouseJobs(slug: string, companyName: string): P
   try {
     const url = `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs?content=true`;
     console.log(`Greenhouse: scanning ${slug}...`);
-    const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
     if (!response.ok) {
       console.log(`Greenhouse: couldn't find company '${slug}' (status ${response.status})`);
       return [];
@@ -50,7 +50,7 @@ export async function scrapeLeverJobs(slug: string, companyName: string): Promis
   try {
     const url = `https://api.lever.co/v0/postings/${slug}?mode=json`;
     console.log(`Lever: scanning ${slug}...`);
-    const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
     if (!response.ok) {
       console.log(`Lever: couldn't find company '${slug}' (status ${response.status})`);
       return [];
@@ -84,9 +84,12 @@ interface WorkdayResponse {
 export async function scrapeWorkdayJobs(
   companySlug: string,
   workdayDomain: string,
-  companyName: string
+  companyName: string,
+  careerSite?: string
 ): Promise<ScrapedJob[]> {
-  // Try the given domain first, then fallback to wd1/wd3/wd5 variants if it fails
+  const site = careerSite ?? `${companySlug}_Careers`;
+
+  // Try the given domain first, then fallback to wd1/wd3/wd5 variants if it 404s
   const domainVariants = [workdayDomain];
   const wdMatch = workdayDomain.match(/^(.+)\.(wd\d+)\.myworkdayjobs\.com$/);
   if (wdMatch) {
@@ -99,11 +102,11 @@ export async function scrapeWorkdayJobs(
 
   for (const domain of domainVariants) {
     try {
-      const url = `https://${domain}/wday/cxs/${companySlug}/${companySlug}_Careers/jobs`;
-      console.log(`Workday: scanning ${domain}...`);
+      const url = `https://${domain}/wday/cxs/${companySlug}/${site}/jobs`;
+      console.log(`Workday: scanning ${domain} (${site})...`);
       const response = await fetch(url, {
         method: "POST",
-        signal: AbortSignal.timeout(15000),
+        signal: AbortSignal.timeout(5000),
         headers: {
           "Content-Type": "application/json",
           "Accept": "application/json",
@@ -127,7 +130,7 @@ export async function scrapeWorkdayJobs(
           title: p.title!,
           company: companyName,
           location: p.locationsText || "Unknown",
-          applyUrl: `https://${domain}/${companySlug}/${companySlug}_Careers/job${p.externalPath}`,
+          applyUrl: `https://${domain}/${companySlug}/${site}/job${p.externalPath}`,
         }));
     } catch (e) {
       console.log(`Workday error for ${domain}:`, e);
@@ -142,7 +145,7 @@ export async function scrapePlainWebsite(url: string, companyName: string): Prom
   try {
     console.log(`Plain: scanning ${url}...`);
     const response = await fetch(url, {
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(5000),
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -154,7 +157,6 @@ export async function scrapePlainWebsite(url: string, companyName: string): Prom
       return [];
     }
     const html = await response.text();
-    // Strip HTML tags to get readable text, limit to 8000 chars
     const text = html
       .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
       .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
@@ -165,7 +167,6 @@ export async function scrapePlainWebsite(url: string, companyName: string): Prom
 
     console.log(`Plain: fetched ${url} (${text.length} chars)`);
 
-    // Return as a single "page" item — Claude will extract individual jobs from the text
     return [
       {
         title: `Jobs at ${companyName} (page scan)`,
