@@ -35,7 +35,7 @@ outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "PORT=5000 pnpm --filter @workspace/api-server run dev"
+args = "PORT=3000 pnpm --filter @workspace/api-server run dev"
 
 [agent]
 stack = "PNPM_WORKSPACE"
