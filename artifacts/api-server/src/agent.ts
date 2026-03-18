@@ -16,6 +16,7 @@ export interface JobMatch {
   applyUrl: string;
   whyGoodFit: string;
   matchScore: number;
+  source: string;
 }
 
 interface CriteriaForAgent {
@@ -70,6 +71,7 @@ Respond ONLY with a JSON object (no markdown, no extra text):
       applyUrl: job.applyUrl,
       whyGoodFit: parsed.whyGoodFit,
       matchScore: parsed.matchScore,
+      source: job.source,
     };
   } catch {
     return null;
@@ -101,4 +103,49 @@ export async function scoreJobsWithClaude(jobs: ScrapedJob[], criteria: Criteria
   }
 
   return results;
+}
+
+export async function tailorResumeWithClaude(
+  jobTitle: string,
+  jobCompany: string,
+  jobDescription: string,
+  baseResume: string
+): Promise<{ tailoredResume: string; coverLetter: string }> {
+  const message = await anthropic.messages.create({
+    model: 'claude-haiku-4-5',
+    max_tokens: 4096,
+    messages: [
+      {
+        role: 'user',
+        content: `You are a professional resume writer. Tailor the candidate's resume and write a cover letter for the following job.
+
+Job Title: ${jobTitle}
+Company: ${jobCompany}
+Job Description:
+${jobDescription.slice(0, 3000)}
+
+Base Resume:
+${baseResume.slice(0, 4000)}
+
+Respond ONLY with a JSON object (no markdown fences):
+{
+  "tailoredResume": "<full tailored resume text, preserving formatting with newlines>",
+  "coverLetter": "<professional cover letter text>"
+}`,
+      },
+    ],
+  });
+
+  const block = message.content[0];
+  if (block.type !== 'text') {
+    return { tailoredResume: baseResume, coverLetter: '' };
+  }
+
+  try {
+    const text = block.text.trim().replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(text) as { tailoredResume: string; coverLetter: string };
+    return parsed;
+  } catch {
+    return { tailoredResume: baseResume, coverLetter: block.text };
+  }
 }
