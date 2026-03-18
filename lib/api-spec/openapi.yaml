@@ -1,15 +1,26 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Job Scout Agent API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: criteria
+    description: Job search criteria and configuration
+  - name: companies
+    description: Target company management
+  - name: jobs
+    description: Job listings and matches
+  - name: resume
+    description: Resume management
+  - name: scout
+    description: Scout agent operations
+  - name: gmail
+    description: Gmail integration
 paths:
   /healthz:
     get:
@@ -24,6 +35,304 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /criteria:
+    get:
+      operationId: getCriteria
+      tags: [criteria]
+      summary: Get job search criteria
+      responses:
+        "200":
+          description: Current criteria
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Criteria"
+    put:
+      operationId: updateCriteria
+      tags: [criteria]
+      summary: Update job search criteria
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCriteriaBody"
+      responses:
+        "200":
+          description: Updated criteria
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Criteria"
+
+  /companies:
+    get:
+      operationId: listCompanies
+      tags: [companies]
+      summary: List target companies
+      responses:
+        "200":
+          description: List of companies
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Company"
+    post:
+      operationId: createCompany
+      tags: [companies]
+      summary: Add a target company
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCompanyBody"
+      responses:
+        "201":
+          description: Created company
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Company"
+
+  /companies/{id}:
+    delete:
+      operationId: deleteCompany
+      tags: [companies]
+      summary: Remove a target company
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /jobs:
+    get:
+      operationId: listJobs
+      tags: [jobs]
+      summary: List job matches
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of job matches
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Job"
+
+  /jobs/{id}:
+    get:
+      operationId: getJob
+      tags: [jobs]
+      summary: Get a job match
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Job match
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "404":
+          description: Not found
+
+  /jobs/{id}/status:
+    patch:
+      operationId: updateJobStatus
+      tags: [jobs]
+      summary: Update job status
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateJobStatusBody"
+      responses:
+        "200":
+          description: Updated job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+
+  /jobs/{id}/generate-docs:
+    post:
+      operationId: generateJobDocs
+      tags: [jobs]
+      summary: Generate tailored resume and cover letter for a job
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Generated documents
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+
+  /resume:
+    get:
+      operationId: getResume
+      tags: [resume]
+      summary: Get the stored resume
+      responses:
+        "200":
+          description: Resume data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Resume"
+    put:
+      operationId: updateResume
+      tags: [resume]
+      summary: Update the resume
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateResumeBody"
+      responses:
+        "200":
+          description: Updated resume
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Resume"
+
+  /scout/run:
+    post:
+      operationId: runScout
+      tags: [scout]
+      summary: Run the job scout agent manually
+      responses:
+        "200":
+          description: Scout run result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScoutRunResult"
+
+  /scout/status:
+    get:
+      operationId: getScoutStatus
+      tags: [scout]
+      summary: Get scout run history
+      responses:
+        "200":
+          description: Scout status
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ScoutRun"
+
+  /gmail/status:
+    get:
+      operationId: getGmailStatus
+      tags: [gmail]
+      summary: Check Gmail connection status
+      responses:
+        "200":
+          description: Gmail status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GmailStatus"
+
+  /gmail/setup-url:
+    get:
+      operationId: getGmailSetupUrl
+      tags: [gmail]
+      summary: Get Gmail OAuth setup URL
+      responses:
+        "200":
+          description: OAuth URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GmailSetupUrl"
+
+  /gmail/callback:
+    get:
+      operationId: gmailCallback
+      tags: [gmail]
+      summary: Handle Gmail OAuth callback
+      parameters:
+        - name: code
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: error
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Connection result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GmailStatus"
+
+  /gmail/disconnect:
+    post:
+      operationId: disconnectGmail
+      tags: [gmail]
+      summary: Disconnect Gmail
+      responses:
+        "200":
+          description: Disconnected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GmailStatus"
+
+  /gmail/send-digest:
+    post:
+      operationId: sendDigestEmail
+      tags: [gmail]
+      summary: Send job digest email manually
+      responses:
+        "200":
+          description: Send result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendDigestResult"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +343,276 @@ components:
       required:
         - status
 
+    Criteria:
+      type: object
+      properties:
+        id:
+          type: integer
+        targetRoles:
+          type: array
+          items:
+            type: string
+        industries:
+          type: array
+          items:
+            type: string
+        minSalary:
+          type: ["integer", "null"]
+        locations:
+          type: array
+          items:
+            type: string
+        mustHave:
+          type: array
+          items:
+            type: string
+        niceToHave:
+          type: array
+          items:
+            type: string
+        avoid:
+          type: array
+          items:
+            type: string
+        yourName:
+          type: string
+        yourEmail:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - targetRoles
+        - industries
+        - locations
+        - mustHave
+        - niceToHave
+        - avoid
+        - yourName
+        - yourEmail
+        - updatedAt
+
+    UpdateCriteriaBody:
+      type: object
+      properties:
+        targetRoles:
+          type: array
+          items:
+            type: string
+        industries:
+          type: array
+          items:
+            type: string
+        minSalary:
+          type: ["integer", "null"]
+        locations:
+          type: array
+          items:
+            type: string
+        mustHave:
+          type: array
+          items:
+            type: string
+        niceToHave:
+          type: array
+          items:
+            type: string
+        avoid:
+          type: array
+          items:
+            type: string
+        yourName:
+          type: string
+        yourEmail:
+          type: string
+
+    Company:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        atsType:
+          type: string
+        atsSlug:
+          type: ["string", "null"]
+        careersUrl:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - name
+        - atsType
+        - createdAt
+
+    CreateCompanyBody:
+      type: object
+      properties:
+        name:
+          type: string
+        atsType:
+          type: string
+          enum: [greenhouse, lever, workday, other]
+        atsSlug:
+          type: ["string", "null"]
+        careersUrl:
+          type: ["string", "null"]
+      required:
+        - name
+        - atsType
+
+    Job:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        company:
+          type: string
+        location:
+          type: string
+        salary:
+          type: ["string", "null"]
+        applyUrl:
+          type: string
+        whyGoodFit:
+          type: string
+        matchScore:
+          type: integer
+        status:
+          type: string
+        tailoredResume:
+          type: ["string", "null"]
+        coverLetter:
+          type: ["string", "null"]
+        scoutRunId:
+          type: ["integer", "null"]
+        foundAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - title
+        - company
+        - location
+        - applyUrl
+        - whyGoodFit
+        - matchScore
+        - status
+        - foundAt
+
+    UpdateJobStatusBody:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    Resume:
+      type: object
+      properties:
+        id:
+          type: integer
+        content:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - content
+        - updatedAt
+
+    UpdateResumeBody:
+      type: object
+      properties:
+        content:
+          type: string
+      required:
+        - content
+
+    ScoutRun:
+      type: object
+      properties:
+        id:
+          type: integer
+        status:
+          type: string
+        jobsFound:
+          type: integer
+        emailSent:
+          type: boolean
+        error:
+          type: ["string", "null"]
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: ["string", "null"]
+      required:
+        - id
+        - status
+        - jobsFound
+        - emailSent
+        - startedAt
+
+    ScoutRunResult:
+      type: object
+      properties:
+        runId:
+          type: integer
+        jobsFound:
+          type: integer
+        emailSent:
+          type: boolean
+        message:
+          type: string
+      required:
+        - runId
+        - jobsFound
+        - emailSent
+        - message
+
+    GmailStatus:
+      type: object
+      properties:
+        connected:
+          type: boolean
+        email:
+          type: ["string", "null"]
+        message:
+          type: string
+      required:
+        - connected
+        - message
+
+    GmailSetupUrl:
+      type: object
+      properties:
+        url:
+          type: string
+        instructions:
+          type: string
+      required:
+        - url
+        - instructions
+
+    SendDigestResult:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        jobsSent:
+          type: integer
+      required:
+        - success
+        - message
+        - jobsSent

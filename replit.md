@@ -1,8 +1,8 @@
-# Workspace
+# Job Scout Agent
 
 ## Overview
 
-pnpm workspace monorepo using TypeScript. Each package manages its own dependencies.
+A full-stack automated job search agent. It fetches jobs from company career pages via public APIs (Greenhouse, Lever), scores them against your criteria using Claude AI, generates tailored resumes and cover letters, and optionally emails you a daily digest via Gmail.
 
 ## Stack
 
@@ -14,83 +14,79 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **Database**: PostgreSQL + Drizzle ORM
 - **Validation**: Zod (`zod/v4`), `drizzle-zod`
 - **API codegen**: Orval (from OpenAPI spec)
+- **AI**: Anthropic Claude (via Replit AI Integrations — no user API key needed)
+- **Frontend**: React + Vite + Tailwind CSS
 - **Build**: esbuild (CJS bundle)
 
 ## Structure
 
 ```text
 artifacts-monorepo/
-├── artifacts/              # Deployable applications
-│   └── api-server/         # Express API server
-├── lib/                    # Shared libraries
+├── artifacts/
+│   ├── api-server/         # Express API server
+│   └── job-scout/          # React + Vite frontend (serves at /)
+├── lib/
 │   ├── api-spec/           # OpenAPI spec + Orval codegen config
 │   ├── api-client-react/   # Generated React Query hooks
 │   ├── api-zod/            # Generated Zod schemas from OpenAPI
-│   └── db/                 # Drizzle ORM schema + DB connection
-├── scripts/                # Utility scripts (single workspace package)
-│   └── src/                # Individual .ts scripts, run via `pnpm --filter @workspace/scripts run <script>`
-├── pnpm-workspace.yaml     # pnpm workspace (artifacts/*, lib/*, lib/integrations/*, scripts)
-├── tsconfig.base.json      # Shared TS options (composite, bundler resolution, es2022)
-├── tsconfig.json           # Root TS project references
-└── package.json            # Root package with hoisted devDeps
+│   ├── db/                 # Drizzle ORM schema + DB connection
+│   └── integrations-anthropic-ai/  # Anthropic AI integration
+├── scripts/                # Utility scripts
+├── pnpm-workspace.yaml
+├── tsconfig.base.json
+├── tsconfig.json
+└── package.json
 ```
 
-## TypeScript & Composite Projects
+## Database Schema
 
-Every package extends `tsconfig.base.json` which sets `composite: true`. The root `tsconfig.json` lists all packages as project references. This means:
+- `criteria` — Job search criteria (target roles, industries, salary, locations, keywords)
+- `companies` — Target companies with ATS type (greenhouse/lever/workday/other) and ATS slug
+- `jobs` — Job matches with scores, status, tailored docs
+- `resume` — User's base resume text
+- `scout_runs` — History of scout agent runs
+- `gmail_tokens` — Gmail OAuth tokens for email sending
 
-- **Always typecheck from the root** — run `pnpm run typecheck` (which runs `tsc --build --emitDeclarationOnly`). This builds the full dependency graph so that cross-package imports resolve correctly. Running `tsc` inside a single package will fail if its dependencies haven't been built yet.
-- **`emitDeclarationOnly`** — we only emit `.d.ts` files during typecheck; actual JS bundling is handled by esbuild/tsx/vite...etc, not `tsc`.
-- **Project references** — when package A depends on package B, A's `tsconfig.json` must list B in its `references` array. `tsc --build` uses this to determine build order and skip up-to-date packages.
+## API Routes
 
-## Root Scripts
+All routes are under `/api`:
+- `GET/PUT /criteria` — Job search criteria
+- `GET/POST /companies`, `DELETE /companies/{id}` — Target companies
+- `GET /jobs`, `GET /jobs/{id}`, `PATCH /jobs/{id}/status`, `POST /jobs/{id}/generate-docs`
+- `GET/PUT /resume`
+- `POST /scout/run`, `GET /scout/status`
+- `GET /gmail/status`, `GET /gmail/setup-url`, `GET /gmail/callback`, `POST /gmail/disconnect`, `POST /gmail/send-digest`
 
-- `pnpm run build` — runs `typecheck` first, then recursively runs `build` in all packages that define it
-- `pnpm run typecheck` — runs `tsc --build --emitDeclarationOnly` using project references
+## Key Server Files
 
-## Packages
+- `artifacts/api-server/src/lib/scraper.ts` — Greenhouse and Lever API fetchers
+- `artifacts/api-server/src/lib/agent.ts` — Claude AI job scoring and doc generation
+- `artifacts/api-server/src/lib/gmail.ts` — Gmail OAuth and email sending
 
-### `artifacts/api-server` (`@workspace/api-server`)
+## Frontend Pages
 
-Express 5 API server. Routes live in `src/routes/` and use `@workspace/api-zod` for request and response validation and `@workspace/db` for persistence.
+1. **Dashboard** — Stats overview, recent matches, scout history, "Run Scout Now" button
+2. **Job Matches** — Filter/browse all jobs, update status, generate tailored docs
+3. **Target Companies** — Add/remove companies with ATS type and slug
+4. **Search Criteria** — Edit all job search preferences
+5. **Base Resume** — Paste full resume text
+6. **Gmail Integration** — OAuth connection, send digest manually
 
-- Entry: `src/index.ts` — reads `PORT`, starts Express
-- App setup: `src/app.ts` — mounts CORS, JSON/urlencoded parsing, routes at `/api`
-- Routes: `src/routes/index.ts` mounts sub-routers; `src/routes/health.ts` exposes `GET /health` (full path: `/api/health`)
-- Depends on: `@workspace/db`, `@workspace/api-zod`
-- `pnpm --filter @workspace/api-server run dev` — run the dev server
-- `pnpm --filter @workspace/api-server run build` — production esbuild bundle (`dist/index.cjs`)
-- Build bundles an allowlist of deps (express, cors, pg, drizzle-orm, zod, etc.) and externalizes the rest
+## Gmail Setup (User-Facing)
 
-### `lib/db` (`@workspace/db`)
+To enable email delivery, the user must:
+1. Create a Google Cloud project at console.cloud.google.com
+2. Enable the Gmail API
+3. Create OAuth 2.0 credentials (Desktop App type) and download the JSON
+4. Add `GMAIL_CLIENT_ID` and `GMAIL_CLIENT_SECRET` secrets in Replit
+5. Set `GMAIL_REDIRECT_URI` to `https://<repl-domain>/api/gmail/callback`
+6. Click "Connect Gmail" in the app and complete OAuth flow
 
-Database layer using Drizzle ORM with PostgreSQL. Exports a Drizzle client instance and schema models.
+## Environment Variables / Secrets Required
 
-- `src/index.ts` — creates a `Pool` + Drizzle instance, exports schema
-- `src/schema/index.ts` — barrel re-export of all models
-- `src/schema/<modelname>.ts` — table definitions with `drizzle-zod` insert schemas (no models definitions exist right now)
-- `drizzle.config.ts` — Drizzle Kit config (requires `DATABASE_URL`, automatically provided by Replit)
-- Exports: `.` (pool, db, schema), `./schema` (schema only)
-
-Production migrations are handled by Replit when publishing. In development, we just use `pnpm --filter @workspace/db run push`, and we fallback to `pnpm --filter @workspace/db run push-force`.
-
-### `lib/api-spec` (`@workspace/api-spec`)
-
-Owns the OpenAPI 3.1 spec (`openapi.yaml`) and the Orval config (`orval.config.ts`). Running codegen produces output into two sibling packages:
-
-1. `lib/api-client-react/src/generated/` — React Query hooks + fetch client
-2. `lib/api-zod/src/generated/` — Zod schemas
-
-Run codegen: `pnpm --filter @workspace/api-spec run codegen`
-
-### `lib/api-zod` (`@workspace/api-zod`)
-
-Generated Zod schemas from the OpenAPI spec (e.g. `HealthCheckResponse`). Used by `api-server` for response validation.
-
-### `lib/api-client-react` (`@workspace/api-client-react`)
-
-Generated React Query hooks and fetch client from the OpenAPI spec (e.g. `useHealthCheck`, `healthCheck`).
-
-### `scripts` (`@workspace/scripts`)
-
-Utility scripts package. Each script is a `.ts` file in `src/` with a corresponding npm script in `package.json`. Run scripts via `pnpm --filter @workspace/scripts run <script>`. Scripts can import any workspace package (e.g., `@workspace/db`) by adding it as a dependency in `scripts/package.json`.
+- `AI_INTEGRATIONS_ANTHROPIC_BASE_URL` — Auto-set by Replit AI integration
+- `AI_INTEGRATIONS_ANTHROPIC_API_KEY` — Auto-set by Replit AI integration
+- `DATABASE_URL` — Auto-set by Replit database
+- `GMAIL_CLIENT_ID` — User must provide (from Google Cloud Console)
+- `GMAIL_CLIENT_SECRET` — User must provide (from Google Cloud Console)
+- `GMAIL_REDIRECT_URI` — User must set to `https://<domain>/api/gmail/callback`

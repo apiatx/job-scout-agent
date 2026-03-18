@@ -1,0 +1,324 @@
+Phase 2 — Install your tools
+Where to go: In your new Repl, find the panel on the left side. Click the icon that looks like a box/cube — that's the Packages tab. Search for and install these one at a time:
+
+playwright
+anthropic
+google-auth-oauthlib
+google-api-python-client
+
+Then click the Shell tab (the >_ icon) and type this exactly, then press Enter:
+playwright install chromium
+This installs the robot browser Playwright uses.
+
+Phase 3 — Create your files
+You'll need 4 files. In Replit, click the + button next to "Files" on the left to create each one.
+
+File 1: my_criteria.py (This is YOUR preferences — edit these yourself)
+This is backend — goes in your main project folder.
+python# YOUR JOB SEARCH CRITERIA - edit these!
+CRITERIA = {
+    "target_roles": ["Enterprise Account Executive", "Senior Account Executive", "Strategic Account Executive"],
+    "industries": ["SaaS", "API tools", "Developer tools", "Fintech"],
+    "min_salary": 150000,  # in USD, base only
+    "locations": ["Remote", "New York", "San Francisco"],
+    "must_have": ["enterprise sales", "SaaS", "quota carrying"],
+    "nice_to_have": ["API", "developer tools", "Series B or later"],
+    "avoid": ["SDR", "BDR", "inbound only", "SMB only"],
+}
+
+# COMPANY CAREER PAGES TO SCAN (add as many as you want)
+COMPANY_PAGES = [
+    "https://www.postman.com/careers/",
+    "https://stripe.com/jobs",
+    "https://www.twilio.com/en-us/company/jobs",
+    "https://boards.greenhouse.io/anthropic",
+    # Add more here!
+]
+
+YOUR_NAME = "Aidan [Your Last Name]"
+YOUR_EMAIL = "your.email@gmail.com"  # where to SEND the daily digest
+SEND_FROM_EMAIL = "your.gmail@gmail.com"  # the Gmail account sending it
+
+File 2: scraper.py (this is the robot that visits job pages)
+This is backend.
+pythonfrom playwright.sync_api import sync_playwright
+from my_criteria import COMPANY_PAGES
+
+def scrape_jobs():
+    all_jobs = []
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        
+        for url in COMPANY_PAGES:
+            try:
+                print(f"Scanning: {url}")
+                page.goto(url, timeout=30000)
+                page.wait_for_timeout(3000)  # wait 3 seconds for page to load
+                
+                # Get all the text on the page
+                text = page.inner_text("body")
+                
+                all_jobs.append({
+                    "source_url": url,
+                    "raw_text": text[:8000]  # first 8000 characters
+                })
+                
+            except Exception as e:
+                print(f"Couldn't scan {url}: {e}")
+        
+        browser.close()
+    
+    return all_jobs
+
+File 3: agent.py (Claude does the smart work here)
+This is backend.
+pythonimport anthropic
+import json
+from my_criteria import CRITERIA, YOUR_NAME
+
+client = anthropic.Anthropic()  # uses your ANTHROPIC_API_KEY automatically
+
+def find_matching_jobs(scraped_pages):
+    """Claude reads all the job pages and pulls out matching jobs"""
+    
+    criteria_text = f"""
+    Target roles: {', '.join(CRITERIA['target_roles'])}
+    Industries: {', '.join(CRITERIA['industries'])}
+    Minimum salary: ${CRITERIA['min_salary']:,} base
+    Locations: {', '.join(CRITERIA['locations'])}
+    Must have: {', '.join(CRITERIA['must_have'])}
+    Nice to have: {', '.join(CRITERIA['nice_to_have'])}
+    Avoid: {', '.join(CRITERIA['avoid'])}
+    """
+    
+    all_matches = []
+    
+    for page in scraped_pages:
+        prompt = f"""
+        I scraped this careers page: {page['source_url']}
+        
+        Here is the text from the page:
+        {page['raw_text']}
+        
+        My job search criteria:
+        {criteria_text}
+        
+        Please find ALL individual job listings on this page that match my criteria.
+        For each matching job, return a JSON array like this:
+        [
+          {{
+            "title": "Job title here",
+            "company": "Company name",
+            "location": "Location",
+            "salary": "Salary if listed, else Unknown",
+            "apply_url": "Direct link if you can find it, else use {page['source_url']}",
+            "why_good_fit": "2-3 sentences explaining why this fits my background in enterprise SaaS sales",
+            "match_score": 85
+          }}
+        ]
+        
+        Only return the JSON array. No other text. If no jobs match, return an empty array: []
+        """
+        
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
+        try:
+            text = response.content[0].text.strip()
+            # Remove markdown code blocks if Claude added them
+            text = text.replace("```json", "").replace("```", "").strip()
+            jobs = json.loads(text)
+            all_matches.extend(jobs)
+        except:
+            print(f"Couldn't parse jobs from {page['source_url']}")
+    
+    # Sort by match score, best first
+    all_matches.sort(key=lambda x: x.get('match_score', 0), reverse=True)
+    return all_matches
+
+
+def tailor_resume_and_cover_letter(job, base_resume):
+    """Claude tailors your resume and writes a cover letter for one job"""
+    
+    prompt = f"""
+    I am {YOUR_NAME}, an enterprise SaaS sales professional.
+    
+    Here is the job I am applying to:
+    Title: {job['title']} at {job['company']}
+    Location: {job['location']}
+    Why it's a good fit: {job['why_good_fit']}
+    
+    Here is my base resume:
+    {base_resume}
+    
+    Please do two things:
+    
+    1. Rewrite my resume summary and bullet points to emphasize the skills and experience most relevant to THIS specific role. Keep it honest — don't add things I didn't do. Just reorder and reword to highlight the best fit.
+    
+    2. Write a compelling, concise cover letter (3 paragraphs max) that:
+    - Opens with why I'm excited about this specific company/role
+    - Connects my enterprise SaaS sales experience to their needs
+    - Closes with a confident call to action
+    
+    Format your response exactly like this:
+    
+    === TAILORED RESUME ===
+    [resume content here]
+    
+    === COVER LETTER ===
+    [cover letter content here]
+    """
+    
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=3000,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    
+    return response.content[0].text
+
+File 4: main.py (this is the brain that runs everything)
+This is backend.
+pythonimport os
+import base64
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from scraper import scrape_jobs
+from agent import find_matching_jobs, tailor_resume_and_cover_letter
+from my_criteria import YOUR_EMAIL, SEND_FROM_EMAIL
+
+# Your base resume — paste the full text of your resume here
+BASE_RESUME = """
+[PASTE YOUR FULL RESUME TEXT HERE]
+
+Example:
+Aidan [Last Name]
+Enterprise Account Executive | SaaS | API Tools
+
+EXPERIENCE
+Postman — Enterprise Account Executive (2023–Present)
+- Managed a $X territory of mid-market and enterprise accounts
+- [etc — paste your real resume here]
+"""
+
+def send_email(subject, html_body):
+    """Send an email via Gmail API"""
+    creds = Credentials.from_authorized_user_file('gmail_token.json')
+    service = build('gmail', 'v1', credentials=creds)
+    
+    message = MIMEMultipart('alternative')
+    message['Subject'] = subject
+    message['From'] = SEND_FROM_EMAIL
+    message['To'] = YOUR_EMAIL
+    
+    part = MIMEText(html_body, 'html')
+    message.attach(part)
+    
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    service.users().messages().send(userId='me', body={'raw': raw}).execute()
+    print("Email sent!")
+
+def build_email_body(jobs_with_docs):
+    """Build a nice HTML email with all the jobs"""
+    html = f"<h1>Your Daily Job Digest</h1><p>Found {len(jobs_with_docs)} matching jobs today!</p><hr>"
+    
+    for i, item in enumerate(jobs_with_docs, 1):
+        job = item['job']
+        docs = item['docs']
+        
+        html += f"""
+        <h2>#{i}: {job['title']} at {job['company']}</h2>
+        <p><strong>Location:</strong> {job['location']}</p>
+        <p><strong>Salary:</strong> {job['salary']}</p>
+        <p><strong>Why it's a great fit:</strong> {job['why_good_fit']}</p>
+        <p><strong>Match score:</strong> {job['match_score']}/100</p>
+        <p><a href="{job['apply_url']}">View Job Posting →</a></p>
+        <details>
+          <summary><strong>Click to see your tailored resume + cover letter</strong></summary>
+          <pre style="white-space: pre-wrap; font-family: sans-serif;">{docs}</pre>
+        </details>
+        <hr>
+        """
+    
+    return html
+
+def run():
+    print("Starting job scout agent...")
+    
+    # Step 1: Scrape job pages
+    print("Step 1: Scraping company career pages...")
+    pages = scrape_jobs()
+    
+    # Step 2: Claude finds matching jobs
+    print("Step 2: Claude is finding matching jobs...")
+    matching_jobs = find_matching_jobs(pages)
+    print(f"Found {len(matching_jobs)} matching jobs!")
+    
+    if not matching_jobs:
+        print("No matching jobs found today. No email sent.")
+        return
+    
+    # Step 3: Claude tailors resume + cover letter for each job (top 5 max)
+    print("Step 3: Tailoring your resume and cover letters...")
+    jobs_with_docs = []
+    for job in matching_jobs[:5]:  # only top 5 to save API costs
+        print(f"  Tailoring for: {job['title']} at {job['company']}")
+        docs = tailor_resume_and_cover_letter(job, BASE_RESUME)
+        jobs_with_docs.append({"job": job, "docs": docs})
+    
+    # Step 4: Send email
+    print("Step 4: Sending your daily digest email...")
+    email_body = build_email_body(jobs_with_docs)
+    send_email("🎯 Your Daily Job Digest", email_body)
+    
+    print("Done! Check your email.")
+
+if __name__ == "__main__":
+    run()
+```
+
+---
+
+### Phase 4 — Add your secrets
+
+**Where to go:** In Replit, click the **lock icon** 🔒 on the left sidebar. It says "Secrets". Add this:
+
+- **Key:** `ANTHROPIC_API_KEY`
+- **Value:** your Anthropic API key (same one from HippoAI)
+
+---
+
+### Phase 5 — Connect Gmail (the trickiest step)
+
+This takes about 10 minutes and only needs to be done once.
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com)
+2. Create a new project (call it "Job Scout")
+3. Search for **Gmail API** and enable it
+4. Go to **Credentials → Create Credentials → OAuth 2.0 Client ID**
+5. Choose **Desktop App**, download the JSON file
+6. Upload that JSON file to your Replit project (drag it in) and rename it `gmail_credentials.json`
+
+Then in your Replit Shell, run:
+```
+python gmail_setup.py
+You'll need to create one more file to do the one-time Gmail login:
+File 5: gmail_setup.py (run this once, then delete it)
+pythonfrom google_auth_oauthlib.flow import InstalledAppFlow
+SCOPES = ['https://www.googleapis.com/auth/gmail.send']
+flow = InstalledAppFlow.from_client_secrets_file('gmail_credentials.json', SCOPES)
+creds = flow.run_local_server(port=0)
+with open('gmail_token.json', 'w') as f:
+    f.write(creds.to_json())
+print("Gmail connected! You can delete this file now.")
+
+Phase 6 — Set up the daily cron job
+Where to go: In Replit, look for the three horizontal lines menu → Deployments or look for a clock/schedule icon.
+Set it to run python main.py every day at 7:00 AM.
