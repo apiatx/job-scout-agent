@@ -307,11 +307,18 @@ function esc(s: unknown): string {
 
 function serveHTML(_req: Request, res: Response): void {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
   res.end(HTML);
 }
 
 app.get('/', serveHTML);
 app.get('/index.html', serveHTML);
+
+// Explicit 404 for everything else — prevents any stale static files from
+// being accidentally served if a dist/ directory exists on disk.
+app.use((_req: Request, res: Response) => {
+  res.status(404).json({ error: 'Not found' });
+});
 
 // ── Start server ──────────────────────────────────────────────────────────
 
