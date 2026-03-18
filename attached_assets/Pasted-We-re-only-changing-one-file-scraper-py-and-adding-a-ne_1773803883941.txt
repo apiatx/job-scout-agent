@@ -1,0 +1,208 @@
+We're only changing one file — scraper.py — and adding a new section to my_criteria.py.
+
+Step 1 — Update my_criteria.py
+Where to go: In your Replit project, click on my_criteria.py in the left file panel.
+Find this section at the bottom of the file (the COMPANY_PAGES list) and replace the entire thing with this:
+python# GREENHOUSE COMPANIES - just the slug (word after /boards/ in their URL)
+GREENHOUSE_COMPANIES = [
+    "anthropic",
+    "stripe",
+    "notion",
+    "figma",
+    "rippling",
+    "brex",
+    "plaid",
+    "checkr",
+    "lattice",
+    # Add more here - find the slug by clicking a job on their careers page
+    # and looking for greenhouse.io in the URL
+]
+
+# LEVER COMPANIES - just the slug (word after jobs.lever.co/ in their URL)
+LEVER_COMPANIES = [
+    "netflix",
+    "spotify",
+    "calm",
+    "duolingo",
+    # Add more here
+]
+
+# PLAIN WEBSITES - for companies NOT on Greenhouse or Lever
+# Playwright will visit these directly (may occasionally get blocked)
+COMPANY_PAGES = [
+    "https://www.salesforce.com/company/careers/",
+    "https://careers.microsoft.com/",
+    # Add more here
+]
+
+Step 2 — Replace scraper.py entirely
+Where to go: Click on scraper.py in the left file panel.
+Select all the text (click inside the file, then press Ctrl+A on Windows or Cmd+A on Mac) and delete it all. Then paste this in:
+pythonimport requests
+from playwright.sync_api import sync_playwright
+from my_criteria import GREENHOUSE_COMPANIES, LEVER_COMPANIES, COMPANY_PAGES
+
+def scrape_greenhouse(slug):
+    """Fetch jobs from Greenhouse public API - no login needed"""
+    try:
+        url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code != 200:
+            print(f"Greenhouse: couldn't find company '{slug}' (status {response.status_code})")
+            return None
+        
+        data = response.json()
+        jobs = data.get("jobs", [])
+        
+        # Convert to plain text so Claude can read it easily
+        text_lines = []
+        for job in jobs:
+            title = job.get("title", "Unknown title")
+            location = job.get("location", {}).get("name", "Unknown location")
+            job_url = job.get("absolute_url", url)
+            text_lines.append(f"JOB: {title} | LOCATION: {location} | URL: {job_url}")
+        
+        full_text = "\n".join(text_lines)
+        print(f"Greenhouse: found {len(jobs)} jobs at {slug}")
+        
+        return {
+            "source_url": f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs",
+            "company_name": slug,
+            "raw_text": full_text
+        }
+        
+    except Exception as e:
+        print(f"Greenhouse error for {slug}: {e}")
+        return None
+
+
+def scrape_lever(slug):
+    """Fetch jobs from Lever public API - no login needed"""
+    try:
+        url = f"https://api.lever.co/v0/postings/{slug}"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code != 200:
+            print(f"Lever: couldn't find company '{slug}' (status {response.status_code})")
+            return None
+        
+        jobs = response.json()
+        
+        # Convert to plain text so Claude can read it easily
+        text_lines = []
+        for job in jobs:
+            title = job.get("text", "Unknown title")
+            location = job.get("categories", {}).get("location", "Unknown location")
+            job_url = job.get("hostedUrl", url)
+            team = job.get("categories", {}).get("team", "")
+            text_lines.append(f"JOB: {title} | LOCATION: {location} | TEAM: {team} | URL: {job_url}")
+        
+        full_text = "\n".join(text_lines)
+        print(f"Lever: found {len(jobs)} jobs at {slug}")
+        
+        return {
+            "source_url": f"https://api.lever.co/v0/postings/{slug}",
+            "company_name": slug,
+            "raw_text": full_text
+        }
+        
+    except Exception as e:
+        print(f"Lever error for {slug}: {e}")
+        return None
+
+
+def scrape_plain_website(url):
+    """Use Playwright to visit a regular careers page as a fallback"""
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            
+            # Pretend to be a real browser so sites don't block us
+            page.set_extra_http_headers({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            })
+            
+            page.goto(url, timeout=30000)
+            page.wait_for_timeout(3000)
+            text = page.inner_text("body")
+            browser.close()
+            
+            print(f"Playwright: scraped {url}")
+            return {
+                "source_url": url,
+                "company_name": url,
+                "raw_text": text[:8000]
+            }
+            
+    except Exception as e:
+        print(f"Playwright error for {url}: {e}")
+        return None
+
+
+def scrape_all_jobs():
+    """Run all three scrapers and combine results"""
+    all_pages = []
+    
+    # API scrapers first (most reliable)
+    print("\n--- Scanning Greenhouse companies ---")
+    for slug in GREENHOUSE_COMPANIES:
+        result = scrape_greenhouse(slug)
+        if result:
+            all_pages.append(result)
+    
+    print("\n--- Scanning Lever companies ---")
+    for slug in LEVER_COMPANIES:
+        result = scrape_lever(slug)
+        if result:
+            all_pages.append(result)
+    
+    # Playwright fallback for plain websites
+    if COMPANY_PAGES:
+        print("\n--- Scanning plain career pages ---")
+        for url in COMPANY_PAGES:
+            result = scrape_plain_website(url)
+            if result:
+                all_pages.append(result)
+    
+    print(f"\nTotal: scraped {len(all_pages)} company job pages")
+    return all_pages
+
+Step 3 — Update one line in main.py
+Where to go: Click on main.py in the left file panel.
+Find this line near the top of the run() function:
+pythonpages = scrape_jobs()
+Replace just that one line with:
+pythonpages = scrape_all_jobs()
+Then at the very top of main.py, find this import line:
+pythonfrom scraper import scrape_jobs
+Replace just that one line with:
+pythonfrom scraper import scrape_all_jobs
+```
+
+---
+
+## Step 4 — Test it
+
+**Where to go:** Click the **Shell** tab (the `>_` icon on the left).
+
+Type this and press Enter:
+```
+python scraper.py
+```
+
+You should see output like:
+```
+--- Scanning Greenhouse companies ---
+Greenhouse: found 47 jobs at anthropic
+Greenhouse: found 312 jobs at stripe
+...
+Total: scraped 12 company job pages
+```
+
+If you see that, everything is working. If any company shows "couldn't find" it just means their slug is slightly different — Google `[company name] greenhouse jobs` to find the right slug in the URL.
+
+Once that test looks good, run the full thing with:
+```
+python main.py

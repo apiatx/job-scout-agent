@@ -2,7 +2,7 @@ import { Router, type IRouter } from "express";
 import { desc, eq } from "drizzle-orm";
 import { db, scoutRunsTable, companiesTable, criteriaTable, jobsTable, resumeTable, gmailTokensTable } from "@workspace/db";
 import { RunScoutResponse, GetScoutStatusResponse } from "@workspace/api-zod";
-import { scrapeGreenhouseJobs, scrapeLeverJobs } from "../lib/scraper.js";
+import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapePlainWebsite } from "../lib/scraper.js";
 import { scoreJobsWithClaude } from "../lib/agent.js";
 import { sendEmailViaGmail, buildDigestEmail } from "../lib/gmail.js";
 
@@ -43,21 +43,37 @@ async function runScoutInBackground(runId: number) {
     if (!criteria) {
       await db.update(scoutRunsTable)
         .set({ status: "failed", error: "No criteria configured", completedAt: new Date() })
-        .where((t) => t.id.eq(runId));
+        .where(eq(scoutRunsTable.id, runId));
       return;
     }
 
     const allJobs: Awaited<ReturnType<typeof scrapeGreenhouseJobs>> = [];
 
-    for (const company of companies) {
-      if (company.atsType === "greenhouse" && company.atsSlug) {
-        const jobs = await scrapeGreenhouseJobs(company.atsSlug);
-        allJobs.push(...jobs.map((j) => ({ ...j, company: company.name })));
-      } else if (company.atsType === "lever" && company.atsSlug) {
-        const jobs = await scrapeLeverJobs(company.atsSlug);
-        allJobs.push(...jobs.map((j) => ({ ...j, company: company.name })));
+    const greenhouse = companies.filter((c) => c.atsType === "greenhouse" && c.atsSlug);
+    const lever = companies.filter((c) => c.atsType === "lever" && c.atsSlug);
+    const plain = companies.filter((c) => (c.atsType === "workday" || c.atsType === "other") && c.careersUrl);
+
+    console.log(`\n--- Scanning ${greenhouse.length} Greenhouse companies ---`);
+    for (const company of greenhouse) {
+      const jobs = await scrapeGreenhouseJobs(company.atsSlug!, company.name);
+      allJobs.push(...jobs);
+    }
+
+    console.log(`\n--- Scanning ${lever.length} Lever companies ---`);
+    for (const company of lever) {
+      const jobs = await scrapeLeverJobs(company.atsSlug!, company.name);
+      allJobs.push(...jobs);
+    }
+
+    if (plain.length > 0) {
+      console.log(`\n--- Scanning ${plain.length} plain career pages ---`);
+      for (const company of plain) {
+        const jobs = await scrapePlainWebsite(company.careersUrl!, company.name);
+        allJobs.push(...jobs);
       }
     }
+
+    console.log(`\nTotal: scraped ${allJobs.length} job listings across all companies`);
 
     if (allJobs.length === 0) {
       await db.update(scoutRunsTable)
