@@ -35,7 +35,7 @@ outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "while true; do PORT=3000 pnpm --filter @workspace/api-server run dev; echo 'Server exited, restarting in 3s...'; sleep 3; done"
+args = "PORT=3000 pnpm --filter @workspace/api-server run dev"
 
 [agent]
 stack = "PNPM_WORKSPACE"
