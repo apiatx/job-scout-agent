@@ -1,0 +1,46 @@
+Add the following additional companies to the existing company lists in agent.ts. Do not remove any existing companies, only add these new ones. Do not change any other logic.
+
+Add to GREENHOUSE companies:
+- nutanix (hyperconverged infrastructure - very strong sales culture)
+- paloaltonetworks (network security hardware + software)
+- zscaler (zero trust network security)
+- rubrik (data security and backup)
+- cohesitydataprotect (data backup and protection)
+- juniper (networking hardware)
+- f5 (application delivery networking)
+- fortinet (network security hardware)
+- extremenetworks (enterprise networking)
+- samsara (IoT sensors, edge hardware, fleet management)
+- crusoeenergy (AI cloud powered by clean energy)
+- digitalrealty (data center colocation)
+- equinix (data center interconnection)
+- veeam (data backup and recovery)
+- zerto (disaster recovery)
+- datadog (infrastructure monitoring - irreplaceable software)
+- snowflake (data cloud - irreplaceable software)
+- databricks (data and AI platform - irreplaceable software)
+- redis (in-memory database - irreplaceable software)
+- cloudera (data platform)
+- teradata (data warehousing)
+- splunk (data observability)
+- dynatrace (infrastructure observability)
+
+Add to LEVER companies:
+- scale-ai (AI data infrastructure)
+- coreweave (AI cloud compute)
+- lambdalabs (AI compute)
+- vast-data (AI storage)
+- weka (AI storage and data pipeline)
+- hammerspace (global data environment)
+- iridium (satellite networking edge)
+- sievert (edge compute)
+
+Add to PLAIN WEBSITE FALLBACKS:
+- https://careers.schneiderelectric.com (power infrastructure for data centers)
+- https://jobs.eaton.com (power management hardware)
+- https://careers.keysight.com (test and measurement hardware)
+- https://www.anritsu.com/en-US/careers (network test equipment)
+- https://careers.td.com (not this one, skip)
+- https://www.supermicro.com/en/about/jobs (AI servers - proceed with caution)
+
+After adding all companies, confirm exactly how many Greenhouse, Lever, and plain website companies are now in the list total.
