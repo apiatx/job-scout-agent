@@ -6,7 +6,7 @@ import router from "./routes";
 
 const app: Express = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const FRONTEND_DIST = path.resolve(__dirname, "../../job-scout/dist/public");
+const FRONTEND_DIST = path.resolve(__dirname, "../dist/public");
 
 app.use(cors());
 app.use(express.json());

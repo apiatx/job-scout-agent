@@ -23,8 +23,9 @@ A full-stack automated job search agent. It fetches jobs from company career pag
 ```text
 artifacts-monorepo/
 ├── artifacts/
-│   ├── api-server/         # Express API server
-│   └── job-scout/          # React + Vite frontend (serves at /)
+│   ├── api-server/         # Express API server + React frontend (served at /)
+│   │   ├── client/         # React + Vite source (builds to dist/public)
+│   │   └── src/            # Express backend source
 ├── lib/
 │   ├── api-spec/           # OpenAPI spec + Orval codegen config
 │   ├── api-client-react/   # Generated React Query hooks
