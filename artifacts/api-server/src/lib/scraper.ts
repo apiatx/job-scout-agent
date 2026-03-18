@@ -70,6 +70,74 @@ export async function scrapeLeverJobs(slug: string, companyName: string): Promis
   }
 }
 
+interface WorkdayJobPosting {
+  title?: string;
+  locationsText?: string;
+  externalPath?: string;
+}
+
+interface WorkdayResponse {
+  total?: number;
+  jobPostings?: WorkdayJobPosting[];
+}
+
+export async function scrapeWorkdayJobs(
+  companySlug: string,
+  workdayDomain: string,
+  companyName: string
+): Promise<ScrapedJob[]> {
+  // Try the given domain first, then fallback to wd1/wd3/wd5 variants if it fails
+  const domainVariants = [workdayDomain];
+  const wdMatch = workdayDomain.match(/^(.+)\.(wd\d+)\.myworkdayjobs\.com$/);
+  if (wdMatch) {
+    const [, prefix] = wdMatch;
+    for (const n of ["wd1", "wd3", "wd5"]) {
+      const variant = `${prefix}.${n}.myworkdayjobs.com`;
+      if (variant !== workdayDomain) domainVariants.push(variant);
+    }
+  }
+
+  for (const domain of domainVariants) {
+    try {
+      const url = `https://${domain}/wday/cxs/${companySlug}/${companySlug}_Careers/jobs`;
+      console.log(`Workday: scanning ${domain}...`);
+      const response = await fetch(url, {
+        method: "POST",
+        signal: AbortSignal.timeout(15000),
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        },
+        body: JSON.stringify({ limit: 20, offset: 0, searchText: "account executive" }),
+      });
+
+      if (!response.ok) {
+        console.log(`Workday: ${domain} returned ${response.status}, trying next variant...`);
+        continue;
+      }
+
+      const data = (await response.json()) as WorkdayResponse;
+      const postings = data.jobPostings ?? [];
+      console.log(`Workday: found ${postings.length} jobs at ${domain}`);
+
+      return postings
+        .filter((p) => p.title && p.externalPath)
+        .map((p) => ({
+          title: p.title!,
+          company: companyName,
+          location: p.locationsText || "Unknown",
+          applyUrl: `https://${domain}/${companySlug}/${companySlug}_Careers/job${p.externalPath}`,
+        }));
+    } catch (e) {
+      console.log(`Workday error for ${domain}:`, e);
+    }
+  }
+
+  console.log(`Workday: all domain variants failed for ${companySlug}`);
+  return [];
+}
+
 export async function scrapePlainWebsite(url: string, companyName: string): Promise<ScrapedJob[]> {
   try {
     console.log(`Plain: scanning ${url}...`);

@@ -2,9 +2,27 @@ import { Router, type IRouter } from "express";
 import { desc, eq } from "drizzle-orm";
 import { db, scoutRunsTable, companiesTable, criteriaTable, jobsTable, resumeTable, gmailTokensTable } from "@workspace/db";
 import { RunScoutResponse, GetScoutStatusResponse } from "@workspace/api-zod";
-import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapePlainWebsite } from "../lib/scraper.js";
+import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapePlainWebsite, scrapeWorkdayJobs } from "../lib/scraper.js";
 import { scoreJobsWithClaude } from "../lib/agent.js";
 import { sendEmailViaGmail, buildDigestEmail } from "../lib/gmail.js";
+
+const WORKDAY_COMPANIES = [
+  { slug: "cisco", domain: "cisco.wd5.myworkdayjobs.com", name: "Cisco" },
+  { slug: "dell", domain: "dell.wd1.myworkdayjobs.com", name: "Dell Technologies" },
+  { slug: "hpe", domain: "hpe.wd5.myworkdayjobs.com", name: "HPE" },
+  { slug: "intel", domain: "intel.wd1.myworkdayjobs.com", name: "Intel" },
+  { slug: "amd", domain: "amd.wd5.myworkdayjobs.com", name: "AMD" },
+  { slug: "micron", domain: "micron.wd1.myworkdayjobs.com", name: "Micron" },
+  { slug: "seagate", domain: "seagate.wd1.myworkdayjobs.com", name: "Seagate" },
+  { slug: "marvell", domain: "marvell.wd1.myworkdayjobs.com", name: "Marvell" },
+  { slug: "vertiv", domain: "vertiv.wd1.myworkdayjobs.com", name: "Vertiv" },
+  { slug: "equinix", domain: "equinix.wd1.myworkdayjobs.com", name: "Equinix" },
+  { slug: "fortinet", domain: "fortinet.wd1.myworkdayjobs.com", name: "Fortinet" },
+  { slug: "f5", domain: "f5.wd5.myworkdayjobs.com", name: "F5" },
+  { slug: "nutanix", domain: "nutanix.wd1.myworkdayjobs.com", name: "Nutanix" },
+  { slug: "extremenetworks", domain: "extremenetworks.wd5.myworkdayjobs.com", name: "Extreme Networks" },
+  { slug: "ciena", domain: "ciena.wd5.myworkdayjobs.com", name: "Ciena" },
+];
 
 const router: IRouter = Router();
 
@@ -71,6 +89,12 @@ async function runScoutInBackground(runId: number) {
         const jobs = await scrapePlainWebsite(company.careersUrl!, company.name);
         allJobs.push(...jobs);
       }
+    }
+
+    console.log(`\n--- Scanning ${WORKDAY_COMPANIES.length} Workday companies ---`);
+    for (const company of WORKDAY_COMPANIES) {
+      const jobs = await scrapeWorkdayJobs(company.slug, company.domain, company.name);
+      allJobs.push(...jobs);
     }
 
     console.log(`\nTotal: scraped ${allJobs.length} job listings across all companies`);

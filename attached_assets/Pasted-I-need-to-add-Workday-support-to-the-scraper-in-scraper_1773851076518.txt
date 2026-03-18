@@ -1,0 +1,30 @@
+I need to add Workday support to the scraper in scraper.ts. 
+
+Add a new function called scrapeWorkdayJobs that works like this:
+- Takes a companySlug (like "cisco") and workdayDomain (like "cisco.wd5.myworkdayjobs.com") and companyName
+- Fetches from: https://[workdayDomain]/wday/cxs/[companySlug]/[companySlug]_Careers/jobs
+- Send a POST request with body: {"limit":20,"offset":0,"searchText":"account executive"}
+- Parse the response for job listings including title, location, and externalPath
+- Build apply URL as: https://[workdayDomain]/[companySlug]/[companySlug]_Careers/job/[externalPath]
+- Return results in the same ScrapedJob format as the other scrapers
+
+Then add a WORKDAY_COMPANIES list in agent.ts with these companies:
+- { slug: "cisco", domain: "cisco.wd5.myworkdayjobs.com", name: "Cisco" }
+- { slug: "dell", domain: "dell.wd1.myworkdayjobs.com", name: "Dell Technologies" }
+- { slug: "hpe", domain: "hpe.wd5.myworkdayjobs.com", name: "HPE" }
+- { slug: "intel", domain: "intel.wd1.myworkdayjobs.com", name: "Intel" }
+- { slug: "amd", domain: "amd.wd5.myworkdayjobs.com", name: "AMD" }
+- { slug: "micron", domain: "micron.wd1.myworkdayjobs.com", name: "Micron" }
+- { slug: "seagate", domain: "seagate.wd1.myworkdayjobs.com", name: "Seagate" }
+- { slug: "marvell", domain: "marvell.wd1.myworkdayjobs.com", name: "Marvell" }
+- { slug: "vertiv", domain: "vertiv.wd1.myworkdayjobs.com", name: "Vertiv" }
+- { slug: "equinix", domain: "equinix.wd1.myworkdayjobs.com", name: "Equinix" }
+- { slug: "fortinet", domain: "fortinet.wd1.myworkdayjobs.com", name: "Fortinet" }
+- { slug: "f5", domain: "f5.wd5.myworkdayjobs.com", name: "F5" }
+- { slug: "nutanix", domain: "nutanix.wd1.myworkdayjobs.com", name: "Nutanix" }
+- { slug: "extremenetworks", domain: "extremenetworks.wd5.myworkdayjobs.com", name: "Extreme Networks" }
+- { slug: "ciena", domain: "ciena.wd5.myworkdayjobs.com", name: "Ciena" }
+
+Note: the exact Workday domain numbers (wd1, wd3, wd5) may vary per company — if a fetch fails with a 404, try wd1, wd3, and wd5 variants automatically.
+
+Make sure the main scout function in agent.ts calls scrapeWorkdayJobs for each company in the WORKDAY_COMPANIES list, the same way it already calls scrapeGreenhouseJobs and scrapeLeverJobs.
