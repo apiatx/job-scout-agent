@@ -32,3 +32,7 @@ channel = "stable-25_05"
 
 [userenv.shared]
 GMAIL_REDIRECT_URI = "https://c12ad21f-8216-45ab-b03f-5e735925225d-00-34c2t5oabpvff.riker.replit.dev/api/gmail/callback"
+
+[[ports]]
+localPort = 8080
+externalPort = 80
