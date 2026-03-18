@@ -16,13 +16,35 @@ router.get("/criteria", async (_req, res): Promise<void> => {
     const [created] = await db
       .insert(criteriaTable)
       .values({
-        targetRoles: ["Enterprise Account Executive", "Senior Account Executive"],
-        industries: ["SaaS", "API tools", "Developer tools"],
+        targetRoles: [
+          "Enterprise Account Executive",
+          "Strategic Account Executive",
+          "Senior Account Executive",
+          "Regional Sales Manager",
+          "Sales Director",
+          "Major Account Executive",
+          "Named Account Executive",
+        ],
+        industries: [
+          "AI Infrastructure",
+          "Data Center Hardware",
+          "Semiconductors",
+          "Networking Hardware",
+          "Storage Hardware",
+          "Optical Networking",
+          "Edge Computing",
+          "Power & Cooling Infrastructure",
+          "Server Hardware",
+        ],
         minSalary: 150000,
-        locations: ["Remote", "New York", "San Francisco"],
-        mustHave: ["enterprise sales", "SaaS"],
-        niceToHave: ["API", "developer tools"],
-        avoid: ["SDR", "BDR", "SMB only"],
+        locations: ["Remote", "New York", "San Francisco", "Austin", "Boston", "Seattle", "Chicago"],
+        mustHave: [
+          "enterprise sales",
+          "quota carrying",
+          "hardware OR infrastructure OR networking OR storage OR semiconductor OR compute OR optical",
+        ],
+        niceToHave: ["AI", "data center", "GPU", "NVIDIA", "hunter", "new logo"],
+        avoid: ["SDR", "BDR", "inbound only", "SMB only", "pure SaaS", "marketing", "recruiting"],
         yourName: "",
         yourEmail: "",
       })

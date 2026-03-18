@@ -1,0 +1,56 @@
+I need you to update the job search criteria and company list in agent.ts to focus exclusively on hardware, AI infrastructure, semiconductors, networking, storage, and optical companies. Do not change any other logic — only update the criteria and company lists.
+
+Replace whatever criteria and company configuration exists with this:
+
+JOB CRITERIA:
+- Target roles: Enterprise Account Executive, Strategic Account Executive, Senior Account Executive, Regional Sales Manager, Sales Director, Major Account Executive, Named Account Executive
+- Industries: AI Infrastructure, Data Center Hardware, Semiconductors, Networking Hardware, Storage Hardware, Optical Networking, Edge Computing, Power & Cooling Infrastructure, Server Hardware
+- Must have: enterprise sales, quota carrying, hardware OR infrastructure OR networking OR storage OR semiconductor OR compute OR optical
+- Nice to have: AI, data center, GPU, NVIDIA, hunter, new logo
+- Avoid: SDR, BDR, inbound only, SMB only, pure SaaS, marketing, recruiting
+- Software exceptions (these are OK): Oracle database, Snowflake, Databricks, NetSuite, SAP
+- Min salary: $150,000 base
+- Locations: Remote, New York, San Francisco, Austin, Boston, Seattle, Chicago
+
+GREENHOUSE COMPANIES (use these exact slugs):
+- nvidia (GPUs, AI compute - Tier 1)
+- delltech (AI servers - Tier 1)
+- purestorage (all-flash AI storage - Tier 1)
+- aristanw (AI data center networking - Tier 1)
+- lumentum (optical networking - Tier 1)
+- coherent (optical transceivers - Tier 1)
+- marvell (networking semiconductors - Tier 1)
+- broadcom (networking silicon, custom ASICs - Tier 1)
+- micron (HBM memory, DRAM, NAND - Tier 1)
+- amd (CPUs, GPUs for AI - Tier 2)
+- cisco (networking - Tier 2)
+- hpe (servers, networking, storage - Tier 2)
+- netapp (storage, data management - Tier 2)
+- seagate (storage - Tier 2)
+- westerndigital (storage - Tier 2)
+- oracle (database, cloud infra - Tier 3)
+- ibm (enterprise infrastructure - Tier 3)
+- commscope (data center cabling infrastructure)
+- calix (cloud and software platforms for broadband)
+- ciena (optical networking equipment)
+- infinera (optical networking)
+- viavi (network test and optical)
+- sycamore (networking)
+- coreweave (AI cloud infrastructure)
+- lambdalabs (AI compute cloud)
+
+LEVER COMPANIES (use these exact slugs):
+- solidigm (NAND storage)
+- tenstorrent (AI accelerators)
+- groq (AI inference chips)
+- cerebras (AI chips)
+- sambanova (AI hardware)
+- fungible (data processing units)
+
+PLAIN WEBSITE FALLBACKS:
+- https://careers.vertiv.com (power and cooling for data centers - Tier 1 underrated pick)
+- https://www.intel.com/content/www/us/en/jobs/jobs-at-intel.html (CPUs, Gaudi AI chips)
+- https://careers.broadcom.com (networking silicon)
+- https://jobs.juniper.net (networking, now HPE)
+
+After updating, confirm the changes are saved and tell me which file was modified.
