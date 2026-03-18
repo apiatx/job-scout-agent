@@ -1,0 +1,103 @@
+The email will look great — Gmail renders HTML fully, so we can make it look like a proper digest newsletter, not a wall of text.
+Here's exactly what we can make it look like:Check frontend design skillCheck frontend design skillHere's a preview of exactly what your daily email digest will look like:Created a file, read a fileCreated a file, read a fileThat's exactly what you'd receive in your inbox every morning. To make the actual email look like this, you only need to update one function in main.py.
+
+Where to go: Open main.py, find the build_email_body function, and replace the entire function with this:
+pythondef build_email_body(jobs_with_docs):
+    """Build a nicely formatted HTML email"""
+    
+    job_count = len(jobs_with_docs)
+    top_score = max([j['job'].get('match_score', 0) for j in jobs_with_docs]) if jobs_with_docs else 0
+    from datetime import datetime
+    today = datetime.now().strftime("%a %b %d %Y")
+    
+    html = f"""
+    <div style="max-width:640px; margin:0 auto; font-family:Arial,sans-serif; background:#0f0f0f; color:#e8e6e0; padding:32px 16px;">
+      
+      <!-- Header -->
+      <div style="padding:32px 0 24px; border-bottom:1px solid #2a2a2a; margin-bottom:28px;">
+        <div style="display:flex; justify-content:space-between; margin-bottom:12px;">
+          <span style="font-size:11px; color:#666; letter-spacing:0.1em; text-transform:uppercase;">Job Scout Agent</span>
+          <span style="font-size:11px; color:#444;">{today}</span>
+        </div>
+        <h1 style="font-size:26px; font-weight:600; color:#f0ede6; margin-bottom:8px;">{job_count} new match{"es" if job_count != 1 else ""} found today</h1>
+        <p style="font-size:13px; color:#666;">Your daily job digest is ready.</p>
+      </div>
+      
+      <!-- Stats bar -->
+      <div style="background:#161616; border:1px solid #222; border-radius:10px; padding:16px 24px; margin-bottom:28px; display:flex; gap:24px;">
+        <div><div style="font-size:22px; font-weight:600; color:#f0ede6;">{job_count}</div><div style="font-size:10px; color:#444; text-transform:uppercase; letter-spacing:0.1em;">Matches</div></div>
+        <div style="width:1px; background:#222;"></div>
+        <div><div style="font-size:22px; font-weight:600; color:#f0ede6;">{top_score}</div><div style="font-size:10px; color:#444; text-transform:uppercase; letter-spacing:0.1em;">Top score</div></div>
+        <div style="width:1px; background:#222;"></div>
+        <div><div style="font-size:22px; font-weight:600; color:#f0ede6;">{today.split()[3]}</div><div style="font-size:10px; color:#444; text-transform:uppercase; letter-spacing:0.1em;">Date</div></div>
+      </div>
+    """
+    
+    for i, item in enumerate(jobs_with_docs, 1):
+        job = item['job']
+        docs = item['docs']
+        score = job.get('match_score', 0)
+        score_bar_width = f"{score}%"
+        rank_label = "Best fit" if i == 1 else f"#{i}"
+        
+        # Split docs into resume and cover letter
+        resume_text = ""
+        cover_text = ""
+        if "=== TAILORED RESUME ===" in docs and "=== COVER LETTER ===" in docs:
+            parts = docs.split("=== COVER LETTER ===")
+            resume_text = parts[0].replace("=== TAILORED RESUME ===", "").strip()
+            cover_text = parts[1].strip() if len(parts) > 1 else ""
+        else:
+            resume_text = docs
+        
+        html += f"""
+        <!-- Job Card #{i} -->
+        <div style="background:#161616; border:1px solid #2a2a2a; border-radius:12px; margin-bottom:20px; overflow:hidden;">
+          
+          <div style="padding:20px 24px 14px; border-bottom:1px solid #222;">
+            <div style="font-size:10px; color:#555; letter-spacing:0.1em; text-transform:uppercase; margin-bottom:8px;">Match #{i:02d} — {rank_label}</div>
+            <div style="font-size:17px; font-weight:600; color:#f0ede6; margin-bottom:4px;">{job['title']}</div>
+            <div style="font-size:14px; color:#c8a96e; font-weight:500;">{job['company']}</div>
+          </div>
+          
+          <div style="padding:12px 24px; border-bottom:1px solid #1e1e1e; font-size:12px; color:#666;">
+            📍 {job['location']} &nbsp;&nbsp; 💰 {job['salary']} &nbsp;&nbsp; 🔗 via job board
+          </div>
+          
+          <div style="padding:14px 24px; border-bottom:1px solid #1e1e1e;">
+            <div style="display:flex; justify-content:space-between; font-size:11px; color:#555; margin-bottom:6px;">
+              <span>MATCH SCORE</span><span style="color:#c8a96e;">{score} / 100</span>
+            </div>
+            <div style="height:3px; background:#222; border-radius:2px;">
+              <div style="height:3px; width:{score_bar_width}; background:#c8a96e; border-radius:2px;"></div>
+            </div>
+          </div>
+          
+          <div style="padding:14px 24px; border-bottom:1px solid #1e1e1e;">
+            <div style="font-size:10px; color:#444; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:6px;">Why it fits</div>
+            <div style="font-size:13px; color:#999; line-height:1.6;">{job['why_good_fit']}</div>
+          </div>
+          
+          <div style="padding:14px 24px; border-bottom:1px solid #1e1e1e;">
+            <a href="{job['apply_url']}" style="background:#c8a96e; color:#0f0f0f; text-decoration:none; font-size:12px; font-weight:600; padding:8px 18px; border-radius:6px; display:inline-block;">View posting →</a>
+          </div>
+          
+          <div style="margin:0 24px 20px; background:#111; border:1px solid #222; border-radius:8px; overflow:hidden;">
+            <div style="padding:10px 16px; border-bottom:1px solid #1a1a1a; font-size:10px; color:#555; text-transform:uppercase; letter-spacing:0.1em;">Tailored resume</div>
+            <pre style="padding:14px 16px; font-size:11px; line-height:1.7; color:#666; font-family:monospace; white-space:pre-wrap; margin:0;">{resume_text[:1500]}{"..." if len(resume_text) > 1500 else ""}</pre>
+            
+            <div style="padding:10px 16px; border-top:1px solid #1a1a1a; border-bottom:1px solid #1a1a1a; font-size:10px; color:#555; text-transform:uppercase; letter-spacing:0.1em;">Cover letter</div>
+            <pre style="padding:14px 16px; font-size:11px; line-height:1.7; color:#666; font-family:monospace; white-space:pre-wrap; margin:0;">{cover_text[:1000]}{"..." if len(cover_text) > 1000 else ""}</pre>
+          </div>
+          
+        </div>
+        """
+    
+    html += """
+      <div style="margin-top:32px; padding-top:20px; border-top:1px solid #1e1e1e; font-size:11px; color:#333;">
+        Job Scout Agent · Running on Replit · Next run: tomorrow 7:00am
+      </div>
+    </div>
+    """
+    
+    return html

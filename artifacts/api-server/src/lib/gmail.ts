@@ -99,37 +99,114 @@ export function buildDigestEmail(
     coverLetter?: string | null;
   }>
 ): string {
-  const jobsHtml = jobs
-    .map(
-      (job, i) => `
-    <div style="border:1px solid #e2e8f0;border-radius:8px;padding:20px;margin-bottom:24px;">
-      <h2 style="margin:0 0 8px;color:#1a202c;">#${i + 1}: ${job.title} at ${job.company}</h2>
-      <p style="margin:4px 0;color:#4a5568;"><strong>Location:</strong> ${job.location}</p>
-      ${job.salary ? `<p style="margin:4px 0;color:#4a5568;"><strong>Salary:</strong> ${job.salary}</p>` : ""}
-      <p style="margin:4px 0;color:#4a5568;"><strong>Match score:</strong> ${job.matchScore}/100</p>
-      <p style="margin:8px 0;color:#4a5568;">${job.whyGoodFit}</p>
-      <a href="${job.applyUrl}" style="display:inline-block;background:#3182ce;color:white;padding:8px 16px;border-radius:4px;text-decoration:none;margin-top:8px;">View Job →</a>
-      ${
-        job.tailoredResume || job.coverLetter
-          ? `<details style="margin-top:16px;">
-          <summary style="cursor:pointer;font-weight:600;color:#2d3748;">Tailored Resume & Cover Letter</summary>
-          ${job.coverLetter ? `<h3 style="margin:16px 0 8px;">Cover Letter</h3><pre style="white-space:pre-wrap;font-family:sans-serif;color:#2d3748;">${job.coverLetter}</pre>` : ""}
-          ${job.tailoredResume ? `<h3 style="margin:16px 0 8px;">Tailored Resume</h3><pre style="white-space:pre-wrap;font-family:sans-serif;color:#2d3748;">${job.tailoredResume}</pre>` : ""}
-        </details>`
-          : ""
-      }
-    </div>
-  `
-    )
+  const jobCount = jobs.length;
+  const topScore = jobs.length > 0 ? Math.max(...jobs.map((j) => j.matchScore)) : 0;
+  const today = new Date().toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "2-digit",
+    year: "numeric",
+  });
+  const year = new Date().getFullYear().toString();
+
+  const jobCards = jobs
+    .map((job, i) => {
+      const rank = i + 1;
+      const rankLabel = rank === 1 ? "Best fit" : `#${rank}`;
+      const scoreBarWidth = `${job.matchScore}%`;
+      const resume = (job.tailoredResume || "").slice(0, 1500);
+      const resumeTruncated = (job.tailoredResume || "").length > 1500;
+      const cover = (job.coverLetter || "").slice(0, 1000);
+      const coverTruncated = (job.coverLetter || "").length > 1000;
+
+      return `
+        <div style="background:#161616;border:1px solid #2a2a2a;border-radius:12px;margin-bottom:20px;overflow:hidden;">
+
+          <div style="padding:20px 24px 14px;border-bottom:1px solid #222;">
+            <div style="font-size:10px;color:#555;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:8px;">Match #${String(rank).padStart(2, "0")} — ${rankLabel}</div>
+            <div style="font-size:17px;font-weight:600;color:#f0ede6;margin-bottom:4px;">${job.title}</div>
+            <div style="font-size:14px;color:#c8a96e;font-weight:500;">${job.company}</div>
+          </div>
+
+          <div style="padding:12px 24px;border-bottom:1px solid #1e1e1e;font-size:12px;color:#666;">
+            📍 ${job.location}${job.salary ? `&nbsp;&nbsp; 💰 ${job.salary}` : ""}
+          </div>
+
+          <div style="padding:14px 24px;border-bottom:1px solid #1e1e1e;">
+            <div style="display:flex;justify-content:space-between;font-size:11px;color:#555;margin-bottom:6px;">
+              <span>MATCH SCORE</span><span style="color:#c8a96e;">${job.matchScore} / 100</span>
+            </div>
+            <div style="height:3px;background:#222;border-radius:2px;">
+              <div style="height:3px;width:${scoreBarWidth};background:#c8a96e;border-radius:2px;"></div>
+            </div>
+          </div>
+
+          <div style="padding:14px 24px;border-bottom:1px solid #1e1e1e;">
+            <div style="font-size:10px;color:#444;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:6px;">Why it fits</div>
+            <div style="font-size:13px;color:#999;line-height:1.6;">${job.whyGoodFit}</div>
+          </div>
+
+          <div style="padding:14px 24px;border-bottom:1px solid #1e1e1e;">
+            <a href="${job.applyUrl}" style="background:#c8a96e;color:#0f0f0f;text-decoration:none;font-size:12px;font-weight:600;padding:8px 18px;border-radius:6px;display:inline-block;">View posting →</a>
+          </div>
+
+          ${
+            resume || cover
+              ? `<div style="margin:0 24px 20px;background:#111;border:1px solid #222;border-radius:8px;overflow:hidden;">
+              ${
+                resume
+                  ? `<div style="padding:10px 16px;border-bottom:1px solid #1a1a1a;font-size:10px;color:#555;text-transform:uppercase;letter-spacing:0.1em;">Tailored resume</div>
+                <pre style="padding:14px 16px;font-size:11px;line-height:1.7;color:#666;font-family:monospace;white-space:pre-wrap;margin:0;">${resume}${resumeTruncated ? "..." : ""}</pre>`
+                  : ""
+              }
+              ${
+                cover
+                  ? `<div style="padding:10px 16px;border-top:1px solid #1a1a1a;border-bottom:1px solid #1a1a1a;font-size:10px;color:#555;text-transform:uppercase;letter-spacing:0.1em;">Cover letter</div>
+                <pre style="padding:14px 16px;font-size:11px;line-height:1.7;color:#666;font-family:monospace;white-space:pre-wrap;margin:0;">${cover}${coverTruncated ? "..." : ""}</pre>`
+                  : ""
+              }
+            </div>`
+              : ""
+          }
+
+        </div>`;
+    })
     .join("");
 
   return `
-    <html><body style="font-family:sans-serif;max-width:800px;margin:0 auto;padding:20px;color:#2d3748;">
-      <h1 style="color:#1a202c;">Your Daily Job Digest</h1>
-      <p style="color:#4a5568;">Found <strong>${jobs.length}</strong> matching jobs today!</p>
-      <hr style="border:1px solid #e2e8f0;margin:20px 0;" />
-      ${jobsHtml}
-      <p style="color:#718096;font-size:12px;margin-top:32px;">Sent by Job Scout Agent</p>
-    </body></html>
+    <div style="max-width:640px;margin:0 auto;font-family:Arial,sans-serif;background:#0f0f0f;color:#e8e6e0;padding:32px 16px;">
+
+      <div style="padding:32px 0 24px;border-bottom:1px solid #2a2a2a;margin-bottom:28px;">
+        <div style="margin-bottom:12px;">
+          <span style="font-size:11px;color:#666;letter-spacing:0.1em;text-transform:uppercase;">Job Scout Agent</span>
+          <span style="font-size:11px;color:#444;float:right;">${today}</span>
+        </div>
+        <h1 style="font-size:26px;font-weight:600;color:#f0ede6;margin:0 0 8px;">${jobCount} new match${jobCount !== 1 ? "es" : ""} found today</h1>
+        <p style="font-size:13px;color:#666;margin:0;">Your daily job digest is ready.</p>
+      </div>
+
+      <div style="background:#161616;border:1px solid #222;border-radius:10px;padding:16px 24px;margin-bottom:28px;">
+        <table style="border-collapse:collapse;width:100%"><tr>
+          <td style="padding:0 16px 0 0;">
+            <div style="font-size:22px;font-weight:600;color:#f0ede6;">${jobCount}</div>
+            <div style="font-size:10px;color:#444;text-transform:uppercase;letter-spacing:0.1em;">Matches</div>
+          </td>
+          <td style="padding:0 16px;border-left:1px solid #222;">
+            <div style="font-size:22px;font-weight:600;color:#f0ede6;">${topScore}</div>
+            <div style="font-size:10px;color:#444;text-transform:uppercase;letter-spacing:0.1em;">Top score</div>
+          </td>
+          <td style="padding:0 0 0 16px;border-left:1px solid #222;">
+            <div style="font-size:22px;font-weight:600;color:#f0ede6;">${year}</div>
+            <div style="font-size:10px;color:#444;text-transform:uppercase;letter-spacing:0.1em;">Year</div>
+          </td>
+        </tr></table>
+      </div>
+
+      ${jobCards}
+
+      <div style="margin-top:32px;padding-top:20px;border-top:1px solid #1e1e1e;font-size:11px;color:#333;">
+        Job Scout Agent · Running on Replit · Next run: tomorrow 7:00am
+      </div>
+    </div>
   `;
 }
