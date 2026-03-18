@@ -968,9 +968,12 @@ async function loadStats() {
 }
 
 // ── jobs ─────────────────────────────────────────────────────────────────
+var _jobsById = {};
 async function loadJobs() {
   var res = await fetch('/api/jobs?min_score=60');
   var jobs = await res.json();
+  _jobsById = {};
+  jobs.forEach(function(j) { _jobsById[j.id] = j; });
   var grid = document.getElementById('jobs-grid');
   var cnt  = document.getElementById('jobs-count');
   if (!jobs.length) {
@@ -998,7 +1001,7 @@ async function loadJobs() {
         (j.why_good_fit ? '<div class="card-why">' + esc(j.why_good_fit) + '</div>' : '') +
         '<div class="card-foot">' +
           '<a href="' + esc(j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-gold btn-sm">View Posting \\u2192</a>' +
-          '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ',\\'' + esc(j.title).replace(/'/g,"\\\\'") + '\\',\\'' + esc(j.company).replace(/'/g,"\\\\'") + '\\')">Tailor Resume</button>' +
+          '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ')">Tailor Resume</button>' +
         '</div>' +
       '</div>';
   });
@@ -1056,7 +1059,10 @@ function copyText(id) {
   var text = document.getElementById(id).innerText;
   navigator.clipboard.writeText(text);
 }
-async function tailorResume(jobId, title, company) {
+async function tailorResume(jobId) {
+  var j = _jobsById[jobId] || {};
+  var title = j.title || '';
+  var company = j.company || '';
   var modal = document.getElementById('tailor-modal');
   document.getElementById('tailor-title').textContent = title;
   document.getElementById('tailor-company').textContent = company;
