@@ -1,30 +1,7 @@
 modules = ["nodejs-24", "postgresql-16"]
 
-[[artifacts]]
-id = "artifacts/api-server"
-
-[[artifacts]]
-id = "artifacts/mockup-sandbox"
-
-[deployment]
-router = "application"
-deploymentTarget = "autoscale"
-
-[deployment.postBuild]
-args = ["pnpm", "store", "prune"]
-env = { "CI" = "true" }
-
 [workflows]
-runButton = "Project"
-
-[[workflows.workflow]]
-name = "Project"
-mode = "parallel"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Start application"
+runButton = "Start application"
 
 [[workflows.workflow]]
 name = "Start application"
@@ -35,11 +12,8 @@ outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "pnpm --filter @workspace/api-server run dev"
-
-[agent]
-stack = "PNPM_WORKSPACE"
-expertMode = true
+args = "cd artifacts/api-server && PORT=8080 npx tsx ./src/index.ts"
+waitForPort = 8080
 
 [postMerge]
 path = "scripts/post-merge.sh"
