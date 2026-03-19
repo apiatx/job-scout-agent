@@ -1085,6 +1085,7 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .card-why{padding:12px 18px;border-bottom:1px solid #1e1e1e;font-size:12px;color:#999;line-height:1.6}
 .card-foot{padding:12px 18px;display:flex;gap:8px;flex-wrap:wrap}
 .source-badge{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;background:#222;color:var(--muted)}
+.age-badge{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:500;background:transparent;color:var(--muted);border:1px solid #333}
 
 /* table */
 .tbl{width:100%;border-collapse:collapse}
@@ -1441,6 +1442,21 @@ function isNew(j) {
   return diff < 2 * 24 * 60 * 60 * 1000; // 2 days
 }
 
+function jobAge(j) {
+  if (!j.created_at) return '';
+  var d = new Date(j.created_at);
+  var now = new Date();
+  var diff = now.getTime() - d.getTime();
+  var mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + 'm ago';
+  var hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + 'h ago';
+  var days = Math.floor(hrs / 24);
+  if (days < 30) return days + 'd ago';
+  return Math.floor(days / 30) + 'mo ago';
+}
+
 function renderJobCard(j, opts) {
   opts = opts || {};
   var barColor = j.match_score >= 80 ? 'var(--green)' : j.match_score >= 60 ? 'var(--gold)' : 'var(--red)';
@@ -1461,6 +1477,7 @@ function renderJobCard(j, opts) {
       '<span>\\uD83D\\uDCCD ' + esc(j.location) + '</span>' +
       (j.salary ? '<span>\\uD83D\\uDCB0 ' + esc(j.salary) + '</span>' : '') +
       (j.source ? '<span class="source-badge">' + esc(j.source) + '</span>' : '') +
+      (jobAge(j) ? '<span class="age-badge">' + jobAge(j) + '</span>' : '') +
     '</div>' +
     (j.why_good_fit ? '<div class="card-why">' + esc(j.why_good_fit) + '</div>' : '') +
     '<div class="card-foot">' +
@@ -1477,15 +1494,21 @@ function renderJobs() {
   var jobs;
 
   if (_currentJobsTab === 'top') {
-    // Top matches: sorted by match score desc
-    jobs = _allJobs.slice().sort(function(a, b) { return b.match_score - a.match_score; });
+    // Top matches: new matches first (sorted by score), then rest by score
+    jobs = _allJobs.slice().sort(function(a, b) {
+      var aNew = isNew(a) ? 1 : 0;
+      var bNew = isNew(b) ? 1 : 0;
+      if (bNew !== aNew) return bNew - aNew;
+      return b.match_score - a.match_score;
+    });
     if (!jobs.length) {
       cnt.textContent = 'No matching jobs found yet \\u2014 run the scout to find matches';
       grid.innerHTML = '';
       return;
     }
-    cnt.textContent = jobs.length + ' top match' + (jobs.length !== 1 ? 'es' : '') + ' (score 60+)';
-    grid.innerHTML = jobs.map(function(j) { return renderJobCard(j); }).join('');
+    var newTopCount = jobs.filter(isNew).length;
+    cnt.textContent = jobs.length + ' top match' + (jobs.length !== 1 ? 'es' : '') + ' (score 60+)' + (newTopCount ? ' \\u2014 ' + newTopCount + ' new' : '');
+    grid.innerHTML = jobs.map(function(j) { return renderJobCard(j, { showNew: true }); }).join('');
   } else {
     // Recent listings: sorted by created_at desc
     jobs = _allJobs.slice().sort(function(a, b) {
