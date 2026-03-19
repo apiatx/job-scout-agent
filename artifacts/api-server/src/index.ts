@@ -115,6 +115,30 @@ async function initDb(): Promise<void> {
   await safeAddColumn('jobs', 'created_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()');
   await safeAddColumn('jobs', 'status', "TEXT NOT NULL DEFAULT 'new'");
 
+  // Deduplicate existing jobs — keep the most recent row per apply_url
+  try {
+    await pool.query(`
+      DELETE FROM tailored_docs WHERE job_id IN (
+        SELECT id FROM jobs WHERE id NOT IN (
+          SELECT MAX(id) FROM jobs GROUP BY apply_url
+        )
+      )
+    `);
+    const deduped = await pool.query(`
+      DELETE FROM jobs WHERE id NOT IN (
+        SELECT MAX(id) FROM jobs GROUP BY apply_url
+      )
+    `);
+    if ((deduped.rowCount ?? 0) > 0) {
+      console.log(`Deduplicated: removed ${deduped.rowCount} duplicate jobs`);
+    }
+  } catch (e) { console.log('Dedup migration:', e); }
+
+  // Add unique index on apply_url to prevent future duplicates
+  try {
+    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS jobs_apply_url_uniq ON jobs (apply_url)');
+  } catch (e) { console.log('Unique index already exists or failed:', e); }
+
   // Seed default criteria if none exist
   const { rows } = await pool.query('SELECT id FROM criteria LIMIT 1');
   if (rows.length === 0) {
@@ -926,7 +950,12 @@ async function runScoutInBackground(runId: number): Promise<void> {
       const source = toScore.find(j => j.applyUrl === m.applyUrl)?.source ?? '';
       await pool.query(
         `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         ON CONFLICT (apply_url) DO UPDATE SET
+           scout_run_id = EXCLUDED.scout_run_id,
+           match_score = EXCLUDED.match_score,
+           why_good_fit = EXCLUDED.why_good_fit,
+           created_at = NOW()`,
         [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false]
       );
     }
