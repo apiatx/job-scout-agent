@@ -12,7 +12,7 @@ outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd artifacts/api-server && PORT=8080 npx tsx ./src/index.ts"
+args = "sudo pg_ctlcluster 16 main start 2>/dev/null; sudo -u postgres psql -tc \"SELECT 1 FROM pg_database WHERE datname='jobscout'\" | grep -q 1 || sudo -u postgres psql -c \"CREATE DATABASE jobscout; CREATE USER runner WITH PASSWORD 'runner'; GRANT ALL ON DATABASE jobscout TO runner;\" && sudo -u postgres psql -d jobscout -c \"GRANT ALL ON SCHEMA public TO runner;\" 2>/dev/null; cd artifacts/api-server && DATABASE_URL='postgresql://runner:runner@localhost:5432/jobscout' PORT=8080 npx tsx ./src/index.ts"
 waitForPort = 8080
 
 [postMerge]
