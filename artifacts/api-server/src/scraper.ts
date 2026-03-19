@@ -27,27 +27,41 @@ interface LeverJob {
 }
 
 export async function scrapeGreenhouseJobs(slug: string, companyName: string): Promise<ScrapedJob[]> {
-  try {
-    const url = `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs?content=true`;
-    console.log(`Greenhouse: scanning ${slug}...`);
-    const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
-    if (!response.ok) {
-      console.log(`Greenhouse: couldn't find '${slug}' (status ${response.status})`);
+  const url = `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs?content=true`;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      if (attempt === 0) console.log(`Greenhouse: scanning ${slug}...`);
+      const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      if (!response.ok) {
+        if (attempt === 0 && (response.status === 404)) {
+          console.log(`Greenhouse: got ${response.status} for '${slug}', retrying in 2s...`);
+          await new Promise((r) => setTimeout(r, 2000));
+          continue;
+        }
+        console.log(`Greenhouse: couldn't find '${slug}' (status ${response.status})`);
+        return [];
+      }
+      const data = (await response.json()) as { jobs?: GreenhouseJob[] };
+      if (!data.jobs) return [];
+      console.log(`Greenhouse: found ${data.jobs.length} jobs at ${slug}`);
+      return data.jobs.map((job) => ({
+        title: job.title,
+        company: companyName,
+        location: job.location?.name ?? 'Unknown',
+        applyUrl: job.absolute_url,
+      }));
+    } catch (e) {
+      if (attempt === 0) {
+        console.log(`Greenhouse: timeout/error for '${slug}', retrying in 2s...`);
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+      console.log(`Greenhouse error for ${slug}:`, e);
       return [];
     }
-    const data = (await response.json()) as { jobs?: GreenhouseJob[] };
-    if (!data.jobs) return [];
-    console.log(`Greenhouse: found ${data.jobs.length} jobs at ${slug}`);
-    return data.jobs.map((job) => ({
-      title: job.title,
-      company: companyName,
-      location: job.location?.name ?? 'Unknown',
-      applyUrl: job.absolute_url,
-    }));
-  } catch (e) {
-    console.log(`Greenhouse error for ${slug}:`, e);
-    return [];
   }
+  return [];
 }
 
 export async function scrapeLeverJobs(slug: string, companyName: string): Promise<ScrapedJob[]> {

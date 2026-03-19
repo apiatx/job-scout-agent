@@ -13,7 +13,7 @@ const companies: { name: string; ats_type: string; ats_slug?: string; careers_ur
   // Greenhouse
   { name: 'Pure Storage', ats_type: 'greenhouse', ats_slug: 'purestorage' },
   { name: 'CoreWeave', ats_type: 'greenhouse', ats_slug: 'coreweave' },
-  { name: 'Samsara', ats_type: 'greenhouse', ats_slug: 'samsara' },
+
   { name: 'Databricks', ats_type: 'greenhouse', ats_slug: 'databricks' },
   { name: 'Iron Mountain', ats_type: 'greenhouse', ats_slug: 'ironmountainsolutions' },
   { name: 'Cohesity', ats_type: 'greenhouse', ats_slug: 'cohesity' },
@@ -27,9 +27,9 @@ const companies: { name: string; ats_type: string; ats_slug?: string; careers_ur
   { name: 'Anthropic', ats_type: 'greenhouse', ats_slug: 'anthropic' },
   { name: 'Commvault', ats_type: 'greenhouse', ats_slug: 'commvault' },
   { name: 'Impinj', ats_type: 'greenhouse', ats_slug: 'impinj' },
-  { name: 'Celestica', ats_type: 'greenhouse', ats_slug: 'celestica' },
-  { name: 'Nextracker', ats_type: 'greenhouse', ats_slug: 'nextracker' },
-  { name: 'Stem Inc', ats_type: 'greenhouse', ats_slug: 'stem' },
+  { name: 'Celestica', ats_type: 'plain', careers_url: 'https://careers.celestica.com' },
+  { name: 'Nextracker', ats_type: 'plain', careers_url: 'https://www.nextracker.com/careers' },
+  { name: 'Stem Inc', ats_type: 'plain', careers_url: 'https://www.stem.com/careers' },
   // Lever
   { name: 'Extreme Networks', ats_type: 'lever', ats_slug: 'extremenetworks' },
   // Workday

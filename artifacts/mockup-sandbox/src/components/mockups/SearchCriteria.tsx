@@ -9,6 +9,44 @@ import { X } from "lucide-react";
 
 type WorkType = "any" | "remote" | "office" | "hybrid";
 
+const DEFAULT_CRITERIA: CriteriaData = {
+  min_salary: 120000,
+  work_type: "any",
+  locations: [
+    "Remote", "United States", "South Carolina", "North Carolina",
+    "Georgia", "Florida", "South East", "East Coast", "South",
+  ],
+  target_roles: [
+    "Enterprise Account Executive", "Senior Account Executive",
+    "Regional Sales Manager", "Named Account Executive",
+    "sales account executive", "Account Director", "Account Manager",
+    "Enterprise Account Manager", "Senior Account Manager",
+    "National Account Manager", "Partner Manager", "Channel Manager",
+    "Channel Account Manager", "Territory Sales Manager",
+  ],
+  industries: [
+    "AI Infrastructure", "Data Center Hardware", "Semiconductors",
+    "Networking Hardware", "Storage Hardware", "Optical Networking",
+    "Edge Computing", "Power & Cooling Infrastructure", "Server Hardware",
+    "Industrial Automation", "Oilfield Services Technology",
+    "Energy Technology", "Clean Energy / Energy Storage", "Machine Vision",
+    "Test and Measurement", "Materials Science / Specialty Chemicals",
+    "Robotics",
+  ],
+  must_have: ["enterprise sales", "quota carrying"],
+  nice_to_have: [
+    "AI", "data center", "GPU", "NVIDIA", "industrial automation",
+    "energy technology", "machine vision", "robotics",
+    "oilfield services", "energy storage",
+  ],
+  avoid: [
+    "SDR", "BDR", "inbound only", "SMB only", "pure SaaS",
+    "marketing", "recruiting",
+  ],
+  your_name: "",
+  your_email: "",
+};
+
 interface CriteriaData {
   min_salary: number | null;
   work_type: WorkType;
@@ -98,20 +136,24 @@ export default function SearchCriteria() {
       .then((data) => {
         if (data && data.id) {
           setCriteria({
-            min_salary: data.min_salary ?? null,
-            work_type: data.work_type ?? "any",
-            locations: data.locations ?? [],
-            target_roles: data.target_roles ?? [],
-            industries: data.industries ?? [],
-            must_have: data.must_have ?? [],
-            nice_to_have: data.nice_to_have ?? [],
-            avoid: data.avoid ?? [],
+            min_salary: data.min_salary ?? DEFAULT_CRITERIA.min_salary,
+            work_type: data.work_type ?? DEFAULT_CRITERIA.work_type,
+            locations: data.locations?.length ? data.locations : DEFAULT_CRITERIA.locations,
+            target_roles: data.target_roles?.length ? data.target_roles : DEFAULT_CRITERIA.target_roles,
+            industries: data.industries?.length ? data.industries : DEFAULT_CRITERIA.industries,
+            must_have: data.must_have?.length ? data.must_have : DEFAULT_CRITERIA.must_have,
+            nice_to_have: data.nice_to_have?.length ? data.nice_to_have : DEFAULT_CRITERIA.nice_to_have,
+            avoid: data.avoid?.length ? data.avoid : DEFAULT_CRITERIA.avoid,
             your_name: data.your_name ?? "",
             your_email: data.your_email ?? "",
           });
+        } else {
+          setCriteria(DEFAULT_CRITERIA);
         }
       })
-      .catch(() => {})
+      .catch(() => {
+        setCriteria(DEFAULT_CRITERIA);
+      })
       .finally(() => setLoading(false));
   }, []);
 
