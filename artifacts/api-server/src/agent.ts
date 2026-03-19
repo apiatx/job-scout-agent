@@ -30,8 +30,17 @@ interface CriteriaForAgent {
   preApprovedCompanies?: string[];
 }
 
-async function scoreOne(job: ScrapedJob, criteriaText: string, preApprovedSection: string): Promise<JobMatch | null> {
+async function scoreOne(job: ScrapedJob, criteriaText: string, preApprovedSection: string, preApprovedCompanies: string[]): Promise<JobMatch | null> {
   try {
+    // Check if this job is from a pre-approved company
+    const isPreApproved = preApprovedCompanies.some(
+      (name) => name.toLowerCase() === job.company.toLowerCase()
+    );
+    let companySpecificSection = preApprovedSection;
+    if (isPreApproved) {
+      companySpecificSection += `\n\nIMPORTANT: This job is from ${job.company} which is on the user's pre-approved companies list. The user has already vetted and approved this company as a target employer. You MUST score this job at least 65 if the role title matches any of the user's target roles, regardless of whether the company sells hardware or software. The only valid reasons to score below 65 for a pre-approved company are: (1) the role title is completely wrong — e.g. engineering, product, marketing, HR, finance, legal — or (2) the job location is outside the user's location preferences.`;
+    }
+
     const prompt = `You are a job matching assistant. Evaluate whether this job matches the candidate's criteria.
 
 LOCATION RULES:
@@ -42,7 +51,7 @@ The candidate's preferred locations are listed below in the criteria. Evaluate l
 - If the candidate has no location preferences, accept any location.
 - When in doubt about whether a location matches, lean toward rejecting the job.
 
-${preApprovedSection}
+${companySpecificSection}
 
 Job:
 Title: ${job.title}
@@ -95,6 +104,91 @@ Respond ONLY with a JSON object (no markdown, no extra text):
   }
 }
 
+// ── Company safety pre-screening for JobSpy results ──
+// Filters out pure SaaS / software companies that aren't relevant targets.
+// Only called for non-pre-approved companies found via JobSpy.
+
+const companySafetyCache = new Map<string, boolean>();
+
+async function isCompanySafe(companyName: string): Promise<boolean> {
+  const cached = companySafetyCache.get(companyName);
+  if (cached !== undefined) return cached;
+
+  try {
+    const message = await anthropic.messages.create({
+      model: 'claude-haiku-4-5',
+      max_tokens: 8,
+      messages: [{
+        role: 'user',
+        content: `Is "${companyName}" a hardware company, cloud infrastructure provider, top AI company, irreplaceable data/database platform, or industrial/energy technology software company? Answer only YES or NO.`,
+      }],
+    });
+
+    const block = message.content[0];
+    const answer = block.type === 'text' ? block.text.trim().toUpperCase() : 'NO';
+    const safe = answer.startsWith('YES');
+    companySafetyCache.set(companyName, safe);
+    return safe;
+  } catch {
+    // On error, allow the company through to avoid false negatives
+    companySafetyCache.set(companyName, true);
+    return true;
+  }
+}
+
+/**
+ * Pre-screen JobSpy jobs by filtering out companies that aren't in target sectors.
+ * Only evaluates companies NOT in the pre-approved list.
+ * Runs all unique company checks up front, then filters the job list.
+ */
+export async function filterUnsafeCompanies(
+  jobs: ScrapedJob[],
+  preApprovedCompanies: string[]
+): Promise<ScrapedJob[]> {
+  const preApprovedLower = new Set(preApprovedCompanies.map((n) => n.toLowerCase()));
+
+  // Collect unique non-pre-approved company names
+  const uniqueCompanies = new Set<string>();
+  for (const job of jobs) {
+    if (!preApprovedLower.has(job.company.toLowerCase())) {
+      uniqueCompanies.add(job.company);
+    }
+  }
+
+  if (uniqueCompanies.size === 0) return jobs;
+
+  console.log(`\n──── COMPANY SAFETY CHECK ──────────────────────────────────`);
+  console.log(`Evaluating ${uniqueCompanies.size} unique non-pre-approved companies...`);
+
+  // Evaluate all unique companies in batches of 10
+  const companyList = Array.from(uniqueCompanies);
+  const BATCH_SIZE = 10;
+  for (let i = 0; i < companyList.length; i += BATCH_SIZE) {
+    const batch = companyList.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map((name) => isCompanySafe(name)));
+  }
+
+  // Log results
+  let safe = 0;
+  let unsafe = 0;
+  for (const name of companyList) {
+    if (companySafetyCache.get(name)) {
+      safe++;
+    } else {
+      unsafe++;
+      console.log(`  ✗ Filtered out: ${name}`);
+    }
+  }
+  console.log(`  Safe: ${safe}, Filtered out: ${unsafe}`);
+  console.log(`───────────────────────────────────────────────────────────`);
+
+  // Filter jobs
+  return jobs.filter((job) => {
+    if (preApprovedLower.has(job.company.toLowerCase())) return true;
+    return companySafetyCache.get(job.company) ?? true;
+  });
+}
+
 export async function scoreJobsWithClaude(jobs: ScrapedJob[], criteria: CriteriaForAgent): Promise<JobMatch[]> {
   if (jobs.length === 0) return [];
 
@@ -123,7 +217,7 @@ For jobs NOT from the pre-approved list, apply normal scoring criteria.`;
   for (let i = 0; i < jobs.length; i += CONCURRENCY) {
     const batch = jobs.slice(i, i + CONCURRENCY);
     console.log(`Scoring batch ${Math.floor(i / CONCURRENCY) + 1}/${Math.ceil(jobs.length / CONCURRENCY)} (${batch.length} jobs)...`);
-    const batchResults = await Promise.all(batch.map((j) => scoreOne(j, criteriaText, preApprovedSection)));
+    const batchResults = await Promise.all(batch.map((j) => scoreOne(j, criteriaText, preApprovedSection, criteria.preApprovedCompanies ?? [])));
     for (const r of batchResults) {
       if (r !== null) results.push(r);
     }

@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-JobSpy scraper — searches LinkedIn, Indeed, and Glassdoor simultaneously
-for enterprise hardware/infrastructure sales roles.
+JobSpy scraper — searches LinkedIn and Indeed for enterprise sales roles
+across hardware, infrastructure, AI, and industrial technology sectors.
+
+Generates a full matrix of role titles x sector keywords (16 x 24 = 384 searches).
+Runs in batches of 5 with 2-second delays to avoid rate limiting.
+Deduplicates all results by job URL before output.
 
 Usage: python3 jobspy_scraper.py
 Output: JSON array of job objects to stdout
@@ -22,104 +26,101 @@ except ImportError:
 
 import pandas as pd
 
-SEARCHES = [
-    {
-        "site_name": ["linkedin", "indeed", "glassdoor"],
-        "search_term": "Enterprise Account Executive semiconductor",
-        "location": "United States",
-        "results_wanted": 50,
-        "is_remote": True,
-    },
-    {
-        "site_name": ["linkedin", "indeed", "glassdoor"],
-        "search_term": "Enterprise Account Executive data center hardware",
-        "location": "United States",
-        "results_wanted": 50,
-        "is_remote": True,
-    },
-    {
-        "site_name": ["linkedin", "indeed", "glassdoor"],
-        "search_term": "Enterprise Account Executive networking hardware",
-        "location": "United States",
-        "results_wanted": 50,
-        "is_remote": True,
-    },
-    {
-        "site_name": ["linkedin", "indeed", "glassdoor"],
-        "search_term": "Enterprise Account Executive storage hardware",
-        "location": "United States",
-        "results_wanted": 50,
-        "is_remote": True,
-    },
-    {
-        "site_name": ["linkedin", "indeed", "glassdoor"],
-        "search_term": "Enterprise Account Executive AI infrastructure",
-        "location": "United States",
-        "results_wanted": 50,
-        "is_remote": True,
-    },
-    {
-        "site_name": ["linkedin", "indeed", "glassdoor"],
-        "search_term": "Strategic Account Executive NVIDIA Dell HPE Cisco",
-        "location": "United States",
-        "results_wanted": 50,
-        "is_remote": True,
-    },
-    {
-        "site_name": ["linkedin", "indeed", "glassdoor"],
-        "search_term": "Account Executive industrial automation Rockwell Honeywell Emerson",
-        "location": "United States",
-        "results_wanted": 50,
-        "is_remote": True,
-    },
-    {
-        "site_name": ["linkedin", "indeed", "glassdoor"],
-        "search_term": "Sales Director energy technology Vertiv Bloom Fluence",
-        "location": "United States",
-        "results_wanted": 50,
-        "is_remote": True,
-    },
-    {
-        "site_name": ["linkedin", "indeed", "glassdoor"],
-        "search_term": "Account Executive semiconductor Marvell Broadcom Micron Entegris",
-        "location": "United States",
-        "results_wanted": 50,
-        "is_remote": True,
-    },
-    {
-        "site_name": ["linkedin", "indeed", "glassdoor"],
-        "search_term": "Regional Sales Manager optical networking Ciena Infinera Lumentum Coherent",
-        "location": "United States",
-        "results_wanted": 50,
-        "is_remote": True,
-    },
+# ── Role titles ──────────────────────────────────────────────────────────────
+ROLE_TITLES = [
+    "Account Executive",
+    "Enterprise Account Executive",
+    "Senior Account Executive",
+    "Named Account Executive",
+    "Major Account Executive",
+    "Strategic Account Executive",
+    "Account Director",
+    "Account Manager",
+    "Enterprise Account Manager",
+    "Senior Account Manager",
+    "National Account Manager",
+    "Partner Manager",
+    "Channel Manager",
+    "Channel Account Manager",
+    "Regional Sales Manager",
+    "Territory Sales Manager",
 ]
+
+# ── Sector keywords ─────────────────────────────────────────────────────────
+SECTOR_KEYWORDS = [
+    "semiconductor",
+    "data center",
+    "networking",
+    "storage",
+    "artificial intelligence",
+    "optical",
+    "automation",
+    "energy",
+    "test and measurement",
+    "GPU",
+    "servers",
+    "infrastructure",
+    "edge computing",
+    "robotics",
+    "hardware",
+    "IoT",
+    "cloud infrastructure",
+    "industrial",
+    "photonics",
+    "compute",
+    "wireless",
+    "fiber",
+    "power systems",
+    "sensors",
+]
+
+# ── Generate full search matrix ─────────────────────────────────────────────
+SEARCHES = []
+for role in ROLE_TITLES:
+    for sector in SECTOR_KEYWORDS:
+        SEARCHES.append({
+            "site_name": ["linkedin", "indeed"],
+            "search_term": f"{role} {sector}",
+            "location": "United States",
+            "results_wanted": 10,
+            "is_remote": True,
+        })
+
+print(f"JobSpy: generated {len(SEARCHES)} searches ({len(ROLE_TITLES)} roles x {len(SECTOR_KEYWORDS)} sectors)", file=sys.stderr)
 
 
 def run_search(search_params: dict) -> pd.DataFrame:
     """Run a single JobSpy search, returning results as a DataFrame."""
     term = search_params["search_term"]
     try:
-        print(f"JobSpy: searching \"{term}\"...", file=sys.stderr)
         df = scrape_jobs(**search_params)
-        print(f"JobSpy: found {len(df)} results for \"{term}\"", file=sys.stderr)
+        if len(df) > 0:
+            print(f"  ✓ \"{term}\" → {len(df)} results", file=sys.stderr)
         return df
     except Exception as e:
-        print(f"JobSpy: error searching \"{term}\": {e}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
+        print(f"  ✗ \"{term}\" → error: {e}", file=sys.stderr)
         return pd.DataFrame()
 
 
 def main():
     all_frames = []
+    batch_size = 5
 
-    for i, search in enumerate(SEARCHES):
-        print(f"\n── Search {i+1}/{len(SEARCHES)} ──", file=sys.stderr)
-        df = run_search(search)
-        if not df.empty:
-            all_frames.append(df)
-        # Small delay between searches to avoid rate limiting
-        if i < len(SEARCHES) - 1:
+    total_batches = (len(SEARCHES) + batch_size - 1) // batch_size
+    for batch_idx in range(total_batches):
+        start = batch_idx * batch_size
+        end = min(start + batch_size, len(SEARCHES))
+        batch = SEARCHES[start:end]
+
+        print(f"\n── Batch {batch_idx + 1}/{total_batches} (searches {start + 1}-{end}/{len(SEARCHES)}) ──", file=sys.stderr)
+
+        for search in batch:
+            df = run_search(search)
+            if not df.empty:
+                all_frames.append(df)
+
+        # Delay between batches (not after the last one)
+        if batch_idx < total_batches - 1:
             time.sleep(2)
 
     if not all_frames:
@@ -176,7 +177,7 @@ def main():
 
         jobs.append(job)
 
-    print(f"JobSpy: outputting {len(jobs)} jobs as JSON", file=sys.stderr)
+    print(f"JobSpy: outputting {len(jobs)} unique jobs as JSON", file=sys.stderr)
     print(json.dumps(jobs))
 
 

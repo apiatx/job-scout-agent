@@ -2,7 +2,7 @@ import express, { type Request, type Response } from 'express';
 import pg from 'pg';
 import { scrapeGreenhouseJobs, scrapeLeverJobs, runJobSpyScraper } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
-import { scoreJobsWithClaude, tailorResumeWithClaude } from './agent.js';
+import { scoreJobsWithClaude, tailorResumeWithClaude, filterUnsafeCompanies } from './agent.js';
 
 const { Pool } = pg;
 const app = express();
@@ -925,6 +925,23 @@ async function runScoutInBackground(runId: number): Promise<void> {
       console.error(`JobSpy scraper error:`, e);
     }
 
+    // ── Stage 2c: Filter out unsafe companies from JobSpy results ──
+    const companyNames = companies.map((c: any) => c.name as string);
+    const jobSpyJobs = allJobs.filter(j => j.source === 'JobSpy');
+    const nonJobSpyJobs = allJobs.filter(j => j.source !== 'JobSpy');
+    if (jobSpyJobs.length > 0) {
+      const safeJobSpyJobs = await filterUnsafeCompanies(
+        jobSpyJobs.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
+        companyNames
+      );
+      const filteredOut = jobSpyJobs.length - safeJobSpyJobs.length;
+      console.log(`Company safety filter: ${jobSpyJobs.length} JobSpy jobs → ${safeJobSpyJobs.length} passed (${filteredOut} filtered out)`);
+      // Rebuild allJobs with filtered JobSpy results
+      allJobs.length = 0;
+      allJobs.push(...nonJobSpyJobs);
+      allJobs.push(...safeJobSpyJobs.map(j => ({ ...j, source: 'JobSpy' })));
+    }
+
     console.log(`\n──── SCRAPE RESULTS ────────────────────────────────────────`);
     console.log(`Total scraped: ${allJobs.length} raw listings from ${companiesScanned} companies`);
     const companiesWithJobs = perCompanyStats.filter(s => s.jobs > 0);
@@ -1061,7 +1078,6 @@ async function runScoutInBackground(runId: number): Promise<void> {
     }
 
     // Pass pre-approved company names from the database to Claude scoring
-    const companyNames = companies.map((c: any) => c.name as string);
     const matches = await scoreJobsWithClaude(
       preFiltered.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
       {
