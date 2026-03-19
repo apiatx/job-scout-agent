@@ -122,10 +122,10 @@ async function initDb(): Promise<void> {
       `INSERT INTO criteria (target_roles, industries, min_salary, locations, must_have, nice_to_have, avoid)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
-        ['Enterprise Account Executive', 'Strategic Account Executive', 'Senior Account Executive', 'Regional Sales Manager', 'Sales Director', 'Major Account Executive', 'Named Account Executive'],
+        ['Enterprise Account Executive', 'Strategic Account Executive', 'Senior Account Executive', 'Regional Sales Manager', 'Sales Director', 'Named Account Executive', 'Account Executive', 'Account Manager', 'Enterprise Account Manager'],
         ['AI Infrastructure', 'Data Center Hardware', 'Semiconductors', 'Networking Hardware', 'Storage Hardware', 'Optical Networking', 'Edge Computing', 'Server Hardware', 'Power & Cooling'],
-        150000,
-        ['Remote', 'New York', 'San Francisco', 'Austin', 'Boston', 'Seattle', 'Chicago'],
+        120000,
+        ['Remote', 'United States', 'South Carolina', 'North Carolina', 'Florida', 'Georgia'],
         ['enterprise sales', 'quota carrying', 'hardware OR infrastructure OR networking OR storage OR semiconductor'],
         ['AI', 'data center', 'GPU', 'NVIDIA', 'hunter mentality', 'new logo'],
         ['SDR', 'BDR', 'inbound only', 'SMB only', 'marketing', 'recruiting', 'engineering', 'software only'],
