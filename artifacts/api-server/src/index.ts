@@ -427,15 +427,35 @@ async function initDb(): Promise<void> {
     );
   }
 
-  // Purge jobs from locations outside candidate's STRICT preferred regions
-  // ALLOWLIST: Only keep jobs whose location matches Remote (no bad state), NC, SC, GA, FL, or United States (generic)
-  // This is an allowlist approach — anything NOT matching gets deleted
+  // Purge jobs from locations outside candidate's STRICT preferred regions (US only)
+  // Step 1: Delete ALL international jobs immediately
+  const intlPatterns = [
+    'Singapore', 'India', 'Bangalore', 'Bengaluru', 'Hyderabad', 'Mumbai', 'Chennai', 'Pune', 'Delhi', 'Noida', 'Gurgaon', 'Gurugram',
+    'France', 'Paris', 'Germany', 'Berlin', 'Munich', 'United Kingdom', 'London', 'Ireland', 'Dublin',
+    'Canada', 'Toronto', 'Vancouver', 'Montreal', 'Israel', 'Tel Aviv', 'Japan', 'Tokyo',
+    'Australia', 'Sydney', 'Melbourne', 'Brazil', 'Mexico', 'Amsterdam', 'Netherlands', 'Sweden', 'Stockholm',
+    'Spain', 'Madrid', 'Barcelona', 'Italy', 'Milan', 'Poland', 'Warsaw', 'Korea', 'Seoul',
+    'China', 'Shanghai', 'Beijing', 'Shenzhen', 'Hong Kong', 'Taiwan', 'Taipei',
+    'Vietnam', 'Philippines', 'Manila', 'Indonesia', 'Jakarta', 'Thailand', 'Bangkok',
+    'Malaysia', 'Kuala Lumpur', 'Colombia', 'Argentina', 'Buenos Aires', 'Chile', 'Costa Rica',
+    'Switzerland', 'Zurich', 'Czech', 'Prague', 'Romania', 'Hungary', 'Budapest',
+    'Portugal', 'Lisbon', 'Austria', 'Vienna', 'Finland', 'Helsinki', 'Norway', 'Oslo',
+    'Denmark', 'Copenhagen', 'Belgium', 'Brussels', 'Luxembourg', 'New Zealand',
+    'South Africa', 'Cape Town', 'Nigeria', 'Kenya', 'Egypt', 'Dubai', 'Abu Dhabi',
+    'Saudi', 'Riyadh', 'Qatar', 'Pakistan', 'Sri Lanka', 'EMEA', 'APAC', 'LATAM',
+  ];
+  for (const loc of intlPatterns) {
+    await pool.query(`DELETE FROM tailored_docs WHERE job_id IN (SELECT id FROM jobs WHERE location ILIKE $1 AND saved_at IS NULL)`, [`%${loc}%`]);
+    const del = await pool.query(`DELETE FROM jobs WHERE location ILIKE $1 AND saved_at IS NULL`, [`%${loc}%`]);
+    if ((del.rowCount ?? 0) > 0) console.log(`Purged ${del.rowCount} international jobs matching "${loc}"`);
+  }
+
+  // Step 2: ALLOWLIST purge — only keep US jobs in NC, SC, GA, FL, or pure Remote/Remote-US
   const allowedLocationPatterns = [
     'North Carolina', 'NC', 'South Carolina', 'SC', 'Georgia', 'GA', 'Florida', 'FL',
     'Charlotte', 'Raleigh', 'Durham', 'Atlanta', 'Miami', 'Tampa', 'Jacksonville',
     'Orlando', 'Savannah', 'Charleston', 'Greenville',
   ];
-  // Build WHERE clause: keep jobs that are pure Remote, Remote-US, United States, or match allowed patterns
   const allowedILIKE = allowedLocationPatterns.map((_, i) => `location ILIKE $${i + 1}`).join(' OR ');
   const purgeQuery = `
     DELETE FROM jobs
@@ -448,7 +468,6 @@ async function initDb(): Promise<void> {
         OR ${allowedILIKE}
       )
   `;
-  // First delete dependent tailored_docs
   const purgeDocQuery = `
     DELETE FROM tailored_docs WHERE job_id IN (
       SELECT id FROM jobs
@@ -466,7 +485,7 @@ async function initDb(): Promise<void> {
   await pool.query(purgeDocQuery, likeParams);
   const purged = await pool.query(purgeQuery, likeParams);
   if ((purged.rowCount ?? 0) > 0) {
-    console.log(`Allowlist purge: deleted ${purged.rowCount} jobs outside NC/SC/GA/FL/Remote`);
+    console.log(`Allowlist purge: deleted ${purged.rowCount} jobs outside NC/SC/GA/FL/Remote-US`);
   }
 
   // Mark any stale running records as failed
@@ -977,28 +996,35 @@ async function runScoutInBackground(runId: number): Promise<void> {
       'south':       ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Charlotte','Raleigh','Durham','Atlanta','Miami','Tampa','Jacksonville','Orlando','Savannah','Charleston','Greenville'],
     };
     const allowedTerms = new Set<string>();
-    // "Remote" with no geo qualifier is always allowed
-    allowedTerms.add('remote');
+    // DO NOT add bare "remote" — it would match any international remote job
     for (const loc of criteria.locations) {
       const lower = loc.trim().toLowerCase();
+      if (lower === 'remote') continue; // handled separately below
       allowedTerms.add(lower);
       const expanded = regionExpansions[lower];
       if (expanded) {
         for (const t of expanded) allowedTerms.add(t.toLowerCase());
       }
     }
-    // Build a regex from allowed terms
+
+    // Known international / non-US keywords to reject immediately
+    const internationalReject = /\b(singapore|india|bangalore|bengaluru|hyderabad|mumbai|chennai|pune|delhi|noida|gurgaon|gurugram|france|paris|germany|berlin|munich|uk|united kingdom|london|ireland|dublin|canada|toronto|vancouver|montreal|israel|tel aviv|japan|tokyo|australia|sydney|melbourne|brazil|s[aã]o paulo|mexico|amsterdam|netherlands|sweden|stockholm|spain|madrid|barcelona|italy|milan|rome|poland|warsaw|korea|seoul|china|shanghai|beijing|shenzhen|hong kong|taiwan|taipei|vietnam|philippines|manila|indonesia|jakarta|thailand|bangkok|malaysia|kuala lumpur|colombia|bogot[aá]|argentina|buenos aires|chile|santiago|costa rica|switzerland|zurich|czech|prague|romania|bucharest|hungary|budapest|portugal|lisbon|austria|vienna|finland|helsinki|norway|oslo|denmark|copenhagen|belgium|brussels|luxembourg|new zealand|auckland|south africa|cape town|nigeria|lagos|kenya|nairobi|egypt|cairo|uae|dubai|abu dhabi|saudi|riyadh|qatar|doha|pakistan|karachi|lahore|sri lanka|emea|apac|latam|asia|europe)\b/i;
+
+    // Build a regex from allowed US location terms (not including "remote")
     const allowedPattern = new RegExp(
       `\\b(${Array.from(allowedTerms).map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'i'
     );
     const locationFiltered = matches.filter(m => {
       const loc = m.location;
-      // Allow if location matches any allowed term
-      if (allowedPattern.test(loc)) return true;
-      // Allow "Remote" only if it has NO geo qualifier, or the qualifier is in allowed regions
+      // REJECT any international location immediately
+      if (internationalReject.test(loc)) return false;
+      // Allow if location contains an allowed US term (NC, SC, GA, FL, their cities)
+      if (allowedTerms.size > 0 && allowedPattern.test(loc)) return true;
+      // Allow pure "Remote" with no qualifier, or "Remote - US/United States"
       if (/remote/i.test(loc)) {
-        // Pure "Remote" or "Remote - US" is fine
-        if (/^\s*remote\s*$/i.test(loc) || /remote.*\bus\b/i.test(loc) || /remote.*\bunited states\b/i.test(loc)) return true;
+        if (/^\s*remote\s*$/i.test(loc)) return true;
+        if (/remote.*\bunited states\b/i.test(loc)) return true;
+        if (/remote.*\bus\b/i.test(loc) && !internationalReject.test(loc)) return true;
       }
       return false;
     });
