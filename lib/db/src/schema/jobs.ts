@@ -15,6 +15,7 @@ export const jobsTable = pgTable("jobs", {
   tailoredResume: text("tailored_resume"),
   coverLetter: text("cover_letter"),
   scoutRunId: integer("scout_run_id"),
+  savedAt: timestamp("saved_at", { withTimezone: true }),
   foundAt: timestamp("found_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

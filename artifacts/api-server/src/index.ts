@@ -106,6 +106,7 @@ async function initDb(): Promise<void> {
     try { await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${col} ${type}`); } catch { /* ignore */ }
   };
   await safeAddColumn('criteria', 'work_type', "TEXT NOT NULL DEFAULT 'any'");
+  await safeAddColumn('jobs', 'saved_at', 'TIMESTAMPTZ');
   await safeAddColumn('scout_runs', 'companies_scanned', 'INT NOT NULL DEFAULT 0');
   await safeAddColumn('scout_runs', 'matches_found', 'INT NOT NULL DEFAULT 0');
   await safeAddColumn('jobs', 'source', "TEXT NOT NULL DEFAULT ''");
@@ -256,6 +257,36 @@ app.get('/api/jobs', async (req: Request, res: Response) => {
       [minScore]
     );
     res.json(rows);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Save / unsave jobs
+app.get('/api/jobs/saved', async (_req, res: Response) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM jobs WHERE saved_at IS NOT NULL ORDER BY saved_at DESC LIMIT 200'
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/jobs/:id/save', async (req: Request, res: Response) => {
+  try {
+    const { rows } = await pool.query(
+      'UPDATE jobs SET saved_at = NOW() WHERE id = $1 RETURNING *', [req.params.id]
+    );
+    if (rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.delete('/api/jobs/:id/save', async (req: Request, res: Response) => {
+  try {
+    const { rows } = await pool.query(
+      'UPDATE jobs SET saved_at = NULL WHERE id = $1 RETURNING *', [req.params.id]
+    );
+    if (rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -776,6 +807,21 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 
 @media(max-width:700px){.sidebar{width:56px;min-width:56px;padding:12px 4px}.sidebar .tab{font-size:0;padding:10px}.sidebar .tab::before{font-size:16px}.sidebar .tab[data-label]::before{content:attr(data-icon)}}
 
+/* sub-tab */
+.sub-tab{font-size:12px!important;color:var(--muted)!important;padding-left:24px!important}
+.sub-tab.active{color:var(--text)!important}
+
+/* jobs inner tabs */
+.inner-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:16px}
+.inner-tab{padding:10px 20px;font-size:13px;font-weight:600;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;transition:color .12s}
+.inner-tab:hover{color:var(--text)}
+.inner-tab.active{color:var(--gold);border-bottom-color:var(--gold)}
+.new-badge{display:inline-block;background:var(--gold);color:#0f0f0f;font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px;margin-left:6px;text-transform:uppercase;vertical-align:middle;letter-spacing:.04em}
+.save-btn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;transition:all .15s}
+.save-btn:hover{border-color:var(--gold);color:var(--gold)}
+.save-btn.saved{background:var(--gold);color:#0f0f0f;border-color:var(--gold)}
+.saved-date{font-size:10px;color:var(--muted);margin-top:4px}
+
 /* jobs */
 .jobs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;margin-top:16px}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
@@ -873,6 +919,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
 <div class="app-body">
 <nav class="sidebar">
   <div class="tab active" id="tab-jobs" onclick="showTab('jobs')">Jobs</div>
+  <div class="tab sub-tab" id="tab-saved" onclick="showTab('saved')">&nbsp;&nbsp;Saved Jobs</div>
   <div class="tab" id="tab-companies" onclick="showTab('companies')">Companies</div>
   <div class="tab" id="tab-resume" onclick="showTab('resume')">Resume</div>
   <div class="tab" id="tab-email" onclick="showTab('email')">Daily Jobs Report</div>
@@ -880,8 +927,17 @@ textarea:focus,input:focus{border-color:var(--gold)}
 </nav>
 <div class="main-content">
 <div class="panel active" id="panel-jobs">
+  <div class="inner-tabs">
+    <div class="inner-tab active" id="jtab-top" onclick="showJobsTab('top')">Top Matches</div>
+    <div class="inner-tab" id="jtab-recent" onclick="showJobsTab('recent')">Recent Listings</div>
+  </div>
   <div class="sec-title" id="jobs-count">Loading jobs&hellip;</div>
   <div class="jobs-grid" id="jobs-grid"></div>
+</div>
+
+<div class="panel" id="panel-saved">
+  <div class="sec-title" id="saved-count">Loading saved jobs&hellip;</div>
+  <div class="jobs-grid" id="saved-grid"></div>
 </div>
 
 <div class="panel" id="panel-resume">
@@ -1007,12 +1063,14 @@ function lines(id) {
 }
 
 // ── tabs ─────────────────────────────────────────────────────────────────
-var TABS = ['jobs','companies','resume','email','runs'];
+var TABS = ['jobs','saved','companies','resume','email','runs'];
 function showTab(name) {
   TABS.forEach(function(t) {
     document.getElementById('tab-' + t).classList.toggle('active', t === name);
     document.getElementById('panel-' + t).classList.toggle('active', t === name);
   });
+  if (name === 'jobs')      loadJobs();
+  if (name === 'saved')     loadSavedJobs();
   if (name === 'runs')      loadRuns();
   if (name === 'companies') loadCompanies();
   if (name === 'resume')    loadResume();
@@ -1036,43 +1094,130 @@ async function loadStats() {
 
 // ── jobs ─────────────────────────────────────────────────────────────────
 var _jobsById = {};
+var _allJobs = [];
+var _currentJobsTab = 'top';
+
+function showJobsTab(tab) {
+  _currentJobsTab = tab;
+  document.getElementById('jtab-top').classList.toggle('active', tab === 'top');
+  document.getElementById('jtab-recent').classList.toggle('active', tab === 'recent');
+  renderJobs();
+}
+
+function isNew(j) {
+  if (!j.created_at) return false;
+  var d = new Date(j.created_at);
+  var now = new Date();
+  var diff = now.getTime() - d.getTime();
+  return diff < 2 * 24 * 60 * 60 * 1000; // 2 days
+}
+
+function renderJobCard(j, opts) {
+  opts = opts || {};
+  var barColor = j.match_score >= 80 ? 'var(--green)' : j.match_score >= 60 ? 'var(--gold)' : 'var(--red)';
+  var isSaved = !!j.saved_at;
+  var newBadge = (opts.showNew && isNew(j)) ? '<span class="new-badge">NEW</span>' : '';
+  var savedDate = (opts.showSavedDate && j.saved_at) ? '<div class="saved-date">Saved ' + new Date(j.saved_at).toLocaleDateString() + '</div>' : '';
+  var saveLabel = isSaved ? 'Saved' : 'Save';
+  var saveClass = isSaved ? 'save-btn saved' : 'save-btn';
+  return '<div class="card">' +
+    '<div class="card-head">' +
+      '<div class="score-row"><span>Match Score</span><span class="score-val">' + esc(j.match_score) + ' / 100</span></div>' +
+      '<div class="bar-bg"><div class="bar-fg" style="width:' + esc(j.match_score) + '%;background:' + barColor + '"></div></div>' +
+      '<div class="job-title">' + esc(j.title) + newBadge + '</div>' +
+      '<div class="job-co">' + esc(j.company) + '</div>' +
+      savedDate +
+    '</div>' +
+    '<div class="card-meta">' +
+      '<span>\\uD83D\\uDCCD ' + esc(j.location) + '</span>' +
+      (j.salary ? '<span>\\uD83D\\uDCB0 ' + esc(j.salary) + '</span>' : '') +
+      (j.source ? '<span class="source-badge">' + esc(j.source) + '</span>' : '') +
+    '</div>' +
+    (j.why_good_fit ? '<div class="card-why">' + esc(j.why_good_fit) + '</div>' : '') +
+    '<div class="card-foot">' +
+      '<a href="' + esc(j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-gold btn-sm">View Posting \\u2192</a>' +
+      '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ')">Tailor Resume</button>' +
+      '<button class="' + saveClass + '" onclick="toggleSave(' + j.id + ')" id="save-btn-' + j.id + '">' + saveLabel + '</button>' +
+    '</div>' +
+  '</div>';
+}
+
+function renderJobs() {
+  var grid = document.getElementById('jobs-grid');
+  var cnt  = document.getElementById('jobs-count');
+  var jobs;
+
+  if (_currentJobsTab === 'top') {
+    // Top matches: sorted by match score desc
+    jobs = _allJobs.slice().sort(function(a, b) { return b.match_score - a.match_score; });
+    if (!jobs.length) {
+      cnt.textContent = 'No matching jobs found yet \\u2014 run the scout to find matches';
+      grid.innerHTML = '';
+      return;
+    }
+    cnt.textContent = jobs.length + ' top match' + (jobs.length !== 1 ? 'es' : '') + ' (score 60+)';
+    grid.innerHTML = jobs.map(function(j) { return renderJobCard(j); }).join('');
+  } else {
+    // Recent listings: sorted by created_at desc
+    jobs = _allJobs.slice().sort(function(a, b) {
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
+    if (!jobs.length) {
+      cnt.textContent = 'No recent listings yet';
+      grid.innerHTML = '';
+      return;
+    }
+    var newCount = jobs.filter(isNew).length;
+    cnt.textContent = jobs.length + ' listing' + (jobs.length !== 1 ? 's' : '') + (newCount ? ' (' + newCount + ' new)' : '');
+    grid.innerHTML = jobs.map(function(j) { return renderJobCard(j, { showNew: true }); }).join('');
+  }
+}
+
 async function loadJobs() {
   var res = await fetch('/api/jobs?min_score=60');
   var jobs = await res.json();
+  _allJobs = jobs;
   _jobsById = {};
   jobs.forEach(function(j) { _jobsById[j.id] = j; });
-  var grid = document.getElementById('jobs-grid');
-  var cnt  = document.getElementById('jobs-count');
+  renderJobs();
+}
+
+async function toggleSave(jobId) {
+  var j = _jobsById[jobId];
+  if (!j) return;
+  var isSaved = !!j.saved_at;
+  try {
+    var res;
+    if (isSaved) {
+      res = await fetch('/api/jobs/' + jobId + '/save', { method: 'DELETE' });
+    } else {
+      res = await fetch('/api/jobs/' + jobId + '/save', { method: 'POST' });
+    }
+    var updated = await res.json();
+    // update local data
+    _jobsById[jobId] = updated;
+    for (var i = 0; i < _allJobs.length; i++) {
+      if (_allJobs[i].id === jobId) { _allJobs[i] = updated; break; }
+    }
+    renderJobs();
+  } catch(e) {}
+}
+
+// ── saved jobs ────────────────────────────────────────────────────────────
+async function loadSavedJobs() {
+  var res = await fetch('/api/jobs/saved');
+  var jobs = await res.json();
+  // update cache
+  jobs.forEach(function(j) { _jobsById[j.id] = j; });
+  var grid = document.getElementById('saved-grid');
+  var cnt  = document.getElementById('saved-count');
   if (!jobs.length) {
-    cnt.textContent = 'No matching jobs found yet \\u2014 run the scout to find matches';
+    cnt.textContent = 'No saved jobs yet \\u2014 save jobs from the Jobs tab';
     grid.innerHTML = '';
     return;
   }
-  cnt.textContent = jobs.length + ' match' + (jobs.length !== 1 ? 'es' : '') + ' found (score 60+)';
-  var html = '';
-  jobs.forEach(function(j) {
-    var barColor = j.match_score >= 80 ? 'var(--green)' : j.match_score >= 60 ? 'var(--gold)' : 'var(--red)';
-    html +=
-      '<div class="card">' +
-        '<div class="card-head">' +
-          '<div class="score-row"><span>Match Score</span><span class="score-val">' + esc(j.match_score) + ' / 100</span></div>' +
-          '<div class="bar-bg"><div class="bar-fg" style="width:' + esc(j.match_score) + '%;background:' + barColor + '"></div></div>' +
-          '<div class="job-title">' + esc(j.title) + '</div>' +
-          '<div class="job-co">' + esc(j.company) + '</div>' +
-        '</div>' +
-        '<div class="card-meta">' +
-          '<span>\\uD83D\\uDCCD ' + esc(j.location) + '</span>' +
-          (j.salary ? '<span>\\uD83D\\uDCB0 ' + esc(j.salary) + '</span>' : '') +
-          (j.source ? '<span class="source-badge">' + esc(j.source) + '</span>' : '') +
-        '</div>' +
-        (j.why_good_fit ? '<div class="card-why">' + esc(j.why_good_fit) + '</div>' : '') +
-        '<div class="card-foot">' +
-          '<a href="' + esc(j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-gold btn-sm">View Posting \\u2192</a>' +
-          '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ')">Tailor Resume</button>' +
-        '</div>' +
-      '</div>';
-  });
-  grid.innerHTML = html;
+  cnt.textContent = jobs.length + ' saved job' + (jobs.length !== 1 ? 's' : '');
+  grid.innerHTML = jobs.map(function(j) { return renderJobCard(j, { showSavedDate: true }); }).join('');
 }
 
 // ── runs ──────────────────────────────────────────────────────────────────
