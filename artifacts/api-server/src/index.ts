@@ -353,6 +353,25 @@ app.post('/api/tailor/:jobId', async (req: Request, res: Response) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+// Freeform resume tailoring (from pasted job description)
+app.post('/api/tailor-freeform', async (req: Request, res: Response) => {
+  try {
+    const { resume, jobDescription } = req.body;
+    if (!resume || !jobDescription) {
+      res.status(400).json({ error: 'Both resume and job description are required.' });
+      return;
+    }
+    const fakeJob = {
+      title: 'Target Role',
+      company: 'Target Company',
+      location: '',
+      description: jobDescription,
+    };
+    const result = await tailorResumeWithClaude(fakeJob, resume);
+    res.json({ resume_text: result.resume, cover_letter: result.coverLetter });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 // Gmail OAuth
 app.get('/api/gmail/status', async (_req, res: Response) => {
   try {
@@ -496,17 +515,23 @@ app.get('/api/gmail/preview', async (_req, res: Response) => {
 });
 
 function buildDigestHtml(jobs: any[]): string {
-  const jobCards = jobs.map(j => `
-    <div style="background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:16px;margin-bottom:12px">
+  const jobCards = jobs.map(j => {
+    const jobData = JSON.stringify({ title: j.title, company: j.company, location: j.location, salary: j.salary || '', score: j.match_score, why: j.why_good_fit || '', url: j.apply_url }).replace(/"/g, '&quot;');
+    return `
+    <div class="digest-job" data-job="${jobData}" style="background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:16px;margin-bottom:12px;position:relative">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <span style="color:#c8a96e;font-weight:bold;font-size:16px">${esc(j.title)}</span>
-        <span style="background:#c8a96e;color:#0f0f0f;padding:2px 10px;border-radius:12px;font-weight:bold;font-size:13px">${esc(j.match_score)}/100</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="background:#c8a96e;color:#0f0f0f;padding:2px 10px;border-radius:12px;font-weight:bold;font-size:13px">${esc(j.match_score)}/100</span>
+        </div>
       </div>
       <div style="color:#999;margin:6px 0">${esc(j.company)} • ${esc(j.location)}${j.salary ? ' • ' + esc(j.salary) : ''}</div>
       <div style="color:#bbb;font-size:13px;margin:8px 0">${esc(j.why_good_fit)}</div>
-      <a href="${esc(j.apply_url)}" style="color:#c8a96e;font-size:13px">View Posting →</a>
+      <div style="display:flex;align-items:center;gap:12px">
+        <a href="${esc(j.apply_url)}" style="color:#c8a96e;font-size:13px">View Posting →</a>
+      </div>
     </div>
-  `).join('');
+  `;}).join('');
 
   return `
     <div style="background:#0f0f0f;color:#e8e6e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:32px;max-width:640px;margin:0 auto">
@@ -808,6 +833,11 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .modal-text{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;font-size:13px;line-height:1.7;white-space:pre-wrap;color:var(--text);max-height:300px;overflow-y:auto}
 .copy-btn{margin-top:8px}
 
+/* resume split */
+.resume-split{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media(max-width:800px){.resume-split{grid-template-columns:1fr}}
+.resume-col{display:flex;flex-direction:column}
+
 /* email tab */
 .email-section{max-width:100%}
 .email-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;font-size:12px}
@@ -843,7 +873,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="tab active" id="tab-jobs" onclick="showTab('jobs')">Jobs</div>
   <div class="tab" id="tab-companies" onclick="showTab('companies')">Companies</div>
   <div class="tab" id="tab-resume" onclick="showTab('resume')">Resume</div>
-  <div class="tab" id="tab-email" onclick="showTab('email')">Email</div>
+  <div class="tab" id="tab-email" onclick="showTab('email')">Daily Jobs Report</div>
   <div class="tab" id="tab-runs" onclick="showTab('runs')">Run History</div>
 </nav>
 <div class="main-content">
@@ -853,12 +883,37 @@ textarea:focus,input:focus{border-color:var(--gold)}
 </div>
 
 <div class="panel" id="panel-resume">
-  <div class="sec-title" style="margin-bottom:12px">Base Resume</div>
-  <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Paste your base resume below. This is used when you click "Tailor Resume" on any job card.</p>
-  <textarea id="resume-text" rows="18" placeholder="Paste your full resume here..."></textarea>
-  <div class="save-row">
-    <button class="btn btn-gold" onclick="saveResume()">Save Resume</button>
-    <span class="ok-msg" id="resume-msg" style="display:none">Saved!</span>
+  <div class="resume-split">
+    <div class="resume-col">
+      <div class="sec-title" style="margin-bottom:8px">Base Resume</div>
+      <textarea id="resume-text" rows="20" placeholder="Paste your full resume here..."></textarea>
+      <div class="save-row">
+        <button class="btn btn-gold btn-sm" onclick="saveResume()">Save Resume</button>
+        <span class="ok-msg" id="resume-msg" style="display:none">Saved!</span>
+      </div>
+    </div>
+    <div class="resume-col">
+      <div class="sec-title" style="margin-bottom:8px">Job Description</div>
+      <textarea id="job-desc-text" rows="20" placeholder="Paste the job listing description here..."></textarea>
+      <div class="save-row">
+        <button class="btn btn-gold" onclick="tailorFromDesc()">Tailor Resume</button>
+        <span id="tailor-inline-msg" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+    </div>
+  </div>
+  <div id="tailor-result" style="display:none;margin-top:24px">
+    <div class="resume-split">
+      <div class="resume-col">
+        <div class="sec-title" style="margin-bottom:8px">Tailored Resume</div>
+        <div class="modal-text" id="tailor-result-resume" style="max-height:500px"></div>
+        <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="copyText('tailor-result-resume')">Copy Resume</button>
+      </div>
+      <div class="resume-col">
+        <div class="sec-title" style="margin-bottom:8px">Cover Letter</div>
+        <div class="modal-text" id="tailor-result-cover" style="max-height:500px"></div>
+        <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="copyText('tailor-result-cover')">Copy Cover Letter</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1060,6 +1115,25 @@ async function saveResume() {
   msg.style.display = '';
   setTimeout(function(){ msg.style.display = 'none'; }, 2500);
 }
+async function tailorFromDesc() {
+  var resume = document.getElementById('resume-text').value.trim();
+  var jobDesc = document.getElementById('job-desc-text').value.trim();
+  var msg = document.getElementById('tailor-inline-msg');
+  if (!resume) { msg.textContent = 'Please paste your resume first.'; msg.style.color = 'var(--red)'; return; }
+  if (!jobDesc) { msg.textContent = 'Please paste a job description.'; msg.style.color = 'var(--red)'; return; }
+  msg.textContent = 'Generating tailored resume with Claude...';
+  msg.style.color = 'var(--gold)';
+  document.getElementById('tailor-result').style.display = 'none';
+  try {
+    var res = await fetch('/api/tailor-freeform', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({resume:resume, jobDescription:jobDesc}) });
+    var data = await res.json();
+    if (data.error) { msg.textContent = 'Error: ' + data.error; msg.style.color = 'var(--red)'; return; }
+    document.getElementById('tailor-result-resume').textContent = data.resume_text || '';
+    document.getElementById('tailor-result-cover').textContent = data.cover_letter || '';
+    document.getElementById('tailor-result').style.display = '';
+    msg.textContent = '';
+  } catch(e) { msg.textContent = 'Error: ' + e.message; msg.style.color = 'var(--red)'; }
+}
 
 // ── tailor resume modal ───────────────────────────────────────────────────
 function closeTailorModal() {
@@ -1147,6 +1221,23 @@ async function loadEmailPreview() {
     var res = await fetch('/api/gmail/preview');
     var data = await res.json();
     document.getElementById('email-preview').innerHTML = data.html || '<div style="color:var(--muted)">No preview available</div>';
+    // inject copy buttons on each job card
+    document.querySelectorAll('.digest-job[data-job]').forEach(function(el) {
+      var btn = document.createElement('button');
+      btn.textContent = 'Copy';
+      btn.className = 'btn btn-ghost btn-sm';
+      btn.style.cssText = 'position:absolute;top:12px;right:12px;font-size:11px;padding:3px 10px';
+      btn.onclick = function() {
+        try {
+          var d = JSON.parse(el.getAttribute('data-job'));
+          var text = d.title + '\\n' + d.company + '\\n' + d.location + (d.salary ? '\\n' + d.salary : '') + '\\nScore: ' + d.score + '/100' + (d.why ? '\\n' + d.why : '') + '\\n' + d.url;
+          navigator.clipboard.writeText(text);
+          btn.textContent = 'Copied!';
+          setTimeout(function(){ btn.textContent = 'Copy'; }, 1500);
+        } catch(e) {}
+      };
+      el.appendChild(btn);
+    });
   } catch(e) {}
 }
 async function loadDigestTime() {
