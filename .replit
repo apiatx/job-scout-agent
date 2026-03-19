@@ -1,19 +1,5 @@
 modules = ["nodejs-24", "postgresql-16"]
 
-[workflows]
-runButton = "Start"
-
-[[workflows.workflow]]
-name = "Start"
-author = "agent"
-
-[workflows.workflow.metadata]
-outputType = "webview"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "pkill -f tsx || true; pkill -f node || true; sleep 1; cd artifacts/api-server && PORT=8080 npm run dev"
-waitForPort = 8080
 
 [postMerge]
 path = "scripts/post-merge.sh"
