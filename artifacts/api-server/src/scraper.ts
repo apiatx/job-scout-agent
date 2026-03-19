@@ -84,7 +84,8 @@ export async function scrapeWorkdayJobs(
   companySlug: string,
   workdayDomain: string,
   companyName: string,
-  careerSite?: string
+  careerSite?: string,
+  searchTerms?: string[]
 ): Promise<ScrapedJob[]> {
   const site = careerSite ?? `${companySlug}_Careers`;
   const domainVariants = [workdayDomain];
@@ -109,7 +110,7 @@ export async function scrapeWorkdayJobs(
           'Accept': 'application/json',
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         },
-        body: JSON.stringify({ limit: 20, offset: 0, searchText: 'account executive' }),
+        body: JSON.stringify({ limit: 20, offset: 0, searchText: searchTerms?.[0] ?? '' }),
       });
       if (!response.ok) {
         console.log(`Workday: ${domain} returned ${response.status}, trying next...`);

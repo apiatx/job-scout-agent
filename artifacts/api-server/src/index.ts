@@ -582,7 +582,16 @@ function buildDigestHtml(jobs: any[]): string {
 
 // ── Scout background worker ───────────────────────────────────────────────
 
-const SALES_INCLUDE = /\b(account\s+executive|sales\s+director|director\s+of\s+sales|vp\s+of?\s+sales|regional\s+sales|territory\s+sales|named\s+account|major\s+account|strategic\s+account|enterprise\s+account)\b/i;
+function buildTitleFilter(targetRoles: string[]): RegExp | null {
+  if (!targetRoles || targetRoles.length === 0) return null;
+  // Build a regex that matches any of the target role keywords in the title.
+  // Each role is split into words and joined with \s+ for flexible whitespace matching.
+  const patterns = targetRoles.map(role => {
+    const words = role.trim().split(/\s+/).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    return words.join('\\s+');
+  });
+  return new RegExp(`\\b(${patterns.join('|')})\\b`, 'i');
+}
 
 async function runScoutInBackground(runId: number): Promise<void> {
   try {
@@ -614,7 +623,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
         } else if (co.ats_type === 'workday' && co.careers_url) {
           // careers_url stores the workday domain for workday companies
           const slug = co.careers_url.split('.')[0]; // e.g. "cisco" from "cisco.wd5..."
-          const jobs = await scrapeWorkdayJobs(slug, co.careers_url, co.name);
+          const jobs = await scrapeWorkdayJobs(slug, co.careers_url, co.name, undefined, criteria.target_roles);
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Workday' })));
         } else if ((co.ats_type === 'plain' || co.ats_type === 'other') && co.careers_url) {
           const jobs = await scrapePlainWebsite(co.careers_url, co.name);
@@ -629,9 +638,12 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
     console.log(`\nTotal scraped: ${allJobs.length} listings from ${companiesScanned} companies`);
 
-    const filtered = allJobs.filter((j) => SALES_INCLUDE.test(j.title));
+    const titleFilter = buildTitleFilter(criteria.target_roles);
+    const filtered = titleFilter
+      ? allJobs.filter((j) => titleFilter.test(j.title))
+      : allJobs;
     const toScore = filtered;
-    console.log(`Pre-filter: ${filtered.length} matched title filter; sending ${toScore.length} to Claude`);
+    console.log(`Pre-filter: ${filtered.length} matched title filter out of ${allJobs.length}; sending ${toScore.length} to Claude`);
 
     if (toScore.length === 0) {
       await pool.query(
