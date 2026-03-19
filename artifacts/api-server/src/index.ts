@@ -420,6 +420,11 @@ async function initDb(): Promise<void> {
     'Salt Lake', 'Boise', 'Reno', 'Las Vegas',
   ];
   for (const loc of rejectedLocationPatterns) {
+    // Delete dependent tailored_docs first, then the jobs
+    await pool.query(
+      `DELETE FROM tailored_docs WHERE job_id IN (SELECT id FROM jobs WHERE location ILIKE $1 AND saved_at IS NULL)`,
+      [`%${loc}%`]
+    );
     const deleted = await pool.query(
       `DELETE FROM jobs WHERE location ILIKE $1 AND saved_at IS NULL`,
       [`%${loc}%`]
