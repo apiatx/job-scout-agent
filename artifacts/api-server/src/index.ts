@@ -136,32 +136,56 @@ async function initDb(): Promise<void> {
   // Seed companies if none exist
   const { rows: coRows } = await pool.query('SELECT id FROM companies LIMIT 1');
   if (coRows.length === 0) {
-    const greenhouse = [
-      'purestorage', 'coreweave', 'zscaler', 'rubrik', 'samsara', 'datadog', 'databricks',
-      'nutanix', 'paloaltonetworks', 'aristanw', 'lumentum', 'coherent', 'nvidia', 'broadcom', 'snowflake-computing'
+    const greenhouse: [string, string][] = [
+      ['Pure Storage', 'purestorage'],
+      ['CoreWeave', 'coreweave'],
+      ['Zscaler', 'zscaler'],
+      ['Rubrik', 'rubrik'],
+      ['Samsara', 'samsara'],
+      ['Databricks', 'databricks'],
+      ['Nutanix', 'nutanix'],
+      ['Palo Alto Networks', 'paloaltonetworks'],
+      ['Arista Networks', 'aristanw'],
+      ['Lumentum', 'lumentum'],
+      ['Coherent Corp', 'coherent'],
+      ['NVIDIA', 'nvidia'],
+      ['Broadcom', 'broadcom'],
+      ['Snowflake', 'snowflake-computing'],
+      ['Marvell Technology', 'marvell'],
+      ['Calix', 'calix'],
+      ['CommScope', 'commscope'],
+      ['NetApp', 'netapp'],
+      ['Iron Mountain', 'ironmountain'],
     ];
-    for (const slug of greenhouse) {
-      const name = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    for (const [name, slug] of greenhouse) {
       await pool.query(
         `INSERT INTO companies (name, ats_type, ats_slug) VALUES ($1, 'greenhouse', $2)`,
         [name, slug]
       );
     }
 
+    const lever: [string, string][] = [
+      ['VAST Data', 'vast-data'],
+      ['Weka', 'weka'],
+    ];
+    for (const [name, slug] of lever) {
+      await pool.query(
+        `INSERT INTO companies (name, ats_type, ats_slug) VALUES ($1, 'lever', $2)`,
+        [name, slug]
+      );
+    }
+
     const workday: [string, string][] = [
-      ['Cisco', 'cisco.wd5.myworkdayjobs.com'],
-      ['Dell', 'dell.wd1.myworkdayjobs.com'],
+      ['Dell Technologies', 'dell.wd1.myworkdayjobs.com'],
       ['HPE', 'hpe.wd5.myworkdayjobs.com'],
-      ['Intel', 'intel.wd1.myworkdayjobs.com'],
+      ['Cisco', 'cisco.wd5.myworkdayjobs.com'],
       ['AMD', 'amd.wd5.myworkdayjobs.com'],
-      ['Vertiv', 'vertiv.wd1.myworkdayjobs.com'],
-      ['Fortinet', 'fortinet.wd3.myworkdayjobs.com'],
-      ['F5', 'f5.wd5.myworkdayjobs.com'],
-      ['Extreme Networks', 'extremenetworks.wd5.myworkdayjobs.com'],
-      ['Equinix', 'equinix.wd1.myworkdayjobs.com'],
       ['Micron', 'micron.wd1.myworkdayjobs.com'],
+      ['Vertiv', 'vertiv.wd1.myworkdayjobs.com'],
+      ['Equinix', 'equinix.wd1.myworkdayjobs.com'],
+      ['Extreme Networks', 'extremenetworks.wd5.myworkdayjobs.com'],
+      ['F5', 'f5.wd5.myworkdayjobs.com'],
       ['Seagate', 'seagate.wd1.myworkdayjobs.com'],
-      ['Marvell', 'marvell.wd1.myworkdayjobs.com'],
     ];
     for (const [name, domain] of workday) {
       await pool.query(
@@ -173,13 +197,100 @@ async function initDb(): Promise<void> {
     const plain: [string, string][] = [
       ['Juniper Networks', 'https://jobs.juniper.net'],
       ['Eaton', 'https://jobs.eaton.com'],
-      ['Keysight', 'https://careers.keysight.com'],
+      ['Keysight Technologies', 'https://careers.keysight.com'],
+      ['Schneider Electric', 'https://careers.schneiderelectric.com'],
+      ['Supermicro', 'https://www.supermicro.com/en/about/jobs'],
+      ['Fortinet', 'https://www.fortinet.com/corporate/careers/careers-search'],
+      ['Ciena', 'https://www.ciena.com/careers'],
+      ['Infinera', 'https://www.infinera.com/company/careers'],
+      ['Viavi Solutions', 'https://www.viavisolutions.com/en-us/careers'],
+      ['Western Digital', 'https://jobs.westerndigital.com'],
+      ['Lambda Labs', 'https://lambdalabs.com/careers'],
+      ['Groq', 'https://groq.com/careers'],
+      ['Cerebras', 'https://cerebras.ai/careers'],
+      ['Tenstorrent', 'https://tenstorrent.com/careers'],
+      ['Digital Realty', 'https://www.digitalrealty.com/careers'],
     ];
     for (const [name, url] of plain) {
       await pool.query(
         `INSERT INTO companies (name, ats_type, careers_url) VALUES ($1, 'plain', $2)`,
         [name, url]
       );
+    }
+  }
+
+  // ── Migrate: ensure all target companies exist, remove retired ones ──
+  const targetCompanies: { name: string; ats_type: string; ats_slug?: string; careers_url?: string }[] = [
+    // Greenhouse
+    { name: 'Pure Storage', ats_type: 'greenhouse', ats_slug: 'purestorage' },
+    { name: 'CoreWeave', ats_type: 'greenhouse', ats_slug: 'coreweave' },
+    { name: 'Zscaler', ats_type: 'greenhouse', ats_slug: 'zscaler' },
+    { name: 'Rubrik', ats_type: 'greenhouse', ats_slug: 'rubrik' },
+    { name: 'Samsara', ats_type: 'greenhouse', ats_slug: 'samsara' },
+    { name: 'Databricks', ats_type: 'greenhouse', ats_slug: 'databricks' },
+    { name: 'Nutanix', ats_type: 'greenhouse', ats_slug: 'nutanix' },
+    { name: 'Palo Alto Networks', ats_type: 'greenhouse', ats_slug: 'paloaltonetworks' },
+    { name: 'Arista Networks', ats_type: 'greenhouse', ats_slug: 'aristanw' },
+    { name: 'Lumentum', ats_type: 'greenhouse', ats_slug: 'lumentum' },
+    { name: 'Coherent Corp', ats_type: 'greenhouse', ats_slug: 'coherent' },
+    { name: 'NVIDIA', ats_type: 'greenhouse', ats_slug: 'nvidia' },
+    { name: 'Broadcom', ats_type: 'greenhouse', ats_slug: 'broadcom' },
+    { name: 'Snowflake', ats_type: 'greenhouse', ats_slug: 'snowflake-computing' },
+    { name: 'Marvell Technology', ats_type: 'greenhouse', ats_slug: 'marvell' },
+    { name: 'Calix', ats_type: 'greenhouse', ats_slug: 'calix' },
+    { name: 'CommScope', ats_type: 'greenhouse', ats_slug: 'commscope' },
+    { name: 'NetApp', ats_type: 'greenhouse', ats_slug: 'netapp' },
+    { name: 'Iron Mountain', ats_type: 'greenhouse', ats_slug: 'ironmountain' },
+    // Lever
+    { name: 'VAST Data', ats_type: 'lever', ats_slug: 'vast-data' },
+    { name: 'Weka', ats_type: 'lever', ats_slug: 'weka' },
+    // Workday
+    { name: 'Dell Technologies', ats_type: 'workday', careers_url: 'dell.wd1.myworkdayjobs.com' },
+    { name: 'HPE', ats_type: 'workday', careers_url: 'hpe.wd5.myworkdayjobs.com' },
+    { name: 'Cisco', ats_type: 'workday', careers_url: 'cisco.wd5.myworkdayjobs.com' },
+    { name: 'AMD', ats_type: 'workday', careers_url: 'amd.wd5.myworkdayjobs.com' },
+    { name: 'Micron', ats_type: 'workday', careers_url: 'micron.wd1.myworkdayjobs.com' },
+    { name: 'Vertiv', ats_type: 'workday', careers_url: 'vertiv.wd1.myworkdayjobs.com' },
+    { name: 'Equinix', ats_type: 'workday', careers_url: 'equinix.wd1.myworkdayjobs.com' },
+    { name: 'Extreme Networks', ats_type: 'workday', careers_url: 'extremenetworks.wd5.myworkdayjobs.com' },
+    { name: 'F5', ats_type: 'workday', careers_url: 'f5.wd5.myworkdayjobs.com' },
+    { name: 'Seagate', ats_type: 'workday', careers_url: 'seagate.wd1.myworkdayjobs.com' },
+    // Plain / Other
+    { name: 'Juniper Networks', ats_type: 'other', careers_url: 'https://jobs.juniper.net' },
+    { name: 'Eaton', ats_type: 'other', careers_url: 'https://jobs.eaton.com' },
+    { name: 'Keysight Technologies', ats_type: 'other', careers_url: 'https://careers.keysight.com' },
+    { name: 'Schneider Electric', ats_type: 'other', careers_url: 'https://careers.schneiderelectric.com' },
+    { name: 'Supermicro', ats_type: 'other', careers_url: 'https://www.supermicro.com/en/about/jobs' },
+    { name: 'Fortinet', ats_type: 'other', careers_url: 'https://www.fortinet.com/corporate/careers/careers-search' },
+    { name: 'Ciena', ats_type: 'plain', careers_url: 'https://www.ciena.com/careers' },
+    { name: 'Infinera', ats_type: 'plain', careers_url: 'https://www.infinera.com/company/careers' },
+    { name: 'Viavi Solutions', ats_type: 'plain', careers_url: 'https://www.viavisolutions.com/en-us/careers' },
+    { name: 'Western Digital', ats_type: 'plain', careers_url: 'https://jobs.westerndigital.com' },
+    { name: 'Lambda Labs', ats_type: 'plain', careers_url: 'https://lambdalabs.com/careers' },
+    { name: 'Groq', ats_type: 'plain', careers_url: 'https://groq.com/careers' },
+    { name: 'Cerebras', ats_type: 'plain', careers_url: 'https://cerebras.ai/careers' },
+    { name: 'Tenstorrent', ats_type: 'plain', careers_url: 'https://tenstorrent.com/careers' },
+    { name: 'Digital Realty', ats_type: 'plain', careers_url: 'https://www.digitalrealty.com/careers' },
+    { name: 'One Stop Systems', ats_type: 'plain', careers_url: 'https://onestopsystems.com/pages/sales-account-manager' },
+    { name: 'Cadence Design Systems', ats_type: 'workday', careers_url: 'cadence.wd1.myworkdayjobs.com' },
+  ];
+
+  // Remove retired companies
+  const retiredNames = ['Anritsu', 'Datadog'];
+  for (const name of retiredNames) {
+    await pool.query('DELETE FROM companies WHERE LOWER(name) = LOWER($1)', [name]);
+  }
+
+  // Add any missing companies (match on lowercase name to avoid duplicates)
+  const { rows: existingCos } = await pool.query('SELECT LOWER(name) as lname FROM companies');
+  const existingSet = new Set(existingCos.map((r: { lname: string }) => r.lname));
+  for (const co of targetCompanies) {
+    if (!existingSet.has(co.name.toLowerCase())) {
+      await pool.query(
+        `INSERT INTO companies (name, ats_type, ats_slug, careers_url) VALUES ($1, $2, $3, $4)`,
+        [co.name, co.ats_type, co.ats_slug ?? null, co.careers_url ?? null]
+      );
+      console.log(`Added company: ${co.name}`);
     }
   }
 
