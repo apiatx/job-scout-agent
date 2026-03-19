@@ -739,8 +739,23 @@ app.use((_req: Request, res: Response) => {
 
 initDb()
   .then(() => {
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`Job Scout Agent listening on port ${PORT}`);
+    });
+    server.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        console.log(`Port ${PORT} in use, killing existing process...`);
+        import('child_process').then(({ execSync }) => {
+          try { execSync(`lsof -ti:${PORT} | xargs kill -9`, { stdio: 'ignore' }); } catch {}
+          setTimeout(() => {
+            app.listen(PORT, () => {
+              console.log(`Job Scout Agent listening on port ${PORT}`);
+            });
+          }, 1000);
+        });
+      } else {
+        throw err;
+      }
     });
   })
   .catch((err: unknown) => {
