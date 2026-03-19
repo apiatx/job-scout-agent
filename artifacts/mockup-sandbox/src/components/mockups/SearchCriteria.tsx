@@ -160,14 +160,14 @@ export default function SearchCriteria() {
       <div>
         <h1 className="text-2xl font-bold">Search Criteria</h1>
         <p className="text-muted-foreground mt-1">
-          Configure your job search preferences. The scout will use these to find and score matches.
+          This is the single source of truth for all scoring. Whatever you set here flows directly into the scout's scoring prompt.
         </p>
       </div>
 
       <Card>
         <CardHeader>
           <CardTitle>Compensation &amp; Work Type</CardTitle>
-          <CardDescription>Set your minimum pay and preferred work arrangement</CardDescription>
+          <CardDescription>Jobs with listed salary below minimum are excluded. If salary is not listed, the job is kept.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
@@ -178,7 +178,7 @@ export default function SearchCriteria() {
                 id="min-salary"
                 type="number"
                 className="pl-7"
-                placeholder="e.g. 150000"
+                placeholder="e.g. 130000"
                 value={criteria.min_salary ?? ""}
                 onChange={(e) =>
                   setCriteria({
@@ -201,8 +201,8 @@ export default function SearchCriteria() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="any">Any (No Preference)</SelectItem>
-                <SelectItem value="remote">Remote</SelectItem>
-                <SelectItem value="office">Office / On-site</SelectItem>
+                <SelectItem value="remote">Remote Only</SelectItem>
+                <SelectItem value="office">On-site</SelectItem>
                 <SelectItem value="hybrid">Hybrid</SelectItem>
               </SelectContent>
             </Select>
@@ -213,12 +213,12 @@ export default function SearchCriteria() {
       <Card>
         <CardHeader>
           <CardTitle>Location</CardTitle>
-          <CardDescription>Add cities, states, or regions you're interested in</CardDescription>
+          <CardDescription>Hard filter — jobs outside these locations are excluded entirely before scoring</CardDescription>
         </CardHeader>
         <CardContent>
           <TagInput
             label="Preferred Locations"
-            description="Add locations like 'New York', 'Remote', 'San Francisco', 'Texas', etc."
+            description="Jobs must match at least one of these. 'Remote' allows remote jobs. 'United States' allows any US location."
             tags={criteria.locations}
             onAdd={(tag) => addTag("locations", tag)}
             onRemove={(i) => removeTag("locations", i)}
@@ -258,7 +258,7 @@ export default function SearchCriteria() {
         <CardContent className="space-y-6">
           <TagInput
             label="Must Have"
-            description="Jobs must mention at least one of these"
+            description="Jobs missing ALL of these will score low"
             tags={criteria.must_have}
             onAdd={(tag) => addTag("must_have", tag)}
             onRemove={(i) => removeTag("must_have", i)}
@@ -274,7 +274,7 @@ export default function SearchCriteria() {
           />
           <TagInput
             label="Avoid"
-            description="Penalize or skip jobs with these terms"
+            description="Hard filter — jobs containing these terms are excluded before scoring"
             tags={criteria.avoid}
             onAdd={(tag) => addTag("avoid", tag)}
             onRemove={(i) => removeTag("avoid", i)}
@@ -286,7 +286,7 @@ export default function SearchCriteria() {
       <Card>
         <CardHeader>
           <CardTitle>Your Info</CardTitle>
-          <CardDescription>Used for email digests and tailored documents</CardDescription>
+          <CardDescription>Used for daily digest emails and tailored documents</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">

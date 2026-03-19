@@ -147,13 +147,13 @@ async function initDb(): Promise<void> {
       `INSERT INTO criteria (target_roles, industries, min_salary, locations, must_have, nice_to_have, avoid)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
-        ['Enterprise Account Executive', 'Strategic Account Executive', 'Senior Account Executive', 'Regional Sales Manager', 'Sales Director', 'Named Account Executive', 'Account Executive', 'Account Manager', 'Enterprise Account Manager'],
-        ['AI Infrastructure', 'Data Center Hardware', 'Semiconductors', 'Networking Hardware', 'Storage Hardware', 'Optical Networking', 'Edge Computing', 'Server Hardware', 'Power & Cooling', 'Industrial Automation', 'Oilfield Services Technology', 'Energy Technology', 'Clean Energy / Energy Storage', 'Machine Vision', 'Test and Measurement', 'Materials Science / Specialty Chemicals', 'Robotics'],
-        120000,
-        ['Remote', 'United States', 'South Carolina', 'North Carolina', 'Florida', 'Georgia'],
-        ['enterprise sales', 'quota carrying', 'hardware OR infrastructure OR networking OR storage OR semiconductor'],
-        ['AI', 'data center', 'GPU', 'NVIDIA', 'hunter mentality', 'new logo', 'industrial automation', 'energy technology', 'machine vision', 'robotics', 'oilfield services', 'energy storage'],
-        ['SDR', 'BDR', 'inbound only', 'SMB only', 'marketing', 'recruiting', 'engineering', 'software only'],
+        ['Enterprise Account Executive', 'Strategic Account Executive', 'Senior Account Executive', 'Regional Sales Manager', 'Sales Director', 'Named Account Executive', 'sales account executive', 'sales executive'],
+        ['AI Infrastructure', 'Data Center Hardware', 'Semiconductors', 'Networking Hardware', 'Storage Hardware', 'Optical Networking', 'Edge Computing', 'Power & Cooling Infrastructure', 'Server Hardware', 'Industrial Automation', 'Oilfield Services Technology', 'Energy Technology', 'Clean Energy / Energy Storage', 'Machine Vision', 'Test and Measurement', 'Materials Science / Specialty Chemicals', 'Robotics'],
+        130000,
+        ['Remote', 'United States', 'South Carolina', 'North Carolina', 'Georgia', 'Florida', 'South East', 'East Coast', 'South'],
+        ['enterprise sales', 'hardware OR infrastructure OR networking OR storage OR semiconductor OR compute OR optical'],
+        ['AI', 'data center', 'GPU', 'NVIDIA', 'industrial automation', 'energy technology', 'machine vision', 'robotics', 'oilfield services', 'energy storage'],
+        ['SDR', 'BDR', 'inbound only', 'SMB only', 'pure SaaS', 'marketing', 'recruiting'],
       ]
     );
   }
@@ -279,26 +279,6 @@ async function initDb(): Promise<void> {
         `INSERT INTO companies (name, ats_type, careers_url) VALUES ($1, 'plain', $2)`,
         [name, url]
       );
-    }
-  }
-
-  // ── Migrate: ensure criteria includes new industries and nice-to-haves ──
-  const newIndustries = ['Industrial Automation', 'Oilfield Services Technology', 'Energy Technology', 'Clean Energy / Energy Storage', 'Machine Vision', 'Test and Measurement', 'Materials Science / Specialty Chemicals', 'Robotics'];
-  const newNiceToHave = ['industrial automation', 'energy technology', 'machine vision', 'robotics', 'oilfield services', 'energy storage', 'industrial AI', 'oil and gas software', 'utility software', 'grid technology', 'clean energy'];
-  const { rows: criteriaRows } = await pool.query('SELECT id, industries, nice_to_have FROM criteria LIMIT 1');
-  if (criteriaRows.length > 0) {
-    const cr = criteriaRows[0] as { id: number; industries: string[]; nice_to_have: string[] };
-    const currentIndustries = new Set(cr.industries.map((s: string) => s.toLowerCase()));
-    const missingIndustries = newIndustries.filter(i => !currentIndustries.has(i.toLowerCase()));
-    if (missingIndustries.length > 0) {
-      await pool.query('UPDATE criteria SET industries = industries || $1::text[] WHERE id = $2', [missingIndustries, cr.id]);
-      console.log(`Added industries: ${missingIndustries.join(', ')}`);
-    }
-    const currentNice = new Set(cr.nice_to_have.map((s: string) => s.toLowerCase()));
-    const missingNice = newNiceToHave.filter(n => !currentNice.has(n.toLowerCase()));
-    if (missingNice.length > 0) {
-      await pool.query('UPDATE criteria SET nice_to_have = nice_to_have || $1::text[] WHERE id = $2', [missingNice, cr.id]);
-      console.log(`Added nice-to-haves: ${missingNice.join(', ')}`);
     }
   }
 
@@ -459,67 +439,6 @@ async function initDb(): Promise<void> {
       `UPDATE companies SET ats_type=$1, careers_url=$2, ats_slug=$3 WHERE LOWER(name) = LOWER($4)`,
       [fix.ats_type, fix.careers_url, fix.ats_slug, fix.name]
     );
-  }
-
-  // Purge jobs from locations outside candidate's STRICT preferred regions (US only)
-  // Step 1: Delete ALL international jobs immediately
-  const intlPatterns = [
-    'Singapore', 'India', 'Bangalore', 'Bengaluru', 'Hyderabad', 'Mumbai', 'Chennai', 'Pune', 'Delhi', 'Noida', 'Gurgaon', 'Gurugram',
-    'France', 'Paris', 'Germany', 'Berlin', 'Munich', 'United Kingdom', 'London', 'Ireland', 'Dublin',
-    'Canada', 'Toronto', 'Vancouver', 'Montreal', 'Israel', 'Tel Aviv', 'Japan', 'Tokyo',
-    'Australia', 'Sydney', 'Melbourne', 'Brazil', 'Mexico', 'Amsterdam', 'Netherlands', 'Sweden', 'Stockholm',
-    'Spain', 'Madrid', 'Barcelona', 'Italy', 'Milan', 'Poland', 'Warsaw', 'Korea', 'Seoul',
-    'China', 'Shanghai', 'Beijing', 'Shenzhen', 'Hong Kong', 'Taiwan', 'Taipei',
-    'Vietnam', 'Philippines', 'Manila', 'Indonesia', 'Jakarta', 'Thailand', 'Bangkok',
-    'Malaysia', 'Kuala Lumpur', 'Colombia', 'Argentina', 'Buenos Aires', 'Chile', 'Costa Rica',
-    'Switzerland', 'Zurich', 'Czech', 'Prague', 'Romania', 'Hungary', 'Budapest',
-    'Portugal', 'Lisbon', 'Austria', 'Vienna', 'Finland', 'Helsinki', 'Norway', 'Oslo',
-    'Denmark', 'Copenhagen', 'Belgium', 'Brussels', 'Luxembourg', 'New Zealand',
-    'South Africa', 'Cape Town', 'Nigeria', 'Kenya', 'Egypt', 'Dubai', 'Abu Dhabi',
-    'Saudi', 'Riyadh', 'Qatar', 'Pakistan', 'Sri Lanka', 'EMEA', 'APAC', 'LATAM',
-  ];
-  for (const loc of intlPatterns) {
-    await pool.query(`DELETE FROM tailored_docs WHERE job_id IN (SELECT id FROM jobs WHERE location ILIKE $1 AND saved_at IS NULL)`, [`%${loc}%`]);
-    const del = await pool.query(`DELETE FROM jobs WHERE location ILIKE $1 AND saved_at IS NULL`, [`%${loc}%`]);
-    if ((del.rowCount ?? 0) > 0) console.log(`Purged ${del.rowCount} international jobs matching "${loc}"`);
-  }
-
-  // Step 2: ALLOWLIST purge — only keep US jobs in NC, SC, GA, FL, or pure Remote/Remote-US
-  const allowedLocationPatterns = [
-    'North Carolina', 'NC', 'South Carolina', 'SC', 'Georgia', 'GA', 'Florida', 'FL',
-    'Charlotte', 'Raleigh', 'Durham', 'Atlanta', 'Miami', 'Tampa', 'Jacksonville',
-    'Orlando', 'Savannah', 'Charleston', 'Greenville',
-  ];
-  const allowedILIKE = allowedLocationPatterns.map((_, i) => `location ILIKE $${i + 1}`).join(' OR ');
-  const purgeQuery = `
-    DELETE FROM jobs
-    WHERE saved_at IS NULL
-      AND NOT (
-        location ~* '^\\s*remote\\s*$'
-        OR location ~* 'remote.*united states'
-        OR location ~* 'remote.*\\bus\\b'
-        OR location ~* '^\\s*united states\\s*$'
-        OR ${allowedILIKE}
-      )
-  `;
-  const purgeDocQuery = `
-    DELETE FROM tailored_docs WHERE job_id IN (
-      SELECT id FROM jobs
-      WHERE saved_at IS NULL
-        AND NOT (
-          location ~* '^\\s*remote\\s*$'
-          OR location ~* 'remote.*united states'
-          OR location ~* 'remote.*\\bus\\b'
-          OR location ~* '^\\s*united states\\s*$'
-          OR ${allowedILIKE}
-        )
-    )
-  `;
-  const likeParams = allowedLocationPatterns.map(p => `%${p}%`);
-  await pool.query(purgeDocQuery, likeParams);
-  const purged = await pool.query(purgeQuery, likeParams);
-  if ((purged.rowCount ?? 0) > 0) {
-    console.log(`Allowlist purge: deleted ${purged.rowCount} jobs outside NC/SC/GA/FL/Remote-US`);
   }
 
   // Mark any stale running records as failed
@@ -1044,7 +963,96 @@ async function runScoutInBackground(runId: number): Promise<void> {
     }
     console.log(`───────────────────────────────────────────────────────────`);
 
-    if (toScore.length === 0) {
+    // ── Hard pre-filters (before Claude scoring) to save API costs ──
+
+    // 1. Location hard filter — only pass jobs that match user's location preferences
+    const hasLocationPrefs = criteria.locations.length > 0;
+    const locationAllowTerms = new Set<string>();
+    let allowRemote = false;
+    let allowUnitedStates = false;
+    if (hasLocationPrefs) {
+      for (const loc of criteria.locations) {
+        const lower = loc.trim().toLowerCase();
+        if (lower === 'remote') { allowRemote = true; continue; }
+        if (lower === 'united states') { allowUnitedStates = true; continue; }
+        locationAllowTerms.add(lower);
+      }
+    }
+
+    const locationAllowPattern = locationAllowTerms.size > 0
+      ? new RegExp(`\\b(${Array.from(locationAllowTerms).map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'i')
+      : null;
+
+    function jobMatchesLocation(jobLocation: string): boolean {
+      if (!hasLocationPrefs) return true; // no prefs = accept all
+      const loc = jobLocation.trim();
+      // "Remote" in job listing matches if user allows remote or united states
+      if (/remote/i.test(loc) && (allowRemote || allowUnitedStates)) return true;
+      // "United States" in job listing matches if user allows united states
+      if (/united states/i.test(loc) && allowUnitedStates) return true;
+      // Check against specific location terms
+      if (locationAllowPattern && locationAllowPattern.test(loc)) return true;
+      return false;
+    }
+
+    // 2. Avoid keywords hard filter — exclude jobs whose title or description contains avoid keywords
+    const avoidPatterns = criteria.avoid
+      .filter(k => k.trim().length > 0)
+      .map(k => new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i'));
+
+    function jobContainsAvoid(job: Job): boolean {
+      for (const pattern of avoidPatterns) {
+        if (pattern.test(job.title)) return true;
+        if (job.description && pattern.test(job.description)) return true;
+      }
+      return false;
+    }
+
+    // 3. Salary hard filter — exclude jobs where listed salary is below minimum
+    function jobBelowMinSalary(job: Job): boolean {
+      if (!criteria.min_salary || !job.salary) return false;
+      // Try to extract a number from the salary string
+      const nums = job.salary.match(/[\d,]+/g);
+      if (!nums) return false;
+      // Use the highest number found (could be a range like "$100,000 - $150,000")
+      const highest = Math.max(...nums.map(n => parseInt(n.replace(/,/g, ''), 10)));
+      if (isNaN(highest) || highest === 0) return false;
+      // If salary looks like hourly (< 1000), skip filtering
+      if (highest < 1000) return false;
+      return highest < criteria.min_salary;
+    }
+
+    // Apply all hard pre-filters
+    let preFiltered = toScore;
+    let droppedByLocation = 0;
+    let droppedByAvoid = 0;
+    let droppedBySalary = 0;
+
+    if (hasLocationPrefs) {
+      const before = preFiltered.length;
+      preFiltered = preFiltered.filter(j => jobMatchesLocation(j.location));
+      droppedByLocation = before - preFiltered.length;
+    }
+    if (avoidPatterns.length > 0) {
+      const before = preFiltered.length;
+      preFiltered = preFiltered.filter(j => !jobContainsAvoid(j));
+      droppedByAvoid = before - preFiltered.length;
+    }
+    if (criteria.min_salary) {
+      const before = preFiltered.length;
+      preFiltered = preFiltered.filter(j => !jobBelowMinSalary(j));
+      droppedBySalary = before - preFiltered.length;
+    }
+
+    console.log(`\n──── PRE-FILTERS (before Claude scoring) ───────────────────`);
+    console.log(`  After title filter: ${toScore.length}`);
+    console.log(`  Dropped by location: ${droppedByLocation}`);
+    console.log(`  Dropped by avoid keywords: ${droppedByAvoid}`);
+    console.log(`  Dropped by salary below $${criteria.min_salary?.toLocaleString() ?? 'n/a'}: ${droppedBySalary}`);
+    console.log(`  Remaining for Claude scoring: ${preFiltered.length}`);
+    console.log(`───────────────────────────────────────────────────────────`);
+
+    if (preFiltered.length === 0) {
       await pool.query(
         "UPDATE scout_runs SET status='completed', companies_scanned=$1, jobs_found=0, matches_found=0, completed_at=NOW() WHERE id=$2",
         [companiesScanned, runId]
@@ -1055,7 +1063,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     // Pass pre-approved company names from the database to Claude scoring
     const companyNames = companies.map((c: any) => c.name as string);
     const matches = await scoreJobsWithClaude(
-      toScore.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
+      preFiltered.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
       {
         targetRoles: criteria.target_roles,
         industries: criteria.industries,
@@ -1069,7 +1077,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     );
 
     console.log(`\n──── CLAUDE SCORING RESULTS ────────────────────────────────`);
-    console.log(`Claude returned ${matches.length} matches from ${toScore.length} candidates`);
+    console.log(`Claude returned ${matches.length} matches from ${preFiltered.length} candidates`);
     if (matches.length > 0) {
       const matchesByCompany: Record<string, number> = {};
       for (const m of matches) matchesByCompany[m.company] = (matchesByCompany[m.company] || 0) + 1;
@@ -1078,66 +1086,8 @@ async function runScoutInBackground(runId: number): Promise<void> {
     }
     console.log(`───────────────────────────────────────────────────────────`);
 
-    // Hard server-side location filter — ALLOWLIST approach
-    // Build allowed location terms from the candidate's criteria locations,
-    // plus well-known expansions for regional keywords.
-    // STRICT: Only NC, SC, GA, FL — no other states allowed
-    const regionExpansions: Record<string, string[]> = {
-      'southeast':   ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Charlotte','Raleigh','Durham','Atlanta','Miami','Tampa','Jacksonville','Orlando','Savannah','Charleston','Greenville'],
-      'south east':  ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Charlotte','Raleigh','Durham','Atlanta','Miami','Tampa','Jacksonville','Orlando','Savannah','Charleston','Greenville'],
-      'east coast':  ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Charlotte','Raleigh','Durham','Atlanta','Miami','Tampa','Jacksonville','Orlando','Savannah','Charleston','Greenville'],
-      'east':        ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Charlotte','Raleigh','Durham','Atlanta','Miami','Tampa','Jacksonville','Orlando','Savannah','Charleston','Greenville'],
-      'south':       ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Charlotte','Raleigh','Durham','Atlanta','Miami','Tampa','Jacksonville','Orlando','Savannah','Charleston','Greenville'],
-    };
-    const allowedTerms = new Set<string>();
-    // DO NOT add bare "remote" — it would match any international remote job
-    for (const loc of criteria.locations) {
-      const lower = loc.trim().toLowerCase();
-      if (lower === 'remote') continue; // handled separately below
-      allowedTerms.add(lower);
-      const expanded = regionExpansions[lower];
-      if (expanded) {
-        for (const t of expanded) allowedTerms.add(t.toLowerCase());
-      }
-    }
-
-    // Known international / non-US keywords to reject immediately
-    const internationalReject = /\b(singapore|india|bangalore|bengaluru|hyderabad|mumbai|chennai|pune|delhi|noida|gurgaon|gurugram|france|paris|germany|berlin|munich|uk|united kingdom|london|ireland|dublin|canada|toronto|vancouver|montreal|israel|tel aviv|japan|tokyo|australia|sydney|melbourne|brazil|s[aã]o paulo|mexico|amsterdam|netherlands|sweden|stockholm|spain|madrid|barcelona|italy|milan|rome|poland|warsaw|korea|seoul|china|shanghai|beijing|shenzhen|hong kong|taiwan|taipei|vietnam|philippines|manila|indonesia|jakarta|thailand|bangkok|malaysia|kuala lumpur|colombia|bogot[aá]|argentina|buenos aires|chile|santiago|costa rica|switzerland|zurich|czech|prague|romania|bucharest|hungary|budapest|portugal|lisbon|austria|vienna|finland|helsinki|norway|oslo|denmark|copenhagen|belgium|brussels|luxembourg|new zealand|auckland|south africa|cape town|nigeria|lagos|kenya|nairobi|egypt|cairo|uae|dubai|abu dhabi|saudi|riyadh|qatar|doha|pakistan|karachi|lahore|sri lanka|emea|apac|latam|asia|europe)\b/i;
-
-    // Build a regex from allowed US location terms (not including "remote")
-    const allowedPattern = new RegExp(
-      `\\b(${Array.from(allowedTerms).map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'i'
-    );
-    const locationFiltered = matches.filter(m => {
-      const loc = m.location;
-      // REJECT any international location immediately
-      if (internationalReject.test(loc)) return false;
-      // Allow if location contains an allowed US term (NC, SC, GA, FL, their cities)
-      if (allowedTerms.size > 0 && allowedPattern.test(loc)) return true;
-      // Allow pure "Remote" with no qualifier, or "Remote - US/United States"
-      if (/remote/i.test(loc)) {
-        if (/^\s*remote\s*$/i.test(loc)) return true;
-        if (/remote.*\bunited states\b/i.test(loc)) return true;
-        if (/remote.*\bus\b/i.test(loc) && !internationalReject.test(loc)) return true;
-      }
-      return false;
-    });
-    console.log(`\n──── LOCATION FILTER ───────────────────────────────────────`);
-    console.log(`Location filter: ${matches.length} → ${locationFiltered.length} (rejected ${matches.length - locationFiltered.length})`);
-    // Log rejected jobs so we can see what's being dropped
-    const locationRejected = matches.filter(m => !locationFiltered.includes(m));
-    if (locationRejected.length > 0) {
-      console.log(`  Rejected by location:`);
-      for (const m of locationRejected) console.log(`    ✗ ${m.company} — "${m.title}" — location: "${m.location}" (score: ${m.matchScore})`);
-    }
-    if (locationFiltered.length > 0) {
-      console.log(`  Passed location filter:`);
-      for (const m of locationFiltered) console.log(`    ✓ ${m.company} — "${m.title}" — location: "${m.location}" (score: ${m.matchScore})`);
-    }
-    console.log(`───────────────────────────────────────────────────────────`);
-
-    for (const m of locationFiltered) {
-      const source = toScore.find(j => j.applyUrl === m.applyUrl)?.source ?? '';
+    for (const m of matches) {
+      const source = preFiltered.find(j => j.applyUrl === m.applyUrl)?.source ?? '';
       await pool.query(
         `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
@@ -1151,20 +1101,20 @@ async function runScoutInBackground(runId: number): Promise<void> {
     }
 
     console.log(`\n──── DATABASE INSERT ───────────────────────────────────────`);
-    console.log(`Saved ${locationFiltered.length} jobs to database for scout run #${runId}`);
+    console.log(`Saved ${matches.length} jobs to database for scout run #${runId}`);
     console.log(`════════════════════════════════════════════════════════════`);
     console.log(`SCOUT RUN #${runId} COMPLETE`);
     console.log(`  Companies scanned: ${companiesScanned}`);
     console.log(`  Raw jobs scraped:  ${allJobs.length}`);
     console.log(`  Passed title filter: ${toScore.length}`);
+    console.log(`  Pre-filtered (location/avoid/salary): ${preFiltered.length}`);
     console.log(`  Claude matches (score >= 50): ${matches.length}`);
-    console.log(`  Passed location filter: ${locationFiltered.length}`);
-    console.log(`  Saved to database: ${locationFiltered.length}`);
+    console.log(`  Saved to database: ${matches.length}`);
     console.log(`════════════════════════════════════════════════════════════\n`);
 
     await pool.query(
       "UPDATE scout_runs SET status='completed', companies_scanned=$1, jobs_found=$2, matches_found=$3, completed_at=NOW() WHERE id=$4",
-      [companiesScanned, allJobs.length, locationFiltered.length, runId]
+      [companiesScanned, allJobs.length, matches.length, runId]
     );
 
     // Send digest email if Gmail is connected
