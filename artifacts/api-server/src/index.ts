@@ -1081,6 +1081,7 @@ function showTab(name) {
 async function loadStats() {
   try {
     var res = await fetch('/api/stats');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     var s = await res.json();
     document.getElementById('stat-scanned').textContent = s.jobsToday || '0';
     document.getElementById('stat-matches').textContent = s.matchesToday || '0';
@@ -1089,13 +1090,16 @@ async function loadStats() {
       document.getElementById('stat-lastrun').textContent = new Date(s.lastRun.started_at).toLocaleString();
       document.getElementById('hdr-status').textContent = 'Last run: ' + new Date(s.lastRun.started_at).toLocaleString();
     }
-  } catch(e) {}
+  } catch(e) {
+    console.error('loadStats failed:', e);
+  }
 }
 
 // ── jobs ─────────────────────────────────────────────────────────────────
 var _jobsById = {};
 var _allJobs = [];
 var _currentJobsTab = 'top';
+var _jobsRetries = 0;
 
 function showJobsTab(tab) {
   _currentJobsTab = tab;
@@ -1176,17 +1180,28 @@ function renderJobs() {
 async function loadJobs() {
   try {
     var res = await fetch('/api/jobs?min_score=60');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (!res.ok) {
+      var body = '';
+      try { body = JSON.stringify(await res.json()); } catch(_){}
+      throw new Error('HTTP ' + res.status + (body ? ': ' + body : ''));
+    }
     var jobs = await res.json();
     _allJobs = jobs;
     _jobsById = {};
     jobs.forEach(function(j) { _jobsById[j.id] = j; });
+    _jobsRetries = 0;
     renderJobs();
   } catch(e) {
     console.error('loadJobs failed:', e);
+    _jobsRetries++;
     var cnt = document.getElementById('jobs-count');
-    cnt.textContent = 'Failed to load jobs \u2014 retrying\u2026';
-    setTimeout(loadJobs, 3000);
+    if (_jobsRetries <= 5) {
+      cnt.textContent = 'Failed to load jobs (attempt ' + _jobsRetries + '/5) \\u2014 retrying\\u2026';
+      setTimeout(loadJobs, 3000);
+    } else {
+      cnt.textContent = 'Could not load jobs \\u2014 check that the server is running and refresh the page';
+      _jobsRetries = 0;
+    }
   }
 }
 
@@ -1213,19 +1228,25 @@ async function toggleSave(jobId) {
 
 // ── saved jobs ────────────────────────────────────────────────────────────
 async function loadSavedJobs() {
-  var res = await fetch('/api/jobs/saved');
-  var jobs = await res.json();
-  // update cache
-  jobs.forEach(function(j) { _jobsById[j.id] = j; });
-  var grid = document.getElementById('saved-grid');
-  var cnt  = document.getElementById('saved-count');
-  if (!jobs.length) {
-    cnt.textContent = 'No saved jobs yet \\u2014 save jobs from the Jobs tab';
-    grid.innerHTML = '';
-    return;
+  try {
+    var res = await fetch('/api/jobs/saved');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var jobs = await res.json();
+    // update cache
+    jobs.forEach(function(j) { _jobsById[j.id] = j; });
+    var grid = document.getElementById('saved-grid');
+    var cnt  = document.getElementById('saved-count');
+    if (!jobs.length) {
+      cnt.textContent = 'No saved jobs yet \\u2014 save jobs from the Jobs tab';
+      grid.innerHTML = '';
+      return;
+    }
+    cnt.textContent = jobs.length + ' saved job' + (jobs.length !== 1 ? 's' : '');
+    grid.innerHTML = jobs.map(function(j) { return renderJobCard(j, { showSavedDate: true }); }).join('');
+  } catch(e) {
+    console.error('loadSavedJobs failed:', e);
+    document.getElementById('saved-count').textContent = 'Failed to load saved jobs';
   }
-  cnt.textContent = jobs.length + ' saved job' + (jobs.length !== 1 ? 's' : '');
-  grid.innerHTML = jobs.map(function(j) { return renderJobCard(j, { showSavedDate: true }); }).join('');
 }
 
 // ── runs ──────────────────────────────────────────────────────────────────
@@ -1482,6 +1503,7 @@ async function runScout() {
         clearInterval(pollTimer); pollTimer = null;
         btn.disabled = false;
         document.getElementById('dot').className = 'dot';
+        _jobsRetries = 0;
         loadStats();
         if (latest.status === 'completed') {
           var found = latest.matches_found || latest.jobs_found;
