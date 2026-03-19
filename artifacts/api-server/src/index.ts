@@ -123,11 +123,11 @@ async function initDb(): Promise<void> {
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
         ['Enterprise Account Executive', 'Strategic Account Executive', 'Senior Account Executive', 'Regional Sales Manager', 'Sales Director', 'Named Account Executive', 'Account Executive', 'Account Manager', 'Enterprise Account Manager'],
-        ['AI Infrastructure', 'Data Center Hardware', 'Semiconductors', 'Networking Hardware', 'Storage Hardware', 'Optical Networking', 'Edge Computing', 'Server Hardware', 'Power & Cooling'],
+        ['AI Infrastructure', 'Data Center Hardware', 'Semiconductors', 'Networking Hardware', 'Storage Hardware', 'Optical Networking', 'Edge Computing', 'Server Hardware', 'Power & Cooling', 'Industrial Automation', 'Oilfield Services Technology', 'Energy Technology', 'Clean Energy / Energy Storage', 'Machine Vision', 'Test and Measurement', 'Materials Science / Specialty Chemicals', 'Robotics'],
         120000,
         ['Remote', 'United States', 'South Carolina', 'North Carolina', 'Florida', 'Georgia'],
         ['enterprise sales', 'quota carrying', 'hardware OR infrastructure OR networking OR storage OR semiconductor'],
-        ['AI', 'data center', 'GPU', 'NVIDIA', 'hunter mentality', 'new logo'],
+        ['AI', 'data center', 'GPU', 'NVIDIA', 'hunter mentality', 'new logo', 'industrial automation', 'energy technology', 'machine vision', 'robotics', 'oilfield services', 'energy storage'],
         ['SDR', 'BDR', 'inbound only', 'SMB only', 'marketing', 'recruiting', 'engineering', 'software only'],
       ]
     );
@@ -160,6 +160,7 @@ async function initDb(): Promise<void> {
       ['Veeam', 'veeam'],
       ['Zerto', 'zerto'],
       ['Commvault', 'commvault'],
+      ['Fluence', 'fluence'],
     ];
     for (const [name, slug] of greenhouse) {
       await pool.query(
@@ -179,22 +180,28 @@ async function initDb(): Promise<void> {
       );
     }
 
-    const workday: [string, string][] = [
-      ['Dell Technologies', 'dell.wd1.myworkdayjobs.com'],
-      ['HPE', 'hpe.wd5.myworkdayjobs.com'],
-      ['Cisco', 'cisco.wd5.myworkdayjobs.com'],
-      ['AMD', 'amd.wd5.myworkdayjobs.com'],
-      ['Micron', 'micron.wd1.myworkdayjobs.com'],
-      ['Vertiv', 'vertiv.wd1.myworkdayjobs.com'],
-      ['Equinix', 'equinix.wd1.myworkdayjobs.com'],
-      ['Extreme Networks', 'extremenetworks.wd5.myworkdayjobs.com'],
-      ['F5', 'f5.wd5.myworkdayjobs.com'],
-      ['Seagate', 'seagate.wd1.myworkdayjobs.com'],
+    const workday: [string, string, string | null][] = [
+      ['Dell Technologies', 'dell.wd1.myworkdayjobs.com', null],
+      ['HPE', 'hpe.wd5.myworkdayjobs.com', null],
+      ['Cisco', 'cisco.wd5.myworkdayjobs.com', null],
+      ['AMD', 'amd.wd5.myworkdayjobs.com', null],
+      ['Micron', 'micron.wd1.myworkdayjobs.com', null],
+      ['Vertiv', 'vertiv.wd1.myworkdayjobs.com', null],
+      ['Equinix', 'equinix.wd1.myworkdayjobs.com', null],
+      ['Extreme Networks', 'extremenetworks.wd5.myworkdayjobs.com', null],
+      ['F5', 'f5.wd5.myworkdayjobs.com', null],
+      ['Seagate', 'seagate.wd1.myworkdayjobs.com', null],
+      ['Rockwell Automation', 'rockwellautomation.wd1.myworkdayjobs.com', 'External_Rockwell_Automation'],
+      ['Baker Hughes', 'bakerhughes.wd5.myworkdayjobs.com', 'BakerHughes'],
+      ['Entegris', 'entegris.wd1.myworkdayjobs.com', 'EntegrisCareers'],
+      ['Cognex', 'cognex.wd1.myworkdayjobs.com', 'External_Career_Site'],
+      ['Bloom Energy', 'bloomenergy.wd1.myworkdayjobs.com', 'BloomEnergyCareers'],
+      ['3M', '3m.wd1.myworkdayjobs.com', 'Search'],
     ];
-    for (const [name, domain] of workday) {
+    for (const [name, domain, careerSite] of workday) {
       await pool.query(
-        `INSERT INTO companies (name, ats_type, careers_url) VALUES ($1, 'workday', $2)`,
-        [name, domain]
+        `INSERT INTO companies (name, ats_type, careers_url, ats_slug) VALUES ($1, 'workday', $2, $3)`,
+        [name, domain, careerSite]
       );
     }
 
@@ -214,12 +221,48 @@ async function initDb(): Promise<void> {
       ['Cerebras', 'https://cerebras.ai/careers'],
       ['Tenstorrent', 'https://tenstorrent.com/careers'],
       ['Digital Realty', 'https://www.digitalrealty.com/careers'],
+      ['VAST Data', 'https://www.vastdata.com/careers'],
+      ['Weka', 'https://www.weka.io/company/careers'],
+      ['Teradyne', 'https://jobs.teradyne.com'],
+      ['Zebra Technologies', 'https://careers.zebra.com'],
+      ['Halliburton', 'https://www.halliburton.com/en/careers'],
+      ['Schlumberger', 'https://www.slb.com/careers'],
+      ['Honeywell', 'https://careers.honeywell.com'],
+      ['ABB', 'https://new.abb.com/jobs'],
+      ['Siemens', 'https://jobs.siemens.com/careers'],
+      ['Dow', 'https://www.dow.com/en-us/careers'],
+      ['PPG Industries', 'https://careers.ppg.com'],
+      ['Axalta', 'https://careers.axalta.com'],
+      ['Enphase Energy', 'https://www.enphase.com/careers'],
+      ['First Solar', 'https://www.firstsolar.com/careers'],
+      ['Ameresco', 'https://www.ameresco.com/careers'],
+      ['Keyence', 'https://www.keyence.com/company/jobs'],
     ];
     for (const [name, url] of plain) {
       await pool.query(
         `INSERT INTO companies (name, ats_type, careers_url) VALUES ($1, 'plain', $2)`,
         [name, url]
       );
+    }
+  }
+
+  // ── Migrate: ensure criteria includes new industries and nice-to-haves ──
+  const newIndustries = ['Industrial Automation', 'Oilfield Services Technology', 'Energy Technology', 'Clean Energy / Energy Storage', 'Machine Vision', 'Test and Measurement', 'Materials Science / Specialty Chemicals', 'Robotics'];
+  const newNiceToHave = ['industrial automation', 'energy technology', 'machine vision', 'robotics', 'oilfield services', 'energy storage'];
+  const { rows: criteriaRows } = await pool.query('SELECT id, industries, nice_to_have FROM criteria LIMIT 1');
+  if (criteriaRows.length > 0) {
+    const cr = criteriaRows[0] as { id: number; industries: string[]; nice_to_have: string[] };
+    const currentIndustries = new Set(cr.industries.map((s: string) => s.toLowerCase()));
+    const missingIndustries = newIndustries.filter(i => !currentIndustries.has(i.toLowerCase()));
+    if (missingIndustries.length > 0) {
+      await pool.query('UPDATE criteria SET industries = industries || $1::text[] WHERE id = $2', [missingIndustries, cr.id]);
+      console.log(`Added industries: ${missingIndustries.join(', ')}`);
+    }
+    const currentNice = new Set(cr.nice_to_have.map((s: string) => s.toLowerCase()));
+    const missingNice = newNiceToHave.filter(n => !currentNice.has(n.toLowerCase()));
+    if (missingNice.length > 0) {
+      await pool.query('UPDATE criteria SET nice_to_have = nice_to_have || $1::text[] WHERE id = $2', [missingNice, cr.id]);
+      console.log(`Added nice-to-haves: ${missingNice.join(', ')}`);
     }
   }
 
@@ -249,6 +292,7 @@ async function initDb(): Promise<void> {
     { name: 'Veeam', ats_type: 'greenhouse', ats_slug: 'veeam' },
     { name: 'Zerto', ats_type: 'greenhouse', ats_slug: 'zerto' },
     { name: 'Commvault', ats_type: 'greenhouse', ats_slug: 'commvault' },
+    { name: 'Fluence', ats_type: 'greenhouse', ats_slug: 'fluence' },
     // Lever
     { name: 'VAST Data', ats_type: 'lever', ats_slug: 'vast-data' },
     { name: 'Weka', ats_type: 'lever', ats_slug: 'weka' },
@@ -263,6 +307,12 @@ async function initDb(): Promise<void> {
     { name: 'Extreme Networks', ats_type: 'workday', careers_url: 'extremenetworks.wd5.myworkdayjobs.com' },
     { name: 'F5', ats_type: 'workday', careers_url: 'f5.wd5.myworkdayjobs.com' },
     { name: 'Seagate', ats_type: 'workday', careers_url: 'seagate.wd1.myworkdayjobs.com' },
+    { name: 'Rockwell Automation', ats_type: 'workday', careers_url: 'rockwellautomation.wd1.myworkdayjobs.com', ats_slug: 'External_Rockwell_Automation' },
+    { name: 'Baker Hughes', ats_type: 'workday', careers_url: 'bakerhughes.wd5.myworkdayjobs.com', ats_slug: 'BakerHughes' },
+    { name: 'Entegris', ats_type: 'workday', careers_url: 'entegris.wd1.myworkdayjobs.com', ats_slug: 'EntegrisCareers' },
+    { name: 'Cognex', ats_type: 'workday', careers_url: 'cognex.wd1.myworkdayjobs.com', ats_slug: 'External_Career_Site' },
+    { name: 'Bloom Energy', ats_type: 'workday', careers_url: 'bloomenergy.wd1.myworkdayjobs.com', ats_slug: 'BloomEnergyCareers' },
+    { name: '3M', ats_type: 'workday', careers_url: '3m.wd1.myworkdayjobs.com', ats_slug: 'Search' },
     // Plain / Other
     { name: 'Juniper Networks', ats_type: 'other', careers_url: 'https://jobs.juniper.net' },
     { name: 'Eaton', ats_type: 'other', careers_url: 'https://jobs.eaton.com' },
@@ -281,6 +331,22 @@ async function initDb(): Promise<void> {
     { name: 'Digital Realty', ats_type: 'plain', careers_url: 'https://www.digitalrealty.com/careers' },
     { name: 'One Stop Systems', ats_type: 'plain', careers_url: 'https://onestopsystems.com/pages/sales-account-manager' },
     { name: 'Cadence Design Systems', ats_type: 'workday', careers_url: 'cadence.wd1.myworkdayjobs.com' },
+    { name: 'VAST Data', ats_type: 'plain', careers_url: 'https://www.vastdata.com/careers' },
+    { name: 'Weka', ats_type: 'plain', careers_url: 'https://www.weka.io/company/careers' },
+    { name: 'Teradyne', ats_type: 'plain', careers_url: 'https://jobs.teradyne.com' },
+    { name: 'Zebra Technologies', ats_type: 'plain', careers_url: 'https://careers.zebra.com' },
+    { name: 'Halliburton', ats_type: 'plain', careers_url: 'https://www.halliburton.com/en/careers' },
+    { name: 'Schlumberger', ats_type: 'plain', careers_url: 'https://www.slb.com/careers' },
+    { name: 'Honeywell', ats_type: 'plain', careers_url: 'https://careers.honeywell.com' },
+    { name: 'ABB', ats_type: 'plain', careers_url: 'https://new.abb.com/jobs' },
+    { name: 'Siemens', ats_type: 'plain', careers_url: 'https://jobs.siemens.com/careers' },
+    { name: 'Dow', ats_type: 'plain', careers_url: 'https://www.dow.com/en-us/careers' },
+    { name: 'PPG Industries', ats_type: 'plain', careers_url: 'https://careers.ppg.com' },
+    { name: 'Axalta', ats_type: 'plain', careers_url: 'https://careers.axalta.com' },
+    { name: 'Enphase Energy', ats_type: 'plain', careers_url: 'https://www.enphase.com/careers' },
+    { name: 'First Solar', ats_type: 'plain', careers_url: 'https://www.firstsolar.com/careers' },
+    { name: 'Ameresco', ats_type: 'plain', careers_url: 'https://www.ameresco.com/careers' },
+    { name: 'Keyence', ats_type: 'plain', careers_url: 'https://www.keyence.com/company/jobs' },
   ];
 
   // Remove retired companies
@@ -740,9 +806,9 @@ async function runScoutInBackground(runId: number): Promise<void> {
           const jobs = await scrapeLeverJobs(co.ats_slug, co.name);
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Lever' })));
         } else if (co.ats_type === 'workday' && co.careers_url) {
-          // careers_url stores the workday domain for workday companies
+          // careers_url stores the workday domain; ats_slug optionally stores the careerSite name
           const slug = co.careers_url.split('.')[0]; // e.g. "cisco" from "cisco.wd5..."
-          const jobs = await scrapeWorkdayJobs(slug, co.careers_url, co.name, undefined, criteria.target_roles);
+          const jobs = await scrapeWorkdayJobs(slug, co.careers_url, co.name, co.ats_slug ?? undefined, criteria.target_roles);
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Workday' })));
         } else if ((co.ats_type === 'plain' || co.ats_type === 'other') && co.careers_url) {
           const jobs = await scrapePlainWebsite(co.careers_url, co.name);
