@@ -114,18 +114,28 @@ export async function tailorResumeWithClaude(
   job: { title: string; company: string; location: string; description?: string; why_good_fit?: string; apply_url?: string },
   baseResume: string
 ): Promise<{ resume: string; coverLetter: string }> {
-  const prompt = `You are a professional resume writer. Given the candidate's base resume and a specific job, create:
-1. A tailored resume optimized for this specific role
-2. A compelling cover letter
+  const systemPrompt = `You are an elite executive resume writer and career strategist who has helped thousands of senior sales professionals land roles at top-tier technology companies. You specialize in crafting ATS-optimized resumes and compelling cover letters that highlight quantifiable achievements and strategic impact.
 
-Job Details:
+Your approach:
+- Lead every bullet point with a strong action verb and quantifiable result (revenue generated, deals closed, % quota attainment, team size, territory growth)
+- Mirror the exact language, keywords, and qualifications from the job description throughout the resume
+- Position the candidate as a strategic revenue driver, not just a salesperson
+- Highlight enterprise/strategic selling methodology experience (MEDDPICC, Challenger, Solution Selling, etc.) when relevant
+- Emphasize relationships with C-suite buyers and complex deal cycles
+- For the cover letter: open with a compelling hook, connect the candidate's track record directly to the company's mission and the role's requirements, and close with confidence and a clear call to action
+- Keep the resume to 2 pages max, well-structured with clear sections: Summary, Experience, Key Skills, Education
+- Never fabricate information — only reframe and optimize what's in the base resume`;
+
+  const prompt = `Tailor this candidate's resume and write a cover letter for the following role.
+
+JOB DETAILS:
 Title: ${job.title}
 Company: ${job.company}
 Location: ${job.location}
-${job.description ? `Description: ${job.description.slice(0, 2000)}` : ''}
+${job.description ? `Description:\n${job.description.slice(0, 3000)}` : ''}
 ${job.why_good_fit ? `Why it's a good fit: ${job.why_good_fit}` : ''}
 
-Base Resume:
+CANDIDATE'S BASE RESUME:
 ${baseResume}
 
 Respond ONLY with a JSON object (no markdown, no extra text):
@@ -135,8 +145,9 @@ Respond ONLY with a JSON object (no markdown, no extra text):
 }`;
 
   const message = await anthropic.messages.create({
-    model: 'claude-haiku-4-5',
-    max_tokens: 4096,
+    model: 'claude-sonnet-4-6',
+    max_tokens: 8096,
+    system: systemPrompt,
     messages: [{ role: 'user', content: prompt }],
   });
 
