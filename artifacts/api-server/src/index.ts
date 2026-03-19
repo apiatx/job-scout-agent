@@ -1,6 +1,7 @@
 import express, { type Request, type Response } from 'express';
 import pg from 'pg';
-import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, scrapePlainWebsite } from './scraper.js';
+import { scrapeGreenhouseJobs, scrapeLeverJobs, searchAdzunaJobs, ADZUNA_SEARCH_QUERIES } from './scraper.js';
+import type { ScrapedJob } from './scraper.js';
 import { scoreJobsWithClaude, tailorResumeWithClaude } from './agent.js';
 
 const { Pool } = pg;
@@ -969,6 +970,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     let companiesScanned = 0;
     const perCompanyStats: { name: string; type: string; jobs: number; error?: string }[] = [];
 
+    // ── Stage 2a: Scrape Greenhouse and Lever (direct API scrapers that work) ──
     for (const c of companies) {
       const co = c as { name: string; ats_type: string; ats_slug: string | null; careers_url: string | null };
       try {
@@ -981,27 +983,11 @@ async function runScoutInBackground(runId: number): Promise<void> {
           const jobs = await scrapeLeverJobs(co.ats_slug, co.name);
           jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Lever' })));
-        } else if (co.ats_type === 'workday') {
-          let domain = co.careers_url ?? '';
-          let careerSite = co.ats_slug ?? undefined;
-          if (!domain.includes('.myworkdayjobs.com') && co.ats_slug?.includes('.myworkdayjobs.com')) {
-            domain = co.ats_slug;
-            careerSite = undefined;
-          }
-          if (!domain.includes('.myworkdayjobs.com')) {
-            const guess = co.name.toLowerCase().replace(/[^a-z0-9]/g, '');
-            domain = `${guess}.wd1.myworkdayjobs.com`;
-          }
-          const slug = domain.split('.')[0];
-          const jobs = await scrapeWorkdayJobs(slug, domain, co.name, careerSite, criteria.target_roles);
-          jobCount = jobs.length;
-          allJobs.push(...jobs.map(j => ({ ...j, source: 'Workday' })));
-        } else if ((co.ats_type === 'plain' || co.ats_type === 'other') && co.careers_url) {
-          const jobs = await scrapePlainWebsite(co.careers_url, co.name);
-          jobCount = jobs.length;
-          allJobs.push(...jobs.map(j => ({ ...j, source: 'Website' })));
         }
-        perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
+        // Skip workday and plain — replaced by Adzuna below
+        if (co.ats_type === 'greenhouse' || co.ats_type === 'lever') {
+          perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
+        }
         companiesScanned++;
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e);
@@ -1010,6 +996,45 @@ async function runScoutInBackground(runId: number): Promise<void> {
         companiesScanned++;
       }
     }
+
+    // ── Stage 2b: Search Adzuna for jobs from all target companies ──
+    // This replaces broken Workday API calls and plain website scraping
+    const companyNames = companies.map((c: any) => (c as { name: string }).name.toLowerCase());
+    console.log(`\n──── ADZUNA SEARCH ────────────────────────────────────────`);
+    console.log(`Running ${ADZUNA_SEARCH_QUERIES.length} Adzuna searches...`);
+    const adzunaSeenUrls = new Set<string>();
+    let adzunaTotalRaw = 0;
+    let adzunaMatched = 0;
+    for (const query of ADZUNA_SEARCH_QUERIES) {
+      try {
+        const results = await searchAdzunaJobs(query);
+        adzunaTotalRaw += results.length;
+        // Filter to only include jobs from our target companies
+        for (const job of results) {
+          if (adzunaSeenUrls.has(job.applyUrl)) continue;
+          const jobCompanyLower = job.company.toLowerCase();
+          const matched = companyNames.some((targetName: string) => {
+            // Partial match: "NVIDIA Corporation" matches target "nvidia"
+            return jobCompanyLower.includes(targetName) || targetName.includes(jobCompanyLower);
+          });
+          if (matched) {
+            adzunaSeenUrls.add(job.applyUrl);
+            // Normalize company name to match our target list
+            const matchedCompany = companies.find((c: any) =>
+              jobCompanyLower.includes((c as { name: string }).name.toLowerCase()) ||
+              (c as { name: string }).name.toLowerCase().includes(jobCompanyLower)
+            );
+            const normalizedCompany = matchedCompany ? (matchedCompany as { name: string }).name : job.company;
+            allJobs.push({ ...job, company: normalizedCompany, source: 'Adzuna' });
+            adzunaMatched++;
+          }
+        }
+      } catch (e) {
+        console.error(`Adzuna search error for "${query}":`, e);
+      }
+    }
+    console.log(`Adzuna: ${adzunaTotalRaw} total results → ${adzunaMatched} matched target companies (${adzunaSeenUrls.size} unique)`);
+    console.log(`───────────────────────────────────────────────────────────`);
 
     console.log(`\n──── SCRAPE RESULTS ────────────────────────────────────────`);
     console.log(`Total scraped: ${allJobs.length} raw listings from ${companiesScanned} companies`);
@@ -1024,10 +1049,9 @@ async function runScoutInBackground(runId: number): Promise<void> {
     const titleFilter = buildTitleFilter(criteria.target_roles);
     console.log(`\n──── TITLE FILTER ──────────────────────────────────────────`);
     console.log(`Title filter regex: ${titleFilter?.source.slice(0, 200)}...`);
-    // Skip title filter for plain/website scraped jobs — they have synthetic titles
-    // like "Jobs at X (page scan)" that will never match. Let Claude evaluate them.
+    // All sources now have real job titles, so filter everything through title filter
     const filtered = titleFilter
-      ? allJobs.filter((j) => j.source === 'Website' || titleFilter.test(j.title))
+      ? allJobs.filter((j) => titleFilter.test(j.title))
       : allJobs;
     const toScore = filtered;
     const droppedByTitle = allJobs.length - filtered.length;
@@ -1036,7 +1060,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     const passedByCompany: Record<string, number> = {};
     const droppedByCompany: Record<string, number> = {};
     for (const j of allJobs) {
-      if (j.source === 'Website' || (titleFilter && titleFilter.test(j.title))) {
+      if (!titleFilter || titleFilter.test(j.title)) {
         passedByCompany[j.company] = (passedByCompany[j.company] || 0) + 1;
       } else {
         droppedByCompany[j.company] = (droppedByCompany[j.company] || 0) + 1;
