@@ -27,27 +27,22 @@ interface CriteriaForAgent {
   mustHave: string[];
   niceToHave: string[];
   avoid: string[];
+  preApprovedCompanies?: string[];
 }
 
-async function scoreOne(job: ScrapedJob, criteriaText: string): Promise<JobMatch | null> {
+async function scoreOne(job: ScrapedJob, criteriaText: string, preApprovedSection: string): Promise<JobMatch | null> {
   try {
     const prompt = `You are a job matching assistant. Evaluate whether this job matches the candidate's criteria.
 
-CRITICAL LOCATION RULE:
-This candidate is ONLY interested in US-based jobs. REJECT ALL international jobs immediately (score 0, isMatch false). Any job located outside the United States — including Singapore, India, France, Germany, UK, Canada, Israel, Japan, Australia, or ANY non-US country — must be rejected with score 0.
-The candidate's preferred US locations are listed below. You MUST reject any job (score 0, isMatch false) whose location does NOT fall within one of the candidate's preferred locations or regions.
-- "Remote" in the candidate's preferences means fully remote US-based roles with NO specific state/city requirement are acceptable. "Remote" jobs in other countries do NOT qualify.
-- If a job says "Remote, <State>" or "Remote, <City>", that state/city MUST be in or closely associated with one of the candidate's preferred locations/regions.
-  For example, if the candidate wants "South Carolina, Georgia, Florida, South East, East Coast, South", then "Remote, Washington" or "Remote, Ohio" or "Remote, Massachusetts" or "Remote, Virginia" do NOT qualify.
-- STRICT regional definitions — use ONLY these states for each region:
-  "South East" or "Southeast": NC, SC, GA, FL — ONLY these four states. No others.
-  "East Coast": Same as Southeast for this candidate — NC, SC, GA, FL only.
-  "South": For this candidate, "South" means ONLY NC, SC, GA, FL. No other states. REJECT AL, TN, TX, KY, MS, LA, AR, and all others.
-  "United States": US-based roles are acceptable ONLY if listed as fully "Remote" with NO specific state/city, OR the state is in one of the candidate's preferred regions above.
-- Virginia is NOT in Southeast, NOT in East Coast, and NOT in South for this candidate. REJECT Virginia jobs.
-- Washington, Massachusetts, California, New York, Oregon, Colorado, Illinois, Ohio, Michigan, Minnesota, etc. are all OUTSIDE the candidate's regions. REJECT them.
-- If a job lists multiple locations (e.g., "San Francisco, CA / Sunnyvale, CA"), ALL locations must be in the candidate's preferred areas, OR the job must also offer a remote option in a preferred area.
-- When in doubt about whether a location matches, REJECT the job. Be very strict.
+LOCATION RULES:
+The candidate's preferred locations are listed below in the criteria. Evaluate location fit based on those preferences.
+- If the candidate lists specific US locations/regions, reject jobs outside those areas (score 0).
+- "Remote" in the candidate's preferences means fully remote roles based in the candidate's preferred country/region are acceptable.
+- If a job says "Remote, <State/City>", that location must be in or closely associated with one of the candidate's preferred locations/regions.
+- If the candidate has no location preferences, accept any location.
+- When in doubt about whether a location matches, lean toward rejecting the job.
+
+${preApprovedSection}
 
 Job:
 Title: ${job.title}
@@ -59,13 +54,11 @@ ${job.description ? `Description snippet: ${job.description.slice(0, 1000)}` : '
 Candidate criteria:
 ${criteriaText}
 
-Software exceptions: Oracle database, Snowflake, Databricks, NetSuite are acceptable even though they are software.
-
 Respond ONLY with a JSON object (no markdown, no extra text):
 {
   "matchScore": <0-100 integer>,
   "whyGoodFit": "<2-3 sentences explaining fit or why it doesn't match>",
-  "isMatch": <true if score >= 60, else false>,
+  "isMatch": <true if score >= 50, else false>,
   "isHardware": <true if the role is primarily hardware/infrastructure/networking/storage/semiconductor, false if software>
 }`;
 
@@ -106,14 +99,23 @@ export async function scoreJobsWithClaude(jobs: ScrapedJob[], criteria: Criteria
   if (jobs.length === 0) return [];
 
   const criteriaText = [
-    `Target roles: ${criteria.targetRoles.join(', ')}`,
-    `Industries: ${criteria.industries.join(', ')}`,
+    criteria.targetRoles.length ? `Target roles: ${criteria.targetRoles.join(', ')}` : '',
+    criteria.industries.length ? `Industries: ${criteria.industries.join(', ')}` : '',
     criteria.minSalary ? `Minimum salary: $${criteria.minSalary.toLocaleString()} base` : '',
-    `Locations: ${criteria.locations.join(', ')}`,
-    `Must have: ${criteria.mustHave.join(', ')}`,
-    `Nice to have: ${criteria.niceToHave.join(', ')}`,
-    `Avoid: ${criteria.avoid.join(', ')}`,
+    criteria.locations.length ? `Locations: ${criteria.locations.join(', ')}` : '',
+    criteria.mustHave.length ? `Must have: ${criteria.mustHave.join(', ')}` : '',
+    criteria.niceToHave.length ? `Nice to have: ${criteria.niceToHave.join(', ')}` : '',
+    criteria.avoid.length ? `Avoid: ${criteria.avoid.join(', ')}` : '',
   ].filter(Boolean).join('\n');
+
+  // Build pre-approved companies section for the prompt
+  let preApprovedSection = '';
+  if (criteria.preApprovedCompanies && criteria.preApprovedCompanies.length > 0) {
+    preApprovedSection = `PRE-APPROVED COMPANIES:
+The user has pre-approved these specific companies as target employers. If a job is from ANY of these companies, treat the company as an automatic match — only evaluate whether the ROLE TITLE and RESPONSIBILITIES match the user's target roles. Do not penalize or lower the score because of the industry or product type — the user has already decided these companies are good targets.
+Pre-approved companies: ${criteria.preApprovedCompanies.join(', ')}
+For jobs NOT from the pre-approved list, apply normal scoring criteria.`;
+  }
 
   const CONCURRENCY = 10;
   const results: JobMatch[] = [];
@@ -121,7 +123,7 @@ export async function scoreJobsWithClaude(jobs: ScrapedJob[], criteria: Criteria
   for (let i = 0; i < jobs.length; i += CONCURRENCY) {
     const batch = jobs.slice(i, i + CONCURRENCY);
     console.log(`Scoring batch ${Math.floor(i / CONCURRENCY) + 1}/${Math.ceil(jobs.length / CONCURRENCY)} (${batch.length} jobs)...`);
-    const batchResults = await Promise.all(batch.map((j) => scoreOne(j, criteriaText)));
+    const batchResults = await Promise.all(batch.map((j) => scoreOne(j, criteriaText, preApprovedSection)));
     for (const r of batchResults) {
       if (r !== null) results.push(r);
     }

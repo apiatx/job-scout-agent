@@ -866,7 +866,7 @@ app.post('/api/gmail/send-test', async (_req, res: Response) => {
 
     // Get recent jobs
     const { rows: jobs } = await pool.query(
-      'SELECT * FROM jobs WHERE match_score >= 60 ORDER BY match_score DESC LIMIT 10'
+      'SELECT * FROM jobs WHERE match_score >= 50 ORDER BY match_score DESC LIMIT 10'
     );
 
     const html = buildDigestHtml(jobs);
@@ -882,7 +882,7 @@ app.post('/api/gmail/send-test', async (_req, res: Response) => {
 app.get('/api/gmail/preview', async (_req, res: Response) => {
   try {
     const { rows: jobs } = await pool.query(
-      'SELECT * FROM jobs WHERE match_score >= 60 ORDER BY match_score DESC LIMIT 10'
+      'SELECT * FROM jobs WHERE match_score >= 50 ORDER BY match_score DESC LIMIT 10'
     );
     res.json({ html: buildDigestHtml(jobs) });
   } catch (e) { res.status(500).json({ error: String(e) }); }
@@ -1052,6 +1052,8 @@ async function runScoutInBackground(runId: number): Promise<void> {
       return;
     }
 
+    // Pass pre-approved company names from the database to Claude scoring
+    const companyNames = companies.map((c: any) => c.name as string);
     const matches = await scoreJobsWithClaude(
       toScore.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
       {
@@ -1062,6 +1064,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
         mustHave: criteria.must_have,
         niceToHave: criteria.nice_to_have,
         avoid: criteria.avoid,
+        preApprovedCompanies: companyNames,
       }
     );
 
@@ -1154,7 +1157,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     console.log(`  Companies scanned: ${companiesScanned}`);
     console.log(`  Raw jobs scraped:  ${allJobs.length}`);
     console.log(`  Passed title filter: ${toScore.length}`);
-    console.log(`  Claude matches (score >= 60): ${matches.length}`);
+    console.log(`  Claude matches (score >= 50): ${matches.length}`);
     console.log(`  Passed location filter: ${locationFiltered.length}`);
     console.log(`  Saved to database: ${locationFiltered.length}`);
     console.log(`════════════════════════════════════════════════════════════\n`);
@@ -1197,7 +1200,7 @@ app.get('/api/stats', async (_req, res: Response) => {
       'SELECT COUNT(*) as count FROM jobs WHERE created_at >= $1', [today]
     );
     const { rows: todayMatches } = await pool.query(
-      'SELECT COUNT(*) as count FROM jobs WHERE created_at >= $1 AND match_score >= 60', [today]
+      'SELECT COUNT(*) as count FROM jobs WHERE created_at >= $1 AND match_score >= 50', [today]
     );
     const { rows: topScore } = await pool.query(
       'SELECT MAX(match_score) as score FROM jobs WHERE created_at >= $1', [today]
@@ -1723,7 +1726,7 @@ function jobAge(j) {
 
 function renderJobCard(j, opts) {
   opts = opts || {};
-  var barColor = j.match_score >= 80 ? 'var(--green)' : j.match_score >= 60 ? 'var(--gold)' : 'var(--red)';
+  var barColor = j.match_score >= 80 ? 'var(--green)' : j.match_score >= 50 ? 'var(--gold)' : 'var(--red)';
   var isSaved = !!j.saved_at;
   var newBadge = (opts.showNew && isNew(j)) ? '<span class="new-badge">NEW</span>' : '';
   var savedDate = (opts.showSavedDate && j.saved_at) ? '<div class="saved-date">Saved ' + new Date(j.saved_at).toLocaleDateString() + '</div>' : '';
@@ -1771,7 +1774,7 @@ function renderJobs() {
       return;
     }
     var newTopCount = jobs.filter(isNew).length;
-    cnt.textContent = jobs.length + ' top match' + (jobs.length !== 1 ? 'es' : '') + ' (score 60+)' + (newTopCount ? ' \\u2014 ' + newTopCount + ' new' : '');
+    cnt.textContent = jobs.length + ' top match' + (jobs.length !== 1 ? 'es' : '') + ' (score 50+)' + (newTopCount ? ' \\u2014 ' + newTopCount + ' new' : '');
     grid.innerHTML = jobs.map(function(j) { return renderJobCard(j, { showNew: true }); }).join('');
   } else {
     // Recent listings: sorted by created_at desc
@@ -1791,7 +1794,7 @@ function renderJobs() {
 
 async function loadJobs() {
   try {
-    var res = await fetch('/api/jobs?min_score=60');
+    var res = await fetch('/api/jobs?min_score=50');
     if (!res.ok) {
       var body = '';
       try { body = JSON.stringify(await res.json()); } catch(_){}
