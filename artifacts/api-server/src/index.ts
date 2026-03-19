@@ -530,7 +530,7 @@ app.get('/api/jobs', async (req: Request, res: Response) => {
   try {
     const minScore = Number(req.query.min_score) || 0;
     const { rows } = await pool.query(
-      'SELECT * FROM jobs WHERE match_score >= $1 ORDER BY match_score DESC, created_at DESC LIMIT 200',
+      'SELECT * FROM jobs WHERE match_score >= $1 ORDER BY match_score DESC, created_at DESC',
       [minScore]
     );
     res.json(rows);
@@ -895,10 +895,23 @@ async function runScoutInBackground(runId: number): Promise<void> {
         } else if (co.ats_type === 'lever' && co.ats_slug) {
           const jobs = await scrapeLeverJobs(co.ats_slug, co.name);
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Lever' })));
-        } else if (co.ats_type === 'workday' && co.careers_url) {
-          // careers_url stores the workday domain; ats_slug optionally stores the careerSite name
-          const slug = co.careers_url.split('.')[0]; // e.g. "cisco" from "cisco.wd5..."
-          const jobs = await scrapeWorkdayJobs(slug, co.careers_url, co.name, co.ats_slug ?? undefined, criteria.target_roles);
+        } else if (co.ats_type === 'workday') {
+          // Determine the workday domain and career site name.
+          // The domain (e.g. "cisco.wd5.myworkdayjobs.com") may be in careers_url or ats_slug.
+          let domain = co.careers_url ?? '';
+          let careerSite = co.ats_slug ?? undefined;
+          // If careers_url doesn't look like a domain but ats_slug does, swap them
+          if (!domain.includes('.myworkdayjobs.com') && co.ats_slug?.includes('.myworkdayjobs.com')) {
+            domain = co.ats_slug;
+            careerSite = undefined;
+          }
+          if (!domain.includes('.myworkdayjobs.com')) {
+            // Try to construct domain from company name
+            const guess = co.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+            domain = `${guess}.wd1.myworkdayjobs.com`;
+          }
+          const slug = domain.split('.')[0]; // e.g. "cisco" from "cisco.wd5..."
+          const jobs = await scrapeWorkdayJobs(slug, domain, co.name, careerSite, criteria.target_roles);
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Workday' })));
         } else if ((co.ats_type === 'plain' || co.ats_type === 'other') && co.careers_url) {
           const jobs = await scrapePlainWebsite(co.careers_url, co.name);
@@ -941,10 +954,42 @@ async function runScoutInBackground(runId: number): Promise<void> {
       }
     );
 
-    // Hard server-side location filter — reject states outside candidate's regions
-    const blockedStates = /\b(Virginia|Washington|Massachusetts|California|New York|Oregon|Colorado|Illinois|Ohio|Michigan|Minnesota|Pennsylvania|New Jersey|Connecticut|Maryland|Arizona|Utah|Nevada|Idaho|Montana|Wisconsin|Indiana|Missouri|Iowa|Nebraska|Kansas|Oklahoma|New Mexico|Hawaii|Alaska|Maine|Vermont|New Hampshire|Rhode Island|Delaware|West Virginia|Wyoming|North Dakota|South Dakota|Seattle|San Francisco|San Jose|Los Angeles|Boston|Chicago|Denver|Portland|Phoenix|Minneapolis|Detroit|Cleveland|Columbus|Indianapolis|Philadelphia|Pittsburgh|Baltimore|Salt Lake)\b/i;
-    const locationFiltered = matches.filter(m => !blockedStates.test(m.location));
-    console.log(`Location filter: ${matches.length} → ${locationFiltered.length} (rejected ${matches.length - locationFiltered.length} outside preferred regions)`);
+    // Hard server-side location filter — ALLOWLIST approach
+    // Build allowed location terms from the candidate's criteria locations,
+    // plus well-known expansions for regional keywords.
+    const regionExpansions: Record<string, string[]> = {
+      'southeast':   ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Alabama','AL','Tennessee','TN','Charlotte','Raleigh','Durham','Atlanta','Nashville','Miami','Tampa','Jacksonville','Orlando','Savannah','Charleston','Greenville','Knoxville'],
+      'south east':  ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Alabama','AL','Tennessee','TN','Charlotte','Raleigh','Durham','Atlanta','Nashville','Miami','Tampa','Jacksonville','Orlando','Savannah','Charleston','Greenville','Knoxville'],
+      'east coast':  ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Alabama','AL','Tennessee','TN','Virginia','VA','New York','NY','New Jersey','NJ','Maryland','MD','Connecticut','CT','Massachusetts','MA','Charlotte','Raleigh','Durham','Atlanta','Nashville','Miami','Tampa','Jacksonville'],
+      'south':       ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Alabama','AL','Tennessee','TN','Mississippi','MS','Louisiana','LA','Arkansas','AR','Texas','TX','Kentucky','KY','Charlotte','Raleigh','Durham','Atlanta','Nashville','Miami','Tampa','Jacksonville','Houston','Dallas','Austin'],
+    };
+    const allowedTerms = new Set<string>();
+    // "Remote" with no geo qualifier is always allowed
+    allowedTerms.add('remote');
+    for (const loc of criteria.locations) {
+      const lower = loc.trim().toLowerCase();
+      allowedTerms.add(lower);
+      const expanded = regionExpansions[lower];
+      if (expanded) {
+        for (const t of expanded) allowedTerms.add(t.toLowerCase());
+      }
+    }
+    // Build a regex from allowed terms
+    const allowedPattern = new RegExp(
+      `\\b(${Array.from(allowedTerms).map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'i'
+    );
+    const locationFiltered = matches.filter(m => {
+      const loc = m.location;
+      // Allow if location matches any allowed term
+      if (allowedPattern.test(loc)) return true;
+      // Allow "Remote" only if it has NO geo qualifier, or the qualifier is in allowed regions
+      if (/remote/i.test(loc)) {
+        // Pure "Remote" or "Remote - US" is fine
+        if (/^\s*remote\s*$/i.test(loc) || /remote.*\bus\b/i.test(loc) || /remote.*\bunited states\b/i.test(loc)) return true;
+      }
+      return false;
+    });
+    console.log(`Location filter (allowlist): ${matches.length} → ${locationFiltered.length} (rejected ${matches.length - locationFiltered.length} outside preferred regions)`);
 
     for (const m of locationFiltered) {
       const source = toScore.find(j => j.applyUrl === m.applyUrl)?.source ?? '';

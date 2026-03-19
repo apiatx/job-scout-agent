@@ -36,7 +36,7 @@ export async function scrapeGreenhouseJobs(slug: string, companyName: string): P
   try {
     const url = `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs?content=true`;
     console.log(`Greenhouse: scanning ${slug}...`);
-    const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
     if (!response.ok) {
       console.log(`Greenhouse: couldn't find '${slug}' (status ${response.status})`);
       return [];
@@ -60,7 +60,7 @@ export async function scrapeLeverJobs(slug: string, companyName: string): Promis
   try {
     const url = `https://api.lever.co/v0/postings/${slug}?mode=json`;
     console.log(`Lever: scanning ${slug}...`);
-    const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
     if (!response.ok) {
       console.log(`Lever: couldn't find '${slug}' (status ${response.status})`);
       return [];
@@ -98,37 +98,66 @@ export async function scrapeWorkdayJobs(
     }
   }
 
+  // Try multiple career site name variants
+  const siteVariants = [site];
+  if (site === `${companySlug}_Careers`) {
+    // Also try common alternatives
+    siteVariants.push(`${companySlug}_External`, `External_${companySlug}`, 'External_Careers', `${companySlug}`);
+  }
+
+  // Search with multiple role terms (not just the first one) + an empty search to catch all
+  const terms = ['', ...(searchTerms ?? []).slice(0, 3)];
+
   for (const domain of domainVariants) {
-    try {
-      const url = `https://${domain}/wday/cxs/${companySlug}/${site}/jobs`;
-      console.log(`Workday: scanning ${domain} (${site})...`);
-      const response = await fetch(url, {
-        method: 'POST',
-        signal: AbortSignal.timeout(5000),
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        },
-        body: JSON.stringify({ limit: 20, offset: 0, searchText: searchTerms?.[0] ?? '' }),
-      });
-      if (!response.ok) {
-        console.log(`Workday: ${domain} returned ${response.status}, trying next...`);
-        continue;
+    for (const siteOption of siteVariants) {
+      try {
+        const url = `https://${domain}/wday/cxs/${companySlug}/${siteOption}/jobs`;
+        console.log(`Workday: scanning ${domain} (${siteOption})...`);
+
+        const seen = new Set<string>();
+        const allPostings: { title: string; company: string; location: string; applyUrl: string }[] = [];
+
+        for (const term of terms) {
+          try {
+            const response = await fetch(url, {
+              method: 'POST',
+              signal: AbortSignal.timeout(8000),
+              headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              },
+              body: JSON.stringify({ limit: 50, offset: 0, searchText: term }),
+            });
+            if (!response.ok) {
+              if (term === '') {
+                // First request failed — this site variant doesn't work
+                throw new Error(`${response.status}`);
+              }
+              continue;
+            }
+            const data = (await response.json()) as WorkdayResponse;
+            for (const p of (data.jobPostings ?? [])) {
+              if (p.title && p.externalPath && !seen.has(p.externalPath)) {
+                seen.add(p.externalPath);
+                allPostings.push({
+                  title: p.title,
+                  company: companyName,
+                  location: p.locationsText ?? 'Unknown',
+                  applyUrl: `https://${domain}/${companySlug}/${siteOption}/job${p.externalPath}`,
+                });
+              }
+            }
+          } catch { break; } // site variant doesn't work, try next
+        }
+
+        if (allPostings.length > 0) {
+          console.log(`Workday: found ${allPostings.length} jobs at ${domain} (${siteOption})`);
+          return allPostings;
+        }
+      } catch (e) {
+        console.log(`Workday: ${domain}/${siteOption} failed, trying next...`);
       }
-      const data = (await response.json()) as WorkdayResponse;
-      const postings = data.jobPostings ?? [];
-      console.log(`Workday: found ${postings.length} jobs at ${domain}`);
-      return postings
-        .filter((p) => p.title && p.externalPath)
-        .map((p) => ({
-          title: p.title!,
-          company: companyName,
-          location: p.locationsText ?? 'Unknown',
-          applyUrl: `https://${domain}/${companySlug}/${site}/job${p.externalPath}`,
-        }));
-    } catch (e) {
-      console.log(`Workday error for ${domain}:`, e);
     }
   }
   console.log(`Workday: all variants failed for ${companySlug}`);
@@ -139,7 +168,7 @@ export async function scrapePlainWebsite(url: string, companyName: string): Prom
   try {
     console.log(`Plain: scanning ${url}...`);
     const response = await fetch(url, {
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(10000),
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'text/html,application/xhtml+xml',
