@@ -4,25 +4,9 @@ modules = ["nodejs-24", "postgresql-16"]
 runButton = "Project"
 
 [[workflows.workflow]]
-name = "Start application"
-author = "agent"
-
-[workflows.workflow.metadata]
-outputType = "webview"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "cd artifacts/api-server && PORT=8080 npm run dev"
-waitForPort = 8080
-
-[[workflows.workflow]]
 name = "Project"
 mode = "parallel"
 author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Start application"
 
 [postMerge]
 path = "scripts/post-merge.sh"
