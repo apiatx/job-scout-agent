@@ -112,6 +112,8 @@ async function initDb(): Promise<void> {
   await safeAddColumn('jobs', 'source', "TEXT NOT NULL DEFAULT ''");
   await safeAddColumn('jobs', 'description', 'TEXT');
   await safeAddColumn('jobs', 'is_hardware', 'BOOLEAN NOT NULL DEFAULT false');
+  await safeAddColumn('jobs', 'created_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()');
+  await safeAddColumn('jobs', 'status', "TEXT NOT NULL DEFAULT 'new'");
 
   // Seed default criteria if none exist
   const { rows } = await pool.query('SELECT id FROM criteria LIMIT 1');
