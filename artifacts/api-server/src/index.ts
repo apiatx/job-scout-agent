@@ -701,7 +701,7 @@ const HTML = `<!DOCTYPE html>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{--bg:#0f0f0f;--surface:#161616;--border:#252525;--text:#e8e6e0;--muted:#666;--gold:#c8a96e;--green:#4caf88;--red:#cf6679;--r:10px}
-body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.5;min-height:100vh}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.5;min-height:100vh;display:flex;flex-direction:column}
 
 /* header */
 header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
@@ -733,12 +733,21 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .btn-sm{padding:5px 12px;font-size:12px}
 .run-msg{font-size:12px;color:var(--muted)}
 
-/* tabs */
-.tabs{display:flex;gap:0;padding:0 24px;border-bottom:1px solid var(--border);overflow-x:auto}
-.tab{padding:10px 14px;font-size:13px;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;user-select:none;white-space:nowrap}
-.tab.active{color:var(--text);border-color:var(--gold)}
+/* layout */
+.app-body{display:flex;flex:1;min-height:0}
+
+/* sidebar */
+.sidebar{width:200px;min-width:200px;border-right:1px solid var(--border);display:flex;flex-direction:column;gap:2px;padding:12px 10px;background:var(--bg)}
+.sidebar .tab{padding:9px 14px;font-size:13px;color:var(--muted);cursor:pointer;border-radius:7px;user-select:none;white-space:nowrap;border-left:3px solid transparent;transition:background .12s,color .12s}
+.sidebar .tab:hover{background:var(--surface);color:var(--text)}
+.sidebar .tab.active{color:var(--text);background:var(--surface);border-left-color:var(--gold)}
+
+/* main content */
+.main-content{flex:1;min-width:0;overflow-y:auto}
 .panel{display:none;padding:24px}
 .panel.active{display:block}
+
+@media(max-width:700px){.sidebar{width:56px;min-width:56px;padding:12px 4px}.sidebar .tab{font-size:0;padding:10px}.sidebar .tab::before{font-size:16px}.sidebar .tab[data-label]::before{content:attr(data-icon)}}
 
 /* jobs */
 .jobs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;margin-top:16px}
@@ -827,14 +836,15 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <span class="run-msg" id="run-msg"></span>
 </div>
 
-<div class="tabs">
+<div class="app-body">
+<nav class="sidebar">
   <div class="tab active" id="tab-jobs" onclick="showTab('jobs')">Jobs</div>
+  <div class="tab" id="tab-companies" onclick="showTab('companies')">Companies</div>
   <div class="tab" id="tab-resume" onclick="showTab('resume')">Resume</div>
   <div class="tab" id="tab-email" onclick="showTab('email')">Email</div>
   <div class="tab" id="tab-runs" onclick="showTab('runs')">Run History</div>
-  <div class="tab" id="tab-companies" onclick="showTab('companies')">Companies</div>
-</div>
-
+</nav>
+<div class="main-content">
 <div class="panel active" id="panel-jobs">
   <div class="sec-title" id="jobs-count">Loading jobs&hellip;</div>
   <div class="jobs-grid" id="jobs-grid"></div>
@@ -903,6 +913,8 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <button class="btn btn-gold" onclick="addCompany()">Add Company</button>
   </div>
 </div>
+</div><!-- /main-content -->
+</div><!-- /app-body -->
 
 <!-- Tailor Resume Modal -->
 <div class="modal-overlay" id="tailor-modal">
@@ -940,7 +952,7 @@ function lines(id) {
 }
 
 // ── tabs ─────────────────────────────────────────────────────────────────
-var TABS = ['jobs','resume','email','runs','companies'];
+var TABS = ['jobs','companies','resume','email','runs'];
 function showTab(name) {
   TABS.forEach(function(t) {
     document.getElementById('tab-' + t).classList.toggle('active', t === name);
