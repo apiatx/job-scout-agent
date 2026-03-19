@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && DATABASE_URL=${DATABASE_URL:-postgresql://runner:runner@localhost:5432/jobscout} tsx ./src/index.ts",
+    "dev": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsx ./src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
