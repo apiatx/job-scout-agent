@@ -1,7 +1,7 @@
 import express, { type Request, type Response } from 'express';
 import pg from 'pg';
 import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, scrapePlainWebsite } from './scraper.js';
-import { scoreJobsWithClaude } from './agent.js';
+import { scoreJobsWithClaude, tailorResumeWithClaude } from './agent.js';
 
 const { Pool } = pg;
 const app = express();
@@ -14,14 +14,22 @@ if (!process.env.DATABASE_URL) {
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
+
+// ── Health check — MUST be the very first route for Replit ────────────────
+app.get('/health', (_req, res) => { res.status(200).json({ status: 'ok' }); });
+app.get('/api/healthz', (_req, res) => { res.status(200).json({ status: 'ok' }); });
+
+// ── Gmail OAuth config ───────────────────────────────────────────────────
+const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID || '1007930505834-cpp1veqs8alu56k810qd2mru61keej3j.apps.googleusercontent.com';
+const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET || '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';
+const GMAIL_REDIRECT_URI = process.env.GMAIL_REDIRECT_URI || 'https://c12ad21f-8216-45ab-b03f-5e735925225d-00-34c2t5oabpvff.riker.replit.dev/api/gmail/callback';
 
 // ── Database init ─────────────────────────────────────────────────────────
-
 async function initDb(): Promise<void> {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS criteria (
-      id          SERIAL PRIMARY KEY,
+      id            SERIAL PRIMARY KEY,
       target_roles  TEXT[]  NOT NULL DEFAULT '{}',
       industries    TEXT[]  NOT NULL DEFAULT '{}',
       min_salary    INT,
@@ -43,12 +51,14 @@ async function initDb(): Promise<void> {
     );
 
     CREATE TABLE IF NOT EXISTS scout_runs (
-      id           SERIAL PRIMARY KEY,
-      status       TEXT    NOT NULL DEFAULT 'running',
-      jobs_found   INT     NOT NULL DEFAULT 0,
-      error        TEXT,
-      started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      completed_at TIMESTAMPTZ
+      id               SERIAL PRIMARY KEY,
+      status           TEXT    NOT NULL DEFAULT 'running',
+      companies_scanned INT    NOT NULL DEFAULT 0,
+      jobs_found       INT     NOT NULL DEFAULT 0,
+      matches_found    INT     NOT NULL DEFAULT 0,
+      error            TEXT,
+      started_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at     TIMESTAMPTZ
     );
 
     CREATE TABLE IF NOT EXISTS jobs (
@@ -59,12 +69,46 @@ async function initDb(): Promise<void> {
       location     TEXT    NOT NULL DEFAULT '',
       salary       TEXT,
       apply_url    TEXT    NOT NULL,
+      description  TEXT,
+      source       TEXT    NOT NULL DEFAULT '',
       why_good_fit TEXT    NOT NULL DEFAULT '',
       match_score  INT     NOT NULL DEFAULT 0,
+      is_hardware  BOOLEAN NOT NULL DEFAULT false,
       status       TEXT    NOT NULL DEFAULT 'new',
       created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS tailored_docs (
+      id           SERIAL PRIMARY KEY,
+      job_id       INT     REFERENCES jobs(id),
+      resume_text  TEXT    NOT NULL DEFAULT '',
+      cover_letter TEXT    NOT NULL DEFAULT '',
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS gmail_tokens (
+      id            SERIAL PRIMARY KEY,
+      access_token  TEXT NOT NULL,
+      refresh_token TEXT,
+      expiry        TIMESTAMPTZ,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
+
+  // Add columns if they don't exist (for existing installs)
+  const safeAddColumn = async (table: string, col: string, type: string) => {
+    try { await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${col} ${type}`); } catch { /* ignore */ }
+  };
+  await safeAddColumn('scout_runs', 'companies_scanned', 'INT NOT NULL DEFAULT 0');
+  await safeAddColumn('scout_runs', 'matches_found', 'INT NOT NULL DEFAULT 0');
+  await safeAddColumn('jobs', 'source', "TEXT NOT NULL DEFAULT ''");
+  await safeAddColumn('jobs', 'description', 'TEXT');
+  await safeAddColumn('jobs', 'is_hardware', 'BOOLEAN NOT NULL DEFAULT false');
 
   // Seed default criteria if none exist
   const { rows } = await pool.query('SELECT id FROM criteria LIMIT 1');
@@ -73,15 +117,65 @@ async function initDb(): Promise<void> {
       `INSERT INTO criteria (target_roles, industries, min_salary, locations, must_have, nice_to_have, avoid)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
-        ['Enterprise Account Executive', 'Strategic Account Executive', 'Senior Account Executive', 'Regional Sales Manager', 'Sales Director'],
-        ['AI Infrastructure', 'Data Center Hardware', 'Semiconductors', 'Networking Hardware', 'Storage Hardware'],
+        ['Enterprise Account Executive', 'Strategic Account Executive', 'Senior Account Executive', 'Regional Sales Manager', 'Sales Director', 'Major Account Executive', 'Named Account Executive'],
+        ['AI Infrastructure', 'Data Center Hardware', 'Semiconductors', 'Networking Hardware', 'Storage Hardware', 'Optical Networking', 'Edge Computing', 'Server Hardware', 'Power & Cooling'],
         150000,
         ['Remote', 'New York', 'San Francisco', 'Austin', 'Boston', 'Seattle', 'Chicago'],
-        ['enterprise sales', 'quota carrying', 'hardware OR infrastructure OR networking'],
-        ['AI', 'data center', 'GPU', 'NVIDIA', 'hunter'],
-        ['SDR', 'BDR', 'inbound only', 'SMB only', 'pure SaaS'],
+        ['enterprise sales', 'quota carrying', 'hardware OR infrastructure OR networking OR storage OR semiconductor'],
+        ['AI', 'data center', 'GPU', 'NVIDIA', 'hunter mentality', 'new logo'],
+        ['SDR', 'BDR', 'inbound only', 'SMB only', 'marketing', 'recruiting', 'engineering', 'software only'],
       ]
     );
+  }
+
+  // Seed companies if none exist
+  const { rows: coRows } = await pool.query('SELECT id FROM companies LIMIT 1');
+  if (coRows.length === 0) {
+    const greenhouse = [
+      'purestorage', 'coreweave', 'zscaler', 'rubrik', 'samsara', 'datadog', 'databricks',
+      'nutanix', 'paloaltonetworks', 'aristanw', 'lumentum', 'coherent', 'nvidia', 'broadcom', 'snowflake-computing'
+    ];
+    for (const slug of greenhouse) {
+      const name = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      await pool.query(
+        `INSERT INTO companies (name, ats_type, ats_slug) VALUES ($1, 'greenhouse', $2)`,
+        [name, slug]
+      );
+    }
+
+    const workday: [string, string][] = [
+      ['Cisco', 'cisco.wd5.myworkdayjobs.com'],
+      ['Dell', 'dell.wd1.myworkdayjobs.com'],
+      ['HPE', 'hpe.wd5.myworkdayjobs.com'],
+      ['Intel', 'intel.wd1.myworkdayjobs.com'],
+      ['AMD', 'amd.wd5.myworkdayjobs.com'],
+      ['Vertiv', 'vertiv.wd1.myworkdayjobs.com'],
+      ['Fortinet', 'fortinet.wd3.myworkdayjobs.com'],
+      ['F5', 'f5.wd5.myworkdayjobs.com'],
+      ['Extreme Networks', 'extremenetworks.wd5.myworkdayjobs.com'],
+      ['Equinix', 'equinix.wd1.myworkdayjobs.com'],
+      ['Micron', 'micron.wd1.myworkdayjobs.com'],
+      ['Seagate', 'seagate.wd1.myworkdayjobs.com'],
+      ['Marvell', 'marvell.wd1.myworkdayjobs.com'],
+    ];
+    for (const [name, domain] of workday) {
+      await pool.query(
+        `INSERT INTO companies (name, ats_type, careers_url) VALUES ($1, 'workday', $2)`,
+        [name, domain]
+      );
+    }
+
+    const plain: [string, string][] = [
+      ['Juniper Networks', 'https://jobs.juniper.net'],
+      ['Eaton', 'https://jobs.eaton.com'],
+      ['Keysight', 'https://careers.keysight.com'],
+    ];
+    for (const [name, url] of plain) {
+      await pool.query(
+        `INSERT INTO companies (name, ats_type, careers_url) VALUES ($1, 'plain', $2)`,
+        [name, url]
+      );
+    }
   }
 
   // Mark any stale running records as failed
@@ -90,56 +184,39 @@ async function initDb(): Promise<void> {
   );
 }
 
-// ── Routes ────────────────────────────────────────────────────────────────
-
-app.get('/api/healthz', (_req, res) => {
-  res.json({ status: 'ok' });
-});
+// ── API Routes ────────────────────────────────────────────────────────────
 
 // Criteria
 app.get('/api/criteria', async (_req, res: Response) => {
   try {
     const { rows } = await pool.query('SELECT * FROM criteria LIMIT 1');
     res.json(rows[0] ?? {});
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
+  } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 app.put('/api/criteria', async (req: Request, res: Response) => {
   try {
-    const { target_roles, industries, min_salary, locations, must_have, nice_to_have, avoid, your_name, your_email } = req.body as Record<string, unknown>;
+    const { target_roles, industries, min_salary, locations, must_have, nice_to_have, avoid, your_name, your_email } = req.body;
     const { rows: existing } = await pool.query('SELECT id FROM criteria LIMIT 1');
     const params = [
-      target_roles ?? [],
-      industries ?? [],
-      (min_salary as number | null) ?? null,
-      locations ?? [],
-      must_have ?? [],
-      nice_to_have ?? [],
-      avoid ?? [],
-      (your_name as string) ?? '',
-      (your_email as string) ?? '',
+      target_roles ?? [], industries ?? [], min_salary ?? null, locations ?? [],
+      must_have ?? [], nice_to_have ?? [], avoid ?? [], your_name ?? '', your_email ?? '',
     ];
     if (existing.length === 0) {
       const { rows } = await pool.query(
         `INSERT INTO criteria (target_roles, industries, min_salary, locations, must_have, nice_to_have, avoid, your_name, your_email)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-        params
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`, params
       );
       res.json(rows[0]);
     } else {
       const { rows } = await pool.query(
         `UPDATE criteria SET target_roles=$1, industries=$2, min_salary=$3, locations=$4,
          must_have=$5, nice_to_have=$6, avoid=$7, your_name=$8, your_email=$9
-         WHERE id=$10 RETURNING *`,
-        [...params, existing[0].id as number]
+         WHERE id=$10 RETURNING *`, [...params, existing[0].id]
       );
       res.json(rows[0]);
     }
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
+  } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 // Companies
@@ -147,51 +224,45 @@ app.get('/api/companies', async (_req, res: Response) => {
   try {
     const { rows } = await pool.query('SELECT * FROM companies ORDER BY name');
     res.json(rows);
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
+  } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 app.post('/api/companies', async (req: Request, res: Response) => {
   try {
-    const { name, ats_type, ats_slug, careers_url } = req.body as Record<string, string>;
+    const { name, ats_type, ats_slug, careers_url } = req.body;
     const { rows } = await pool.query(
       `INSERT INTO companies (name, ats_type, ats_slug, careers_url) VALUES ($1,$2,$3,$4) RETURNING *`,
       [name, ats_type ?? 'greenhouse', ats_slug ?? null, careers_url ?? null]
     );
     res.json(rows[0]);
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
+  } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 app.delete('/api/companies/:id', async (req: Request, res: Response) => {
   try {
     await pool.query('DELETE FROM companies WHERE id=$1', [req.params.id]);
     res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
+  } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 // Jobs
-app.get('/api/jobs', async (_req, res: Response) => {
+app.get('/api/jobs', async (req: Request, res: Response) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM jobs ORDER BY match_score DESC, created_at DESC LIMIT 100');
+    const minScore = Number(req.query.min_score) || 0;
+    const { rows } = await pool.query(
+      'SELECT * FROM jobs WHERE match_score >= $1 ORDER BY match_score DESC, created_at DESC LIMIT 200',
+      [minScore]
+    );
     res.json(rows);
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
+  } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-// Scout
+// Scout runs
 app.get('/api/scout/status', async (_req, res: Response) => {
   try {
     const { rows } = await pool.query('SELECT * FROM scout_runs ORDER BY started_at DESC LIMIT 20');
     res.json(rows);
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
+  } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 let scoutRunning = false;
@@ -205,25 +276,253 @@ app.post('/api/scout/run', async (_req, res: Response) => {
     const { rows } = await pool.query(
       "INSERT INTO scout_runs (status, jobs_found) VALUES ('running', 0) RETURNING *"
     );
-    const run = rows[0] as { id: number };
+    const run = rows[0];
     res.json({ runId: run.id, message: 'Scout run started' });
     scoutRunning = true;
     runScoutInBackground(run.id).catch(console.error).finally(() => { scoutRunning = false; });
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
+  } catch (e) { res.status(500).json({ error: String(e) }); }
 });
+
+// Settings (resume, schedule, etc.)
+app.get('/api/settings/:key', async (req: Request, res: Response) => {
+  try {
+    const { rows } = await pool.query('SELECT value FROM settings WHERE key=$1', [req.params.key]);
+    res.json({ value: rows[0]?.value ?? '' });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.put('/api/settings/:key', async (req: Request, res: Response) => {
+  try {
+    const { value } = req.body;
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET value=$2`,
+      [req.params.key, value ?? '']
+    );
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Resume
+app.get('/api/resume', async (_req, res: Response) => {
+  try {
+    const { rows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
+    res.json({ resume: rows[0]?.value ?? '' });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.put('/api/resume', async (req: Request, res: Response) => {
+  try {
+    const { resume } = req.body;
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('resume', $1)
+       ON CONFLICT (key) DO UPDATE SET value=$1`,
+      [resume ?? '']
+    );
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Resume tailoring
+app.post('/api/tailor/:jobId', async (req: Request, res: Response) => {
+  try {
+    const jobId = Number(req.params.jobId);
+    // Check if we already have a tailored doc
+    const { rows: existing } = await pool.query(
+      'SELECT * FROM tailored_docs WHERE job_id=$1 ORDER BY created_at DESC LIMIT 1', [jobId]
+    );
+    if (existing.length > 0) {
+      res.json(existing[0]);
+      return;
+    }
+    // Get job details
+    const { rows: jobRows } = await pool.query('SELECT * FROM jobs WHERE id=$1', [jobId]);
+    if (jobRows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const job = jobRows[0];
+    // Get resume
+    const { rows: resRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
+    const resume = resRows[0]?.value ?? '';
+    if (!resume) { res.status(400).json({ error: 'No base resume saved. Please save your resume first.' }); return; }
+
+    const result = await tailorResumeWithClaude(job, resume);
+    const { rows: inserted } = await pool.query(
+      `INSERT INTO tailored_docs (job_id, resume_text, cover_letter) VALUES ($1, $2, $3) RETURNING *`,
+      [jobId, result.resume, result.coverLetter]
+    );
+    res.json(inserted[0]);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Gmail OAuth
+app.get('/api/gmail/status', async (_req, res: Response) => {
+  try {
+    const { rows } = await pool.query('SELECT id, created_at FROM gmail_tokens ORDER BY id DESC LIMIT 1');
+    res.json({ connected: rows.length > 0, connectedAt: rows[0]?.created_at ?? null });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.get('/api/gmail/auth-url', (_req, res: Response) => {
+  const scopes = ['https://www.googleapis.com/auth/gmail.send'];
+  const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(GMAIL_CLIENT_ID)}&redirect_uri=${encodeURIComponent(GMAIL_REDIRECT_URI)}&response_type=code&scope=${encodeURIComponent(scopes.join(' '))}&access_type=offline&prompt=consent`;
+  res.json({ url });
+});
+
+app.get('/api/gmail/callback', async (req: Request, res: Response) => {
+  try {
+    const code = req.query.code as string;
+    if (!code) { res.status(400).send('Missing code parameter'); return; }
+
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: GMAIL_CLIENT_ID,
+        client_secret: GMAIL_CLIENT_SECRET,
+        redirect_uri: GMAIL_REDIRECT_URI,
+        grant_type: 'authorization_code',
+      }),
+    });
+    const tokenData = await tokenRes.json() as { access_token?: string; refresh_token?: string; expires_in?: number; error?: string };
+    if (tokenData.error || !tokenData.access_token) {
+      res.status(400).send('OAuth error: ' + (tokenData.error || 'no access token'));
+      return;
+    }
+    // Clear old tokens and store new
+    await pool.query('DELETE FROM gmail_tokens');
+    const expiry = tokenData.expires_in ? new Date(Date.now() + tokenData.expires_in * 1000) : null;
+    await pool.query(
+      'INSERT INTO gmail_tokens (access_token, refresh_token, expiry) VALUES ($1, $2, $3)',
+      [tokenData.access_token, tokenData.refresh_token ?? null, expiry]
+    );
+    res.send('<html><body style="background:#0f0f0f;color:#c8a96e;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;font-size:20px"><div>Gmail connected! You can close this tab.</div></body></html>');
+  } catch (e) { res.status(500).send('OAuth error: ' + String(e)); }
+});
+
+app.post('/api/gmail/disconnect', async (_req, res: Response) => {
+  try {
+    await pool.query('DELETE FROM gmail_tokens');
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+async function getGmailAccessToken(): Promise<string | null> {
+  const { rows } = await pool.query('SELECT * FROM gmail_tokens ORDER BY id DESC LIMIT 1');
+  if (rows.length === 0) return null;
+  const token = rows[0];
+  // Check if expired and refresh
+  if (token.expiry && new Date(token.expiry) < new Date() && token.refresh_token) {
+    try {
+      const refreshRes = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          refresh_token: token.refresh_token,
+          client_id: GMAIL_CLIENT_ID,
+          client_secret: GMAIL_CLIENT_SECRET,
+          grant_type: 'refresh_token',
+        }),
+      });
+      const data = await refreshRes.json() as { access_token?: string; expires_in?: number };
+      if (data.access_token) {
+        const expiry = data.expires_in ? new Date(Date.now() + data.expires_in * 1000) : null;
+        await pool.query(
+          'UPDATE gmail_tokens SET access_token=$1, expiry=$2 WHERE id=$3',
+          [data.access_token, expiry, token.id]
+        );
+        return data.access_token;
+      }
+    } catch { /* fall through */ }
+  }
+  return token.access_token;
+}
+
+async function sendGmailEmail(to: string, subject: string, htmlBody: string): Promise<boolean> {
+  const accessToken = await getGmailAccessToken();
+  if (!accessToken) return false;
+
+  const boundary = 'boundary_' + Date.now();
+  const rawEmail = [
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    `MIME-Version: 1.0`,
+    `Content-Type: text/html; charset="UTF-8"`,
+    '',
+    htmlBody,
+  ].join('\r\n');
+
+  const encoded = Buffer.from(rawEmail).toString('base64url');
+
+  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ raw: encoded }),
+  });
+  return res.ok;
+}
+
+app.post('/api/gmail/send-test', async (_req, res: Response) => {
+  try {
+    // Get user email from criteria
+    const { rows: cRows } = await pool.query('SELECT your_email FROM criteria LIMIT 1');
+    const email = cRows[0]?.your_email;
+    if (!email) { res.status(400).json({ error: 'Set your email in the Criteria tab first' }); return; }
+
+    // Get recent jobs
+    const { rows: jobs } = await pool.query(
+      'SELECT * FROM jobs WHERE match_score >= 60 ORDER BY match_score DESC LIMIT 10'
+    );
+
+    const html = buildDigestHtml(jobs);
+    const sent = await sendGmailEmail(email, 'Job Scout Agent — Test Digest', html);
+    if (sent) {
+      res.json({ ok: true, message: 'Test digest sent to ' + email });
+    } else {
+      res.status(500).json({ error: 'Failed to send email. Make sure Gmail is connected.' });
+    }
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.get('/api/gmail/preview', async (_req, res: Response) => {
+  try {
+    const { rows: jobs } = await pool.query(
+      'SELECT * FROM jobs WHERE match_score >= 60 ORDER BY match_score DESC LIMIT 10'
+    );
+    res.json({ html: buildDigestHtml(jobs) });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+function buildDigestHtml(jobs: any[]): string {
+  const jobCards = jobs.map(j => `
+    <div style="background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:16px;margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="color:#c8a96e;font-weight:bold;font-size:16px">${esc(j.title)}</span>
+        <span style="background:#c8a96e;color:#0f0f0f;padding:2px 10px;border-radius:12px;font-weight:bold;font-size:13px">${esc(j.match_score)}/100</span>
+      </div>
+      <div style="color:#999;margin:6px 0">${esc(j.company)} • ${esc(j.location)}${j.salary ? ' • ' + esc(j.salary) : ''}</div>
+      <div style="color:#bbb;font-size:13px;margin:8px 0">${esc(j.why_good_fit)}</div>
+      <a href="${esc(j.apply_url)}" style="color:#c8a96e;font-size:13px">View Posting →</a>
+    </div>
+  `).join('');
+
+  return `
+    <div style="background:#0f0f0f;color:#e8e6e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:32px;max-width:640px;margin:0 auto">
+      <div style="text-align:center;margin-bottom:24px">
+        <h1 style="color:#c8a96e;font-size:22px;margin:0">⬡ Job Scout Agent — Daily Digest</h1>
+        <p style="color:#666;font-size:13px;margin-top:6px">${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
+      </div>
+      <div style="color:#999;font-size:14px;margin-bottom:16px">${jobs.length} match${jobs.length !== 1 ? 'es' : ''} found</div>
+      ${jobs.length > 0 ? jobCards : '<div style="color:#666;text-align:center;padding:32px">No matches yet. Run the scout first!</div>'}
+    </div>
+  `;
+}
 
 // ── Scout background worker ───────────────────────────────────────────────
 
-const HARDCODED_WORKDAY = [
-  { slug: 'cisco',   domain: 'cisco.wd5.myworkdayjobs.com',  name: 'Cisco' },
-  { slug: 'nvidia',  domain: 'nvidia.wd5.myworkdayjobs.com', name: 'NVIDIA',             careerSite: 'NVIDIAExternalCareerSite' },
-  { slug: 'dell',    domain: 'dell.wd1.myworkdayjobs.com',   name: 'Dell Technologies',  careerSite: 'ExternalNonPublic' },
-];
-
 const SALES_INCLUDE = /\b(account\s+executive|sales\s+director|director\s+of\s+sales|vp\s+of?\s+sales|regional\s+sales|territory\s+sales|named\s+account|major\s+account|strategic\s+account|enterprise\s+account)\b/i;
-const SALES_EXCLUDE = /\b(engineer|developer|software|scientist|analyst|marketing|designer|recruiter|\bhr\b|finance|accounting|legal|product\s+manager|program\s+manager|project\s+manager|intern|coordinator|specialist|support|customer\s+success|operations|architect|data\b|cloud\s+sales\s+engineer)\b/i;
 
 async function runScoutInBackground(runId: number): Promise<void> {
   try {
@@ -239,57 +538,92 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
     const { rows: companies } = await pool.query('SELECT * FROM companies');
 
-    type Job = Awaited<ReturnType<typeof scrapeGreenhouseJobs>>[number];
+    type Job = { title: string; company: string; location: string; salary?: string; applyUrl: string; description?: string; source: string };
     const allJobs: Job[] = [];
+    let companiesScanned = 0;
 
     for (const c of companies) {
       const co = c as { name: string; ats_type: string; ats_slug: string | null; careers_url: string | null };
-      if (co.ats_type === 'greenhouse' && co.ats_slug) {
-        allJobs.push(...await scrapeGreenhouseJobs(co.ats_slug, co.name));
-      } else if (co.ats_type === 'lever' && co.ats_slug) {
-        allJobs.push(...await scrapeLeverJobs(co.ats_slug, co.name));
-      } else if (co.careers_url) {
-        allJobs.push(...await scrapePlainWebsite(co.careers_url, co.name));
+      try {
+        if (co.ats_type === 'greenhouse' && co.ats_slug) {
+          const jobs = await scrapeGreenhouseJobs(co.ats_slug, co.name);
+          allJobs.push(...jobs.map(j => ({ ...j, source: 'Greenhouse' })));
+        } else if (co.ats_type === 'lever' && co.ats_slug) {
+          const jobs = await scrapeLeverJobs(co.ats_slug, co.name);
+          allJobs.push(...jobs.map(j => ({ ...j, source: 'Lever' })));
+        } else if (co.ats_type === 'workday' && co.careers_url) {
+          // careers_url stores the workday domain for workday companies
+          const slug = co.careers_url.split('.')[0]; // e.g. "cisco" from "cisco.wd5..."
+          const jobs = await scrapeWorkdayJobs(slug, co.careers_url, co.name);
+          allJobs.push(...jobs.map(j => ({ ...j, source: 'Workday' })));
+        } else if ((co.ats_type === 'plain' || co.ats_type === 'other') && co.careers_url) {
+          const jobs = await scrapePlainWebsite(co.careers_url, co.name);
+          allJobs.push(...jobs.map(j => ({ ...j, source: 'Website' })));
+        }
+        companiesScanned++;
+      } catch (e) {
+        console.error(`Error scraping ${co.name}:`, e);
+        companiesScanned++;
       }
     }
 
-    for (const co of HARDCODED_WORKDAY) {
-      allJobs.push(...await scrapeWorkdayJobs(co.slug, co.domain, co.name, co.careerSite));
-    }
+    console.log(`\nTotal scraped: ${allJobs.length} listings from ${companiesScanned} companies`);
 
-    console.log(`\nTotal scraped: ${allJobs.length} listings`);
-
-    const filtered = allJobs.filter((j) => SALES_INCLUDE.test(j.title) && !SALES_EXCLUDE.test(j.title));
+    const filtered = allJobs.filter((j) => SALES_INCLUDE.test(j.title));
     const toScore = filtered.slice(0, 80);
-    console.log(`Pre-filter: ${filtered.length} matched; sending ${toScore.length} to Claude`);
+    console.log(`Pre-filter: ${filtered.length} matched title filter; sending ${toScore.length} to Claude`);
 
     if (toScore.length === 0) {
-      await pool.query("UPDATE scout_runs SET status='completed', jobs_found=0, completed_at=NOW() WHERE id=$1", [runId]);
+      await pool.query(
+        "UPDATE scout_runs SET status='completed', companies_scanned=$1, jobs_found=0, matches_found=0, completed_at=NOW() WHERE id=$2",
+        [companiesScanned, runId]
+      );
       return;
     }
 
-    const matches = await scoreJobsWithClaude(toScore, {
-      targetRoles: criteria.target_roles,
-      industries: criteria.industries,
-      minSalary: criteria.min_salary,
-      locations: criteria.locations,
-      mustHave: criteria.must_have,
-      niceToHave: criteria.nice_to_have,
-      avoid: criteria.avoid,
-    });
+    const matches = await scoreJobsWithClaude(
+      toScore.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
+      {
+        targetRoles: criteria.target_roles,
+        industries: criteria.industries,
+        minSalary: criteria.min_salary,
+        locations: criteria.locations,
+        mustHave: criteria.must_have,
+        niceToHave: criteria.nice_to_have,
+        avoid: criteria.avoid,
+      }
+    );
 
     for (const m of matches) {
+      const source = toScore.find(j => j.applyUrl === m.applyUrl)?.source ?? '';
       await pool.query(
-        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore]
+        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false]
       );
     }
 
     await pool.query(
-      "UPDATE scout_runs SET status='completed', jobs_found=$1, completed_at=NOW() WHERE id=$2",
-      [matches.length, runId]
+      "UPDATE scout_runs SET status='completed', companies_scanned=$1, jobs_found=$2, matches_found=$3, completed_at=NOW() WHERE id=$4",
+      [companiesScanned, allJobs.length, matches.length, runId]
     );
+
+    // Send digest email if Gmail is connected
+    try {
+      const { rows: crit } = await pool.query('SELECT your_email FROM criteria LIMIT 1');
+      if (crit[0]?.your_email && matches.length > 0) {
+        const { rows: recentJobs } = await pool.query(
+          'SELECT * FROM jobs WHERE scout_run_id=$1 ORDER BY match_score DESC', [runId]
+        );
+        await sendGmailEmail(
+          crit[0].your_email,
+          `Job Scout Agent — ${matches.length} new match${matches.length !== 1 ? 'es' : ''} found`,
+          buildDigestHtml(recentJobs)
+        );
+      }
+    } catch (emailErr) {
+      console.error('Email sending failed (non-fatal):', emailErr);
+    }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     await pool.query(
@@ -298,6 +632,31 @@ async function runScoutInBackground(runId: number): Promise<void> {
     );
   }
 }
+
+// Stats endpoint
+app.get('/api/stats', async (_req, res: Response) => {
+  try {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const { rows: todayJobs } = await pool.query(
+      'SELECT COUNT(*) as count FROM jobs WHERE created_at >= $1', [today]
+    );
+    const { rows: todayMatches } = await pool.query(
+      'SELECT COUNT(*) as count FROM jobs WHERE created_at >= $1 AND match_score >= 60', [today]
+    );
+    const { rows: topScore } = await pool.query(
+      'SELECT MAX(match_score) as score FROM jobs WHERE created_at >= $1', [today]
+    );
+    const { rows: lastRun } = await pool.query(
+      'SELECT * FROM scout_runs ORDER BY started_at DESC LIMIT 1'
+    );
+    res.json({
+      jobsToday: Number(todayJobs[0]?.count ?? 0),
+      matchesToday: Number(todayMatches[0]?.count ?? 0),
+      topScore: Number(topScore[0]?.score ?? 0),
+      lastRun: lastRun[0] ?? null,
+    });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
 
 // ── HTML dashboard ────────────────────────────────────────────────────────
 
@@ -314,8 +673,6 @@ function serveHTML(_req: Request, res: Response): void {
 app.get('/', serveHTML);
 app.get('/index.html', serveHTML);
 
-// Explicit 404 for everything else — prevents any stale static files from
-// being accidentally served if a dist/ directory exists on disk.
 app.use((_req: Request, res: Response) => {
   res.status(404).json({ error: 'Not found' });
 });
@@ -334,9 +691,6 @@ initDb()
   });
 
 // ── HTML constant ─────────────────────────────────────────────────────────
-// Note: kept at bottom so the server starts without waiting for this string to parse.
-// All JavaScript inside uses string concatenation (not template literals) to avoid
-// escaping conflicts with the TypeScript template literal.
 
 const HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -350,12 +704,23 @@ const HTML = `<!DOCTYPE html>
 body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.5;min-height:100vh}
 
 /* header */
-header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:10px}
-.logo{font-size:15px;font-weight:600;color:var(--gold);letter-spacing:-0.01em}
-.hdr-status{font-size:12px;color:var(--muted);margin-left:auto}
+header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.logo{font-size:17px;font-weight:700;color:var(--gold);letter-spacing:-0.01em}
+.hdr-right{margin-left:auto;display:flex;align-items:center;gap:12px}
+.hdr-status{font-size:12px;color:var(--muted)}
+.gmail-badge{font-size:11px;padding:3px 10px;border-radius:12px;font-weight:600}
+.gmail-badge.on{background:#0d2318;color:var(--green)}
+.gmail-badge.off{background:#2a1018;color:var(--red)}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--green);flex-shrink:0}
 .dot.running{background:var(--gold);animation:pulse 1s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* stats bar */
+.stats-bar{display:flex;gap:0;border-bottom:1px solid var(--border);overflow-x:auto}
+.stat{flex:1;padding:14px 24px;border-right:1px solid var(--border);min-width:140px}
+.stat:last-child{border-right:none}
+.stat-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em}
+.stat-val{font-size:22px;font-weight:700;color:var(--gold);margin-top:2px}
 
 /* run bar */
 .run-bar{padding:14px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
@@ -364,28 +729,31 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .btn:disabled{opacity:.35;cursor:not-allowed}
 .btn-gold{background:var(--gold);color:#0f0f0f}
 .btn-ghost{background:var(--surface);color:var(--text);border:1px solid var(--border)}
+.btn-red{background:var(--red);color:#fff}
+.btn-sm{padding:5px 12px;font-size:12px}
 .run-msg{font-size:12px;color:var(--muted)}
 
 /* tabs */
-.tabs{display:flex;gap:0;padding:0 24px;border-bottom:1px solid var(--border)}
-.tab{padding:10px 14px;font-size:13px;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;user-select:none}
+.tabs{display:flex;gap:0;padding:0 24px;border-bottom:1px solid var(--border);overflow-x:auto}
+.tab{padding:10px 14px;font-size:13px;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;user-select:none;white-space:nowrap}
 .tab.active{color:var(--text);border-color:var(--gold)}
 .panel{display:none;padding:24px}
 .panel.active{display:block}
 
 /* jobs */
-.jobs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px;margin-top:16px}
+.jobs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;margin-top:16px}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
 .card-head{padding:16px 18px 12px;border-bottom:1px solid #1e1e1e}
 .score-row{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px}
 .score-val{color:var(--gold);font-size:13px;font-weight:600}
 .bar-bg{height:3px;background:#222;border-radius:2px}
-.bar-fg{height:3px;background:var(--gold);border-radius:2px}
+.bar-fg{height:3px;border-radius:2px}
 .job-title{font-size:15px;font-weight:600;margin:10px 0 3px}
 .job-co{font-size:13px;color:var(--gold)}
-.card-meta{padding:9px 18px;border-bottom:1px solid #1e1e1e;font-size:12px;color:var(--muted)}
+.card-meta{padding:9px 18px;border-bottom:1px solid #1e1e1e;font-size:12px;color:var(--muted);display:flex;gap:12px;flex-wrap:wrap}
 .card-why{padding:12px 18px;border-bottom:1px solid #1e1e1e;font-size:12px;color:#999;line-height:1.6}
-.card-foot{padding:12px 18px}
+.card-foot{padding:12px 18px;display:flex;gap:8px;flex-wrap:wrap}
+.source-badge{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;background:#222;color:var(--muted)}
 
 /* table */
 .tbl{width:100%;border-collapse:collapse}
@@ -396,20 +764,20 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .b-completed{background:#0d2318;color:var(--green)}
 .b-failed{background:#2a1018;color:var(--red)}
 
-/* criteria form */
+/* forms */
 .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;max-width:820px}
 @media(max-width:600px){.form-grid{grid-template-columns:1fr}}
 .fg{display:flex;flex-direction:column;gap:6px}
 .fg.full{grid-column:1/-1}
 label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
-textarea,input{background:var(--surface);border:1px solid var(--border);border-radius:7px;color:var(--text);padding:9px 12px;font-size:13px;font-family:inherit;resize:vertical;outline:none;width:100%}
+textarea,input[type="text"],input[type="email"],input[type="number"],input[type="time"],select{background:var(--surface);border:1px solid var(--border);border-radius:7px;color:var(--text);padding:9px 12px;font-size:13px;font-family:inherit;resize:vertical;outline:none;width:100%}
 textarea:focus,input:focus{border-color:var(--gold)}
 .hint{font-size:11px;color:var(--muted);margin-top:2px}
 .save-row{margin-top:20px;display:flex;align-items:center;gap:12px}
 .ok-msg{font-size:12px;color:var(--green)}
 
 /* companies */
-.company-list{max-width:640px;margin-bottom:20px}
+.company-list{max-width:720px;margin-bottom:20px}
 .company-row{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:7px;margin-bottom:8px}
 .company-name{font-weight:600;flex:1}
 .company-meta{font-size:12px;color:var(--muted)}
@@ -418,15 +786,41 @@ textarea:focus,input:focus{border-color:var(--gold)}
 
 .empty{padding:48px;text-align:center;color:var(--muted);font-size:13px}
 .sec-title{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
+
+/* modal */
+.modal-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center}
+.modal-overlay.show{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;width:90%;max-width:720px;max-height:85vh;overflow-y:auto;padding:24px}
+.modal-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+.modal-close{background:none;border:none;color:var(--muted);font-size:24px;cursor:pointer;padding:4px}
+.modal-close:hover{color:var(--text)}
+.modal-section{margin-bottom:20px}
+.modal-section h3{font-size:13px;color:var(--gold);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px}
+.modal-text{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;font-size:13px;line-height:1.7;white-space:pre-wrap;color:var(--text);max-height:300px;overflow-y:auto}
+.copy-btn{margin-top:8px}
+
+/* email tab */
+.email-section{max-width:640px}
+.email-preview{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:12px;max-height:400px;overflow-y:auto}
 </style>
 </head>
 <body>
 
 <header>
   <span class="logo">&#x2B21; Job Scout Agent</span>
-  <span class="hdr-status" id="hdr-status"></span>
-  <span class="dot" id="dot"></span>
+  <div class="hdr-right">
+    <span class="hdr-status" id="hdr-status"></span>
+    <span class="gmail-badge off" id="gmail-badge">Gmail: ---</span>
+    <span class="dot" id="dot"></span>
+  </div>
 </header>
+
+<div class="stats-bar" id="stats-bar">
+  <div class="stat"><div class="stat-label">Jobs Scanned Today</div><div class="stat-val" id="stat-scanned">-</div></div>
+  <div class="stat"><div class="stat-label">Matches Found</div><div class="stat-val" id="stat-matches">-</div></div>
+  <div class="stat"><div class="stat-label">Top Score</div><div class="stat-val" id="stat-top">-</div></div>
+  <div class="stat"><div class="stat-label">Last Run</div><div class="stat-val" id="stat-lastrun" style="font-size:13px">-</div></div>
+</div>
 
 <div class="run-bar">
   <button class="btn btn-gold" id="run-btn" onclick="runScout()">&#9654; Run Scout Now</button>
@@ -434,10 +828,11 @@ textarea:focus,input:focus{border-color:var(--gold)}
 </div>
 
 <div class="tabs">
-  <div class="tab active" id="tab-jobs"     onclick="showTab('jobs')">Jobs</div>
-  <div class="tab"        id="tab-runs"     onclick="showTab('runs')">Run History</div>
-  <div class="tab"        id="tab-criteria" onclick="showTab('criteria')">Criteria</div>
-  <div class="tab"        id="tab-companies" onclick="showTab('companies')">Companies</div>
+  <div class="tab active" id="tab-jobs" onclick="showTab('jobs')">Jobs</div>
+  <div class="tab" id="tab-resume" onclick="showTab('resume')">Resume</div>
+  <div class="tab" id="tab-email" onclick="showTab('email')">Email</div>
+  <div class="tab" id="tab-runs" onclick="showTab('runs')">Run History</div>
+  <div class="tab" id="tab-companies" onclick="showTab('companies')">Companies</div>
 </div>
 
 <div class="panel active" id="panel-jobs">
@@ -445,35 +840,47 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="jobs-grid" id="jobs-grid"></div>
 </div>
 
+<div class="panel" id="panel-resume">
+  <div class="sec-title" style="margin-bottom:12px">Base Resume</div>
+  <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Paste your base resume below. This is used when you click "Tailor Resume" on any job card.</p>
+  <textarea id="resume-text" rows="18" placeholder="Paste your full resume here..."></textarea>
+  <div class="save-row">
+    <button class="btn btn-gold" onclick="saveResume()">Save Resume</button>
+    <span class="ok-msg" id="resume-msg" style="display:none">Saved!</span>
+  </div>
+</div>
+
+<div class="panel" id="panel-email">
+  <div class="email-section">
+    <div class="sec-title" style="margin-bottom:12px">Gmail Integration</div>
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
+      <button class="btn btn-gold" id="gmail-connect-btn" onclick="connectGmail()">Connect Gmail</button>
+      <button class="btn btn-red btn-sm" id="gmail-disconnect-btn" onclick="disconnectGmail()" style="display:none">Disconnect</button>
+      <span id="gmail-status-text" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <div class="sec-title" style="margin-bottom:8px;margin-top:20px">Daily Digest Schedule</div>
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
+      <input type="time" id="digest-time" value="08:00" style="width:140px">
+      <button class="btn btn-ghost btn-sm" onclick="saveDigestTime()">Save Time</button>
+      <span class="ok-msg" id="digest-time-msg" style="display:none">Saved!</span>
+    </div>
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
+      <button class="btn btn-gold" onclick="sendTestDigest()">Send Test Email</button>
+      <span id="test-email-msg" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <div class="sec-title" style="margin-bottom:8px;margin-top:20px">Email Preview</div>
+    <div class="email-preview" id="email-preview">Loading preview...</div>
+  </div>
+</div>
+
 <div class="panel" id="panel-runs">
   <table class="tbl">
     <thead><tr>
-      <th>#</th><th>Status</th><th>Jobs Found</th><th>Started</th><th>Completed</th><th>Error</th>
+      <th>#</th><th>Status</th><th>Companies</th><th>Jobs Found</th><th>Matches</th><th>Started</th><th>Completed</th><th>Error</th>
     </tr></thead>
     <tbody id="runs-body"></tbody>
   </table>
   <div class="empty" id="runs-empty" style="display:none">No scout runs yet.</div>
-</div>
-
-<div class="panel" id="panel-criteria">
-  <form onsubmit="saveCriteria(event)">
-    <div class="form-grid">
-      <div class="fg"><label>Your Name</label><input type="text" id="c-name" placeholder="Jane Smith"></div>
-      <div class="fg"><label>Your Email</label><input type="email" id="c-email" placeholder="jane@example.com"></div>
-      <div class="fg"><label>Min Salary</label><input type="number" id="c-salary" placeholder="150000"></div>
-      <div class="fg"></div>
-      <div class="fg"><label>Target Roles</label><textarea id="c-roles" rows="5" placeholder="One per line"></textarea><span class="hint">One role per line</span></div>
-      <div class="fg"><label>Industries</label><textarea id="c-industries" rows="5" placeholder="One per line"></textarea></div>
-      <div class="fg"><label>Locations</label><textarea id="c-locations" rows="4" placeholder="One per line"></textarea></div>
-      <div class="fg"><label>Must Have</label><textarea id="c-musthave" rows="4" placeholder="One per line"></textarea></div>
-      <div class="fg"><label>Nice To Have</label><textarea id="c-nicetohave" rows="4" placeholder="One per line"></textarea></div>
-      <div class="fg"><label>Avoid</label><textarea id="c-avoid" rows="4" placeholder="One per line"></textarea></div>
-    </div>
-    <div class="save-row">
-      <button type="submit" class="btn btn-gold">Save Criteria</button>
-      <span class="ok-msg" id="save-msg" style="display:none">Saved!</span>
-    </div>
-  </form>
 </div>
 
 <div class="panel" id="panel-companies">
@@ -483,66 +890,119 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="fg"><label>Company Name</label><input type="text" id="co-name" placeholder="Acme Corp"></div>
     <div class="fg">
       <label>ATS Type</label>
-      <select id="co-type" style="background:var(--surface);border:1px solid var(--border);border-radius:7px;color:var(--text);padding:9px 12px;font-size:13px;width:100%;outline:none">
+      <select id="co-type">
         <option value="greenhouse">Greenhouse</option>
         <option value="lever">Lever</option>
-        <option value="other">Plain URL</option>
+        <option value="workday">Workday</option>
+        <option value="plain">Plain URL</option>
       </select>
     </div>
-    <div class="fg"><label>ATS Slug or URL</label><input type="text" id="co-slug" placeholder="companyname or https://..."></div>
+    <div class="fg"><label>Slug / Domain / URL</label><input type="text" id="co-slug" placeholder="companyname or domain"></div>
   </div>
   <div style="margin-top:12px">
     <button class="btn btn-gold" onclick="addCompany()">Add Company</button>
   </div>
 </div>
 
+<!-- Tailor Resume Modal -->
+<div class="modal-overlay" id="tailor-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div>
+        <div style="font-size:16px;font-weight:600" id="tailor-title"></div>
+        <div style="font-size:13px;color:var(--gold)" id="tailor-company"></div>
+      </div>
+      <button class="modal-close" onclick="closeTailorModal()">&times;</button>
+    </div>
+    <div id="tailor-loading" style="text-align:center;padding:32px;color:var(--muted)">Generating tailored resume &amp; cover letter with Claude...</div>
+    <div id="tailor-content" style="display:none">
+      <div class="modal-section">
+        <h3>Tailored Resume</h3>
+        <div class="modal-text" id="tailor-resume"></div>
+        <button class="btn btn-ghost btn-sm copy-btn" onclick="copyText('tailor-resume')">Copy Resume</button>
+      </div>
+      <div class="modal-section">
+        <h3>Cover Letter</h3>
+        <div class="modal-text" id="tailor-cover"></div>
+        <button class="btn btn-ghost btn-sm copy-btn" onclick="copyText('tailor-cover')">Copy Cover Letter</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 // ── helpers ──────────────────────────────────────────────────────────────
 function esc(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function lines(id) {
   return document.getElementById(id).value.split('\\n').map(function(s){return s.trim();}).filter(Boolean);
 }
 
 // ── tabs ─────────────────────────────────────────────────────────────────
-var TABS = ['jobs','runs','criteria','companies'];
+var TABS = ['jobs','resume','email','runs','companies'];
 function showTab(name) {
   TABS.forEach(function(t) {
     document.getElementById('tab-' + t).classList.toggle('active', t === name);
     document.getElementById('panel-' + t).classList.toggle('active', t === name);
   });
   if (name === 'runs')      loadRuns();
-  if (name === 'criteria')  loadCriteria();
   if (name === 'companies') loadCompanies();
+  if (name === 'resume')    loadResume();
+  if (name === 'email')     { loadGmailStatus(); loadEmailPreview(); loadDigestTime(); }
+}
+
+// ── stats ─────────────────────────────────────────────────────────────────
+async function loadStats() {
+  try {
+    var res = await fetch('/api/stats');
+    var s = await res.json();
+    document.getElementById('stat-scanned').textContent = s.jobsToday || '0';
+    document.getElementById('stat-matches').textContent = s.matchesToday || '0';
+    document.getElementById('stat-top').textContent = s.topScore || '0';
+    if (s.lastRun && s.lastRun.started_at) {
+      document.getElementById('stat-lastrun').textContent = new Date(s.lastRun.started_at).toLocaleString();
+      document.getElementById('hdr-status').textContent = 'Last run: ' + new Date(s.lastRun.started_at).toLocaleString();
+    }
+  } catch(e) {}
 }
 
 // ── jobs ─────────────────────────────────────────────────────────────────
+var _jobsById = {};
 async function loadJobs() {
-  var res = await fetch('/api/jobs');
+  var res = await fetch('/api/jobs?min_score=60');
   var jobs = await res.json();
+  _jobsById = {};
+  jobs.forEach(function(j) { _jobsById[j.id] = j; });
   var grid = document.getElementById('jobs-grid');
   var cnt  = document.getElementById('jobs-count');
   if (!jobs.length) {
-    cnt.textContent = 'No jobs found yet \u2014 run the scout to find matches';
+    cnt.textContent = 'No matching jobs found yet \\u2014 run the scout to find matches';
     grid.innerHTML = '';
     return;
   }
-  cnt.textContent = jobs.length + ' job' + (jobs.length !== 1 ? 's' : '') + ' found';
+  cnt.textContent = jobs.length + ' match' + (jobs.length !== 1 ? 'es' : '') + ' found (score 60+)';
   var html = '';
   jobs.forEach(function(j) {
+    var barColor = j.match_score >= 80 ? 'var(--green)' : j.match_score >= 60 ? 'var(--gold)' : 'var(--red)';
     html +=
       '<div class="card">' +
         '<div class="card-head">' +
           '<div class="score-row"><span>Match Score</span><span class="score-val">' + esc(j.match_score) + ' / 100</span></div>' +
-          '<div class="bar-bg"><div class="bar-fg" style="width:' + esc(j.match_score) + '%"></div></div>' +
+          '<div class="bar-bg"><div class="bar-fg" style="width:' + esc(j.match_score) + '%;background:' + barColor + '"></div></div>' +
           '<div class="job-title">' + esc(j.title) + '</div>' +
-          '<div class="job-co">'   + esc(j.company) + '</div>' +
+          '<div class="job-co">' + esc(j.company) + '</div>' +
         '</div>' +
-        '<div class="card-meta">\uD83D\uDCCD ' + esc(j.location) + (j.salary ? '&nbsp;&nbsp;\uD83D\uDCB0 ' + esc(j.salary) : '') + '</div>' +
+        '<div class="card-meta">' +
+          '<span>\\uD83D\\uDCCD ' + esc(j.location) + '</span>' +
+          (j.salary ? '<span>\\uD83D\\uDCB0 ' + esc(j.salary) + '</span>' : '') +
+          (j.source ? '<span class="source-badge">' + esc(j.source) + '</span>' : '') +
+        '</div>' +
         (j.why_good_fit ? '<div class="card-why">' + esc(j.why_good_fit) + '</div>' : '') +
-        '<div class="card-foot"><a href="' + esc(j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-gold" style="font-size:12px">Apply \u2192</a></div>' +
+        '<div class="card-foot">' +
+          '<a href="' + esc(j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-gold btn-sm">View Posting \\u2192</a>' +
+          '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ')">Tailor Resume</button>' +
+        '</div>' +
       '</div>';
   });
   grid.innerHTML = html;
@@ -562,9 +1022,11 @@ async function loadRuns() {
       '<tr>' +
         '<td>' + esc(r.id) + '</td>' +
         '<td><span class="badge b-' + esc(r.status) + '">' + esc(r.status) + '</span></td>' +
+        '<td>' + esc(r.companies_scanned || 0) + '</td>' +
         '<td>' + esc(r.jobs_found) + '</td>' +
-        '<td>' + (r.started_at   ? new Date(r.started_at).toLocaleString()   : '\u2014') + '</td>' +
-        '<td>' + (r.completed_at ? new Date(r.completed_at).toLocaleString() : '\u2014') + '</td>' +
+        '<td>' + esc(r.matches_found || 0) + '</td>' +
+        '<td>' + (r.started_at   ? new Date(r.started_at).toLocaleString()   : '\\u2014') + '</td>' +
+        '<td>' + (r.completed_at ? new Date(r.completed_at).toLocaleString() : '\\u2014') + '</td>' +
         '<td style="color:var(--red);font-size:12px">' + esc(r.error || '') + '</td>' +
       '</tr>';
   });
@@ -572,39 +1034,122 @@ async function loadRuns() {
   var latest = runs[0];
   if (latest) {
     document.getElementById('dot').className = 'dot' + (latest.status === 'running' ? ' running' : '');
-    document.getElementById('hdr-status').textContent = 'Last run: ' + new Date(latest.started_at).toLocaleString();
   }
 }
 
-// ── criteria ──────────────────────────────────────────────────────────────
-async function loadCriteria() {
-  var res = await fetch('/api/criteria');
-  var c   = await res.json();
-  document.getElementById('c-name').value      = c.your_name   || '';
-  document.getElementById('c-email').value     = c.your_email  || '';
-  document.getElementById('c-salary').value    = c.min_salary  || '';
-  document.getElementById('c-roles').value     = (c.target_roles  || []).join('\\n');
-  document.getElementById('c-industries').value= (c.industries    || []).join('\\n');
-  document.getElementById('c-locations').value = (c.locations     || []).join('\\n');
-  document.getElementById('c-musthave').value  = (c.must_have     || []).join('\\n');
-  document.getElementById('c-nicetohave').value= (c.nice_to_have  || []).join('\\n');
-  document.getElementById('c-avoid').value     = (c.avoid         || []).join('\\n');
+// ── resume ────────────────────────────────────────────────────────────────
+async function loadResume() {
+  var res = await fetch('/api/resume');
+  var data = await res.json();
+  document.getElementById('resume-text').value = data.resume || '';
 }
-async function saveCriteria(e) {
-  e.preventDefault();
-  var body = {
-    your_name:    document.getElementById('c-name').value.trim(),
-    your_email:   document.getElementById('c-email').value.trim(),
-    min_salary:   parseInt(document.getElementById('c-salary').value) || null,
-    target_roles: lines('c-roles'),
-    industries:   lines('c-industries'),
-    locations:    lines('c-locations'),
-    must_have:    lines('c-musthave'),
-    nice_to_have: lines('c-nicetohave'),
-    avoid:        lines('c-avoid'),
-  };
-  await fetch('/api/criteria', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-  var msg = document.getElementById('save-msg');
+async function saveResume() {
+  var text = document.getElementById('resume-text').value;
+  await fetch('/api/resume', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({resume:text}) });
+  var msg = document.getElementById('resume-msg');
+  msg.style.display = '';
+  setTimeout(function(){ msg.style.display = 'none'; }, 2500);
+}
+
+// ── tailor resume modal ───────────────────────────────────────────────────
+function closeTailorModal() {
+  document.getElementById('tailor-modal').classList.remove('show');
+}
+function copyText(id) {
+  var text = document.getElementById(id).innerText;
+  navigator.clipboard.writeText(text);
+}
+async function tailorResume(jobId) {
+  var j = _jobsById[jobId] || {};
+  var title = j.title || '';
+  var company = j.company || '';
+  var modal = document.getElementById('tailor-modal');
+  document.getElementById('tailor-title').textContent = title;
+  document.getElementById('tailor-company').textContent = company;
+  document.getElementById('tailor-loading').style.display = '';
+  document.getElementById('tailor-content').style.display = 'none';
+  modal.classList.add('show');
+
+  try {
+    var res = await fetch('/api/tailor/' + jobId, { method: 'POST' });
+    var data = await res.json();
+    if (data.error) {
+      document.getElementById('tailor-loading').textContent = 'Error: ' + data.error;
+      return;
+    }
+    document.getElementById('tailor-resume').textContent = data.resume_text || '';
+    document.getElementById('tailor-cover').textContent = data.cover_letter || '';
+    document.getElementById('tailor-loading').style.display = 'none';
+    document.getElementById('tailor-content').style.display = '';
+  } catch(e) {
+    document.getElementById('tailor-loading').textContent = 'Error: ' + e.message;
+  }
+}
+
+// ── gmail ──────────────────────────────────────────────────────────────────
+async function loadGmailStatus() {
+  try {
+    var res = await fetch('/api/gmail/status');
+    var data = await res.json();
+    var badge = document.getElementById('gmail-badge');
+    var connectBtn = document.getElementById('gmail-connect-btn');
+    var disconnectBtn = document.getElementById('gmail-disconnect-btn');
+    var statusText = document.getElementById('gmail-status-text');
+    if (data.connected) {
+      badge.textContent = 'Gmail: Connected';
+      badge.className = 'gmail-badge on';
+      connectBtn.style.display = 'none';
+      disconnectBtn.style.display = '';
+      statusText.textContent = 'Connected ' + (data.connectedAt ? new Date(data.connectedAt).toLocaleDateString() : '');
+    } else {
+      badge.textContent = 'Gmail: Not Connected';
+      badge.className = 'gmail-badge off';
+      connectBtn.style.display = '';
+      disconnectBtn.style.display = 'none';
+      statusText.textContent = '';
+    }
+  } catch(e) {}
+}
+async function connectGmail() {
+  var res = await fetch('/api/gmail/auth-url');
+  var data = await res.json();
+  window.open(data.url, '_blank');
+}
+async function disconnectGmail() {
+  await fetch('/api/gmail/disconnect', { method: 'POST' });
+  loadGmailStatus();
+}
+async function sendTestDigest() {
+  var msg = document.getElementById('test-email-msg');
+  msg.textContent = 'Sending...';
+  try {
+    var res = await fetch('/api/gmail/send-test', { method: 'POST' });
+    var data = await res.json();
+    msg.textContent = data.message || data.error || 'Done';
+    msg.style.color = res.ok ? 'var(--green)' : 'var(--red)';
+  } catch(e) {
+    msg.textContent = 'Error: ' + e.message;
+    msg.style.color = 'var(--red)';
+  }
+}
+async function loadEmailPreview() {
+  try {
+    var res = await fetch('/api/gmail/preview');
+    var data = await res.json();
+    document.getElementById('email-preview').innerHTML = data.html || '<div style="color:var(--muted)">No preview available</div>';
+  } catch(e) {}
+}
+async function loadDigestTime() {
+  try {
+    var res = await fetch('/api/settings/digest_time');
+    var data = await res.json();
+    if (data.value) document.getElementById('digest-time').value = data.value;
+  } catch(e) {}
+}
+async function saveDigestTime() {
+  var time = document.getElementById('digest-time').value;
+  await fetch('/api/settings/digest_time', { method: 'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:time}) });
+  var msg = document.getElementById('digest-time-msg');
   msg.style.display = '';
   setTimeout(function(){ msg.style.display = 'none'; }, 2500);
 }
@@ -617,12 +1162,14 @@ async function loadCompanies() {
   if (!cos.length) { list.innerHTML = '<div class="empty">No companies added yet.</div>'; return; }
   var html = '';
   cos.forEach(function(c) {
-    var slug = c.ats_slug || c.careers_url || '';
+    var detail = c.ats_slug || c.careers_url || '';
+    var typeBadge = '<span class="source-badge">' + esc(c.ats_type) + '</span>';
     html +=
       '<div class="company-row">' +
         '<span class="company-name">' + esc(c.name) + '</span>' +
-        '<span class="company-meta">' + esc(c.ats_type) + (slug ? ': ' + esc(slug) : '') + '</span>' +
-        '<button class="btn btn-ghost" style="padding:5px 12px;font-size:12px" onclick="deleteCompany(' + esc(c.id) + ')">Remove</button>' +
+        typeBadge +
+        '<span class="company-meta">' + esc(detail) + '</span>' +
+        '<button class="btn btn-ghost btn-sm" onclick="deleteCompany(' + c.id + ')">Remove</button>' +
       '</div>';
   });
   list.innerHTML = html;
@@ -633,7 +1180,9 @@ async function addCompany() {
   var slug = document.getElementById('co-slug').value.trim();
   if (!name || !slug) { alert('Name and slug/URL are required.'); return; }
   var body = { name: name, ats_type: type };
-  if (type === 'other') { body.careers_url = slug; } else { body.ats_slug = slug; }
+  if (type === 'plain' || type === 'other') { body.careers_url = slug; }
+  else if (type === 'workday') { body.careers_url = slug; }
+  else { body.ats_slug = slug; }
   await fetch('/api/companies', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
   document.getElementById('co-name').value = '';
   document.getElementById('co-slug').value = '';
@@ -650,43 +1199,52 @@ async function runScout() {
   var btn = document.getElementById('run-btn');
   var msg = document.getElementById('run-msg');
   btn.disabled = true;
-  msg.textContent = 'Starting\u2026';
-  var res = await fetch('/api/scout/run', { method:'POST' });
-  if (!res.ok) {
-    var d = await res.json();
-    msg.textContent = d.error || 'Error starting run';
+  msg.textContent = 'Starting\\u2026';
+  try {
+    var res = await fetch('/api/scout/run', { method:'POST' });
+    if (!res.ok) {
+      var d = await res.json();
+      msg.textContent = d.error || 'Error starting run';
+      btn.disabled = false;
+      return;
+    }
+  } catch(e) {
+    msg.textContent = 'Network error: ' + e.message;
     btn.disabled = false;
     return;
   }
   document.getElementById('dot').className = 'dot running';
-  msg.textContent = 'Scraping job boards and scoring with Claude\u2026';
+  msg.textContent = 'Scraping job boards and scoring with Claude\\u2026';
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(async function() {
-    var r = await fetch('/api/scout/status');
-    var runs = await r.json();
-    var latest = runs[0];
-    if (!latest) return;
-    if (latest.status !== 'running') {
-      clearInterval(pollTimer); pollTimer = null;
-      btn.disabled = false;
-      document.getElementById('dot').className = 'dot';
-      document.getElementById('hdr-status').textContent = 'Last run: ' + new Date(latest.started_at).toLocaleString();
-      if (latest.status === 'completed') {
-        msg.textContent = 'Done! Found ' + latest.jobs_found + ' match' + (latest.jobs_found !== 1 ? 'es' : '');
-        loadJobs();
-      } else {
-        msg.textContent = 'Run failed: ' + (latest.error || 'unknown error');
+    try {
+      var r = await fetch('/api/scout/status');
+      var runs = await r.json();
+      var latest = runs[0];
+      if (!latest) return;
+      if (latest.status !== 'running') {
+        clearInterval(pollTimer); pollTimer = null;
+        btn.disabled = false;
+        document.getElementById('dot').className = 'dot';
+        loadStats();
+        if (latest.status === 'completed') {
+          msg.textContent = 'Done! Found ' + (latest.matches_found || latest.jobs_found) + ' match' + ((latest.matches_found || latest.jobs_found) !== 1 ? 'es' : '');
+          loadJobs();
+        } else {
+          msg.textContent = 'Run failed: ' + (latest.error || 'unknown error');
+        }
       }
-    }
-  }, 2000);
+    } catch(e) {}
+  }, 3000);
 }
 
 // ── init ──────────────────────────────────────────────────────────────────
 loadJobs();
-loadRuns();
+loadStats();
+loadGmailStatus();
 </script>
 </body>
 </html>`;
 
-// suppress TS "unused" warning — esc is used in serveHTML
+// suppress TS "unused" warning
 void esc;
