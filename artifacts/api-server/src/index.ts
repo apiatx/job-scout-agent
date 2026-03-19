@@ -33,6 +33,7 @@ async function initDb(): Promise<void> {
       target_roles  TEXT[]  NOT NULL DEFAULT '{}',
       industries    TEXT[]  NOT NULL DEFAULT '{}',
       min_salary    INT,
+      work_type     TEXT    NOT NULL DEFAULT 'any',
       locations     TEXT[]  NOT NULL DEFAULT '{}',
       must_have     TEXT[]  NOT NULL DEFAULT '{}',
       nice_to_have  TEXT[]  NOT NULL DEFAULT '{}',
@@ -104,6 +105,7 @@ async function initDb(): Promise<void> {
   const safeAddColumn = async (table: string, col: string, type: string) => {
     try { await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${col} ${type}`); } catch { /* ignore */ }
   };
+  await safeAddColumn('criteria', 'work_type', "TEXT NOT NULL DEFAULT 'any'");
   await safeAddColumn('scout_runs', 'companies_scanned', 'INT NOT NULL DEFAULT 0');
   await safeAddColumn('scout_runs', 'matches_found', 'INT NOT NULL DEFAULT 0');
   await safeAddColumn('jobs', 'source', "TEXT NOT NULL DEFAULT ''");
@@ -196,23 +198,23 @@ app.get('/api/criteria', async (_req, res: Response) => {
 
 app.put('/api/criteria', async (req: Request, res: Response) => {
   try {
-    const { target_roles, industries, min_salary, locations, must_have, nice_to_have, avoid, your_name, your_email } = req.body;
+    const { target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email } = req.body;
     const { rows: existing } = await pool.query('SELECT id FROM criteria LIMIT 1');
     const params = [
-      target_roles ?? [], industries ?? [], min_salary ?? null, locations ?? [],
+      target_roles ?? [], industries ?? [], min_salary ?? null, work_type ?? 'any', locations ?? [],
       must_have ?? [], nice_to_have ?? [], avoid ?? [], your_name ?? '', your_email ?? '',
     ];
     if (existing.length === 0) {
       const { rows } = await pool.query(
-        `INSERT INTO criteria (target_roles, industries, min_salary, locations, must_have, nice_to_have, avoid, your_name, your_email)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`, params
+        `INSERT INTO criteria (target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`, params
       );
       res.json(rows[0]);
     } else {
       const { rows } = await pool.query(
-        `UPDATE criteria SET target_roles=$1, industries=$2, min_salary=$3, locations=$4,
-         must_have=$5, nice_to_have=$6, avoid=$7, your_name=$8, your_email=$9
-         WHERE id=$10 RETURNING *`, [...params, existing[0].id]
+        `UPDATE criteria SET target_roles=$1, industries=$2, min_salary=$3, work_type=$4, locations=$5,
+         must_have=$6, nice_to_have=$7, avoid=$8, your_name=$9, your_email=$10
+         WHERE id=$11 RETURNING *`, [...params, existing[0].id]
       );
       res.json(rows[0]);
     }

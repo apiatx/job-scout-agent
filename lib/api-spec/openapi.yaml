@@ -358,6 +358,9 @@ components:
             type: string
         minSalary:
           type: ["integer", "null"]
+        workType:
+          type: string
+          enum: [any, remote, office, hybrid]
         locations:
           type: array
           items:
@@ -385,6 +388,7 @@ components:
         - id
         - targetRoles
         - industries
+        - workType
         - locations
         - mustHave
         - niceToHave
@@ -406,6 +410,9 @@ components:
             type: string
         minSalary:
           type: ["integer", "null"]
+        workType:
+          type: string
+          enum: [any, remote, office, hybrid]
         locations:
           type: array
           items:
