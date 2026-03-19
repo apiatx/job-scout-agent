@@ -13,5 +13,3 @@ paths = ["/__mockup"]
 PORT = "8081"
 BASE_PATH = "/__mockup"
 
-[services.development]
-run = "pnpm --filter @workspace/mockup-sandbox run dev"
