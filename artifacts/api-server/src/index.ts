@@ -182,6 +182,10 @@ async function initDb(): Promise<void> {
       ['Crane NXT', 'cranenxt'],
       ['Scale AI', 'scaleai'],
       ['Veeva Systems', 'veeva'],
+      ['Enverus', 'enverus'],
+      ['Cognite', 'cognite'],
+      ['Urbint', 'urbint'],
+      ['EnergyHub', 'energyhub'],
     ];
     for (const [name, slug] of greenhouse) {
       await pool.query(
@@ -281,7 +285,7 @@ async function initDb(): Promise<void> {
 
   // ── Migrate: ensure criteria includes new industries and nice-to-haves ──
   const newIndustries = ['Industrial Automation', 'Oilfield Services Technology', 'Energy Technology', 'Clean Energy / Energy Storage', 'Machine Vision', 'Test and Measurement', 'Materials Science / Specialty Chemicals', 'Robotics'];
-  const newNiceToHave = ['industrial automation', 'energy technology', 'machine vision', 'robotics', 'oilfield services', 'energy storage'];
+  const newNiceToHave = ['industrial automation', 'energy technology', 'machine vision', 'robotics', 'oilfield services', 'energy storage', 'industrial AI', 'oil and gas software', 'utility software', 'grid technology', 'clean energy'];
   const { rows: criteriaRows } = await pool.query('SELECT id, industries, nice_to_have FROM criteria LIMIT 1');
   if (criteriaRows.length > 0) {
     const cr = criteriaRows[0] as { id: number; industries: string[]; nice_to_have: string[] };
@@ -323,6 +327,10 @@ async function initDb(): Promise<void> {
     { name: 'Crane NXT', ats_type: 'greenhouse', ats_slug: 'cranenxt' },
     { name: 'Scale AI', ats_type: 'greenhouse', ats_slug: 'scaleai' },
     { name: 'Veeva Systems', ats_type: 'greenhouse', ats_slug: 'veeva' },
+    { name: 'Enverus', ats_type: 'greenhouse', ats_slug: 'enverus' },
+    { name: 'Cognite', ats_type: 'greenhouse', ats_slug: 'cognite' },
+    { name: 'Urbint', ats_type: 'greenhouse', ats_slug: 'urbint' },
+    { name: 'EnergyHub', ats_type: 'greenhouse', ats_slug: 'energyhub' },
     // Lever
     { name: 'VAST Data', ats_type: 'lever', ats_slug: 'vast-data' },
     { name: 'Weka', ats_type: 'lever', ats_slug: 'weka' },
