@@ -156,6 +156,10 @@ async function initDb(): Promise<void> {
       ['CommScope', 'commscope'],
       ['NetApp', 'netapp'],
       ['Iron Mountain', 'ironmountain'],
+      ['Cohesity', 'cohesity'],
+      ['Veeam', 'veeam'],
+      ['Zerto', 'zerto'],
+      ['Commvault', 'commvault'],
     ];
     for (const [name, slug] of greenhouse) {
       await pool.query(
@@ -241,6 +245,10 @@ async function initDb(): Promise<void> {
     { name: 'CommScope', ats_type: 'greenhouse', ats_slug: 'commscope' },
     { name: 'NetApp', ats_type: 'greenhouse', ats_slug: 'netapp' },
     { name: 'Iron Mountain', ats_type: 'greenhouse', ats_slug: 'ironmountain' },
+    { name: 'Cohesity', ats_type: 'greenhouse', ats_slug: 'cohesity' },
+    { name: 'Veeam', ats_type: 'greenhouse', ats_slug: 'veeam' },
+    { name: 'Zerto', ats_type: 'greenhouse', ats_slug: 'zerto' },
+    { name: 'Commvault', ats_type: 'greenhouse', ats_slug: 'commvault' },
     // Lever
     { name: 'VAST Data', ats_type: 'lever', ats_slug: 'vast-data' },
     { name: 'Weka', ats_type: 'lever', ats_slug: 'weka' },
