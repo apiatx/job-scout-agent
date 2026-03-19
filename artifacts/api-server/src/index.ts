@@ -403,6 +403,32 @@ async function initDb(): Promise<void> {
     );
   }
 
+  // Purge jobs from locations outside candidate's preferred regions
+  // Allowed: Remote (no state), NC, SC, GA, FL, AL, MS, TN, LA, AR, TX, KY + "United States" with no specific state
+  const rejectedLocationPatterns = [
+    'Virginia', 'Washington', 'Massachusetts', 'California', 'New York',
+    'Oregon', 'Colorado', 'Illinois', 'Ohio', 'Michigan', 'Minnesota',
+    'Pennsylvania', 'New Jersey', 'Connecticut', 'Maryland', 'Arizona',
+    'Utah', 'Nevada', 'Idaho', 'Montana', 'Wisconsin', 'Indiana', 'Missouri',
+    'Iowa', 'Nebraska', 'Kansas', 'Oklahoma', 'New Mexico', 'Hawaii',
+    'Alaska', 'Maine', 'Vermont', 'New Hampshire', 'Rhode Island',
+    'Delaware', 'West Virginia', 'Wyoming', 'North Dakota', 'South Dakota',
+    'Seattle', 'San Francisco', 'San Jose', 'Los Angeles', 'New York City',
+    'Boston', 'Chicago', 'Denver', 'Portland', 'Phoenix', 'Austin',
+    'Dallas', 'Houston', 'Philadelphia', 'Pittsburgh', 'Baltimore',
+    'Minneapolis', 'Detroit', 'Cleveland', 'Columbus', 'Indianapolis',
+    'Salt Lake', 'Boise', 'Reno', 'Las Vegas',
+  ];
+  for (const loc of rejectedLocationPatterns) {
+    const deleted = await pool.query(
+      `DELETE FROM jobs WHERE location ILIKE $1 AND saved_at IS NULL`,
+      [`%${loc}%`]
+    );
+    if ((deleted.rowCount ?? 0) > 0) {
+      console.log(`Purged ${deleted.rowCount} jobs matching location "${loc}"`);
+    }
+  }
+
   // Mark any stale running records as failed
   await pool.query(
     "UPDATE scout_runs SET status='failed', error='Server restarted — run was abandoned', completed_at=NOW() WHERE status='running'"
@@ -886,7 +912,12 @@ async function runScoutInBackground(runId: number): Promise<void> {
       }
     );
 
-    for (const m of matches) {
+    // Hard server-side location filter — reject states outside candidate's regions
+    const blockedStates = /\b(Virginia|Washington|Massachusetts|California|New York|Oregon|Colorado|Illinois|Ohio|Michigan|Minnesota|Pennsylvania|New Jersey|Connecticut|Maryland|Arizona|Utah|Nevada|Idaho|Montana|Wisconsin|Indiana|Missouri|Iowa|Nebraska|Kansas|Oklahoma|New Mexico|Hawaii|Alaska|Maine|Vermont|New Hampshire|Rhode Island|Delaware|West Virginia|Wyoming|North Dakota|South Dakota|Seattle|San Francisco|San Jose|Los Angeles|Boston|Chicago|Denver|Portland|Phoenix|Minneapolis|Detroit|Cleveland|Columbus|Indianapolis|Philadelphia|Pittsburgh|Baltimore|Salt Lake)\b/i;
+    const locationFiltered = matches.filter(m => !blockedStates.test(m.location));
+    console.log(`Location filter: ${matches.length} → ${locationFiltered.length} (rejected ${matches.length - locationFiltered.length} outside preferred regions)`);
+
+    for (const m of locationFiltered) {
       const source = toScore.find(j => j.applyUrl === m.applyUrl)?.source ?? '';
       await pool.query(
         `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware)
@@ -897,7 +928,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
     await pool.query(
       "UPDATE scout_runs SET status='completed', companies_scanned=$1, jobs_found=$2, matches_found=$3, completed_at=NOW() WHERE id=$4",
-      [companiesScanned, allJobs.length, matches.length, runId]
+      [companiesScanned, allJobs.length, locationFiltered.length, runId]
     );
 
     // Send digest email if Gmail is connected
