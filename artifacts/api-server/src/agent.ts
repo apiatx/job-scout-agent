@@ -33,6 +33,19 @@ async function scoreOne(job: ScrapedJob, criteriaText: string): Promise<JobMatch
   try {
     const prompt = `You are a job matching assistant. Evaluate whether this job matches the candidate's criteria.
 
+CRITICAL LOCATION RULE:
+The candidate's preferred locations are listed below. You MUST reject any job (score 0, isMatch false) whose location does NOT fall within one of the candidate's preferred locations or regions.
+- "Remote" in the candidate's preferences means fully remote roles with NO specific state/city requirement are acceptable.
+- If a job says "Remote, <State>" or "Remote, <City>", that state/city MUST be in or closely associated with one of the candidate's preferred locations/regions.
+  For example, if the candidate wants "South Carolina, Georgia, Florida, South East, East Coast, South", then "Remote, Washington" or "Remote, Ohio" or "Remote, Massachusetts" do NOT qualify — those are not in the Southeast or East Coast South.
+  "Remote, Virginia" or "Remote, North Carolina" WOULD qualify as East Coast/South.
+- If the candidate lists a region like "South East", "East Coast", or "South", only states commonly associated with that region qualify.
+  Southeast/South: SC, NC, GA, FL, AL, MS, TN, VA, LA, AR, KY
+  East Coast: States along the eastern seaboard from VA southward (given the candidate's focus)
+- "United States" as a candidate preference means US-based roles are acceptable, but ONLY if the role is listed as fully "Remote" without a specific non-preferred state.
+- If a job lists multiple locations (e.g., "San Francisco, CA / Sunnyvale, CA"), ALL locations must be in the candidate's preferred areas, OR the job must also offer a remote option in a preferred area.
+- When in doubt about whether a location matches, reject the job. Be strict.
+
 Job:
 Title: ${job.title}
 Company: ${job.company}
