@@ -427,35 +427,46 @@ async function initDb(): Promise<void> {
     );
   }
 
-  // Purge jobs from locations outside candidate's preferred regions
-  // Allowed: Remote (no state), NC, SC, GA, FL, AL, MS, TN, LA, AR, TX, KY + "United States" with no specific state
-  const rejectedLocationPatterns = [
-    'Virginia', 'Washington', 'Massachusetts', 'California', 'New York',
-    'Oregon', 'Colorado', 'Illinois', 'Ohio', 'Michigan', 'Minnesota',
-    'Pennsylvania', 'New Jersey', 'Connecticut', 'Maryland', 'Arizona',
-    'Utah', 'Nevada', 'Idaho', 'Montana', 'Wisconsin', 'Indiana', 'Missouri',
-    'Iowa', 'Nebraska', 'Kansas', 'Oklahoma', 'New Mexico', 'Hawaii',
-    'Alaska', 'Maine', 'Vermont', 'New Hampshire', 'Rhode Island',
-    'Delaware', 'West Virginia', 'Wyoming', 'North Dakota', 'South Dakota',
-    'Seattle', 'San Francisco', 'San Jose', 'Los Angeles', 'New York City',
-    'Boston', 'Chicago', 'Denver', 'Portland', 'Phoenix', 'Austin',
-    'Dallas', 'Houston', 'Philadelphia', 'Pittsburgh', 'Baltimore',
-    'Minneapolis', 'Detroit', 'Cleveland', 'Columbus', 'Indianapolis',
-    'Salt Lake', 'Boise', 'Reno', 'Las Vegas',
+  // Purge jobs from locations outside candidate's STRICT preferred regions
+  // ALLOWLIST: Only keep jobs whose location matches Remote (no bad state), NC, SC, GA, FL, or United States (generic)
+  // This is an allowlist approach — anything NOT matching gets deleted
+  const allowedLocationPatterns = [
+    'North Carolina', 'NC', 'South Carolina', 'SC', 'Georgia', 'GA', 'Florida', 'FL',
+    'Charlotte', 'Raleigh', 'Durham', 'Atlanta', 'Miami', 'Tampa', 'Jacksonville',
+    'Orlando', 'Savannah', 'Charleston', 'Greenville',
   ];
-  for (const loc of rejectedLocationPatterns) {
-    // Delete dependent tailored_docs first, then the jobs
-    await pool.query(
-      `DELETE FROM tailored_docs WHERE job_id IN (SELECT id FROM jobs WHERE location ILIKE $1 AND saved_at IS NULL)`,
-      [`%${loc}%`]
-    );
-    const deleted = await pool.query(
-      `DELETE FROM jobs WHERE location ILIKE $1 AND saved_at IS NULL`,
-      [`%${loc}%`]
-    );
-    if ((deleted.rowCount ?? 0) > 0) {
-      console.log(`Purged ${deleted.rowCount} jobs matching location "${loc}"`);
-    }
+  // Build WHERE clause: keep jobs that are pure Remote, Remote-US, United States, or match allowed patterns
+  const allowedILIKE = allowedLocationPatterns.map((_, i) => `location ILIKE $${i + 1}`).join(' OR ');
+  const purgeQuery = `
+    DELETE FROM jobs
+    WHERE saved_at IS NULL
+      AND NOT (
+        location ~* '^\\s*remote\\s*$'
+        OR location ~* 'remote.*united states'
+        OR location ~* 'remote.*\\bus\\b'
+        OR location ~* '^\\s*united states\\s*$'
+        OR ${allowedILIKE}
+      )
+  `;
+  // First delete dependent tailored_docs
+  const purgeDocQuery = `
+    DELETE FROM tailored_docs WHERE job_id IN (
+      SELECT id FROM jobs
+      WHERE saved_at IS NULL
+        AND NOT (
+          location ~* '^\\s*remote\\s*$'
+          OR location ~* 'remote.*united states'
+          OR location ~* 'remote.*\\bus\\b'
+          OR location ~* '^\\s*united states\\s*$'
+          OR ${allowedILIKE}
+        )
+    )
+  `;
+  const likeParams = allowedLocationPatterns.map(p => `%${p}%`);
+  await pool.query(purgeDocQuery, likeParams);
+  const purged = await pool.query(purgeQuery, likeParams);
+  if ((purged.rowCount ?? 0) > 0) {
+    console.log(`Allowlist purge: deleted ${purged.rowCount} jobs outside NC/SC/GA/FL/Remote`);
   }
 
   // Mark any stale running records as failed
@@ -957,11 +968,13 @@ async function runScoutInBackground(runId: number): Promise<void> {
     // Hard server-side location filter — ALLOWLIST approach
     // Build allowed location terms from the candidate's criteria locations,
     // plus well-known expansions for regional keywords.
+    // STRICT: Only NC, SC, GA, FL — no other states allowed
     const regionExpansions: Record<string, string[]> = {
-      'southeast':   ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Alabama','AL','Tennessee','TN','Charlotte','Raleigh','Durham','Atlanta','Nashville','Miami','Tampa','Jacksonville','Orlando','Savannah','Charleston','Greenville','Knoxville'],
-      'south east':  ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Alabama','AL','Tennessee','TN','Charlotte','Raleigh','Durham','Atlanta','Nashville','Miami','Tampa','Jacksonville','Orlando','Savannah','Charleston','Greenville','Knoxville'],
-      'east coast':  ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Alabama','AL','Tennessee','TN','Virginia','VA','New York','NY','New Jersey','NJ','Maryland','MD','Connecticut','CT','Massachusetts','MA','Charlotte','Raleigh','Durham','Atlanta','Nashville','Miami','Tampa','Jacksonville'],
-      'south':       ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Alabama','AL','Tennessee','TN','Mississippi','MS','Louisiana','LA','Arkansas','AR','Texas','TX','Kentucky','KY','Charlotte','Raleigh','Durham','Atlanta','Nashville','Miami','Tampa','Jacksonville','Houston','Dallas','Austin'],
+      'southeast':   ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Charlotte','Raleigh','Durham','Atlanta','Miami','Tampa','Jacksonville','Orlando','Savannah','Charleston','Greenville'],
+      'south east':  ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Charlotte','Raleigh','Durham','Atlanta','Miami','Tampa','Jacksonville','Orlando','Savannah','Charleston','Greenville'],
+      'east coast':  ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Charlotte','Raleigh','Durham','Atlanta','Miami','Tampa','Jacksonville','Orlando','Savannah','Charleston','Greenville'],
+      'east':        ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Charlotte','Raleigh','Durham','Atlanta','Miami','Tampa','Jacksonville','Orlando','Savannah','Charleston','Greenville'],
+      'south':       ['North Carolina','NC','South Carolina','SC','Georgia','GA','Florida','FL','Charlotte','Raleigh','Durham','Atlanta','Miami','Tampa','Jacksonville','Orlando','Savannah','Charleston','Greenville'],
     };
     const allowedTerms = new Set<string>();
     // "Remote" with no geo qualifier is always allowed

@@ -41,7 +41,7 @@ The candidate's preferred locations are listed below. You MUST reject any job (s
 - STRICT regional definitions — use ONLY these states for each region:
   "South East" or "Southeast": NC, SC, GA, FL — ONLY these four states. No others.
   "East Coast": Same as Southeast for this candidate — NC, SC, GA, FL only.
-  "South": A broader label meaning the candidate is open to remote roles tagged as "South" region without a specific state. If a specific state IS listed, it must be in: NC, SC, GA, FL, AL, MS, TN, LA, AR, TX, KY.
+  "South": For this candidate, "South" means ONLY NC, SC, GA, FL. No other states. REJECT AL, TN, TX, KY, MS, LA, AR, and all others.
   "United States": US-based roles are acceptable ONLY if listed as fully "Remote" with NO specific state/city, OR the state is in one of the candidate's preferred regions above.
 - Virginia is NOT in Southeast, NOT in East Coast, and NOT in South for this candidate. REJECT Virginia jobs.
 - Washington, Massachusetts, California, New York, Oregon, Colorado, Illinois, Ohio, Michigan, Minnesota, etc. are all OUTSIDE the candidate's regions. REJECT them.
