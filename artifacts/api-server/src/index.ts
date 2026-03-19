@@ -163,8 +163,6 @@ async function initDb(): Promise<void> {
     const greenhouse: [string, string][] = [
       ['Pure Storage', 'purestorage'],
       ['CoreWeave', 'coreweave'],
-      ['Zscaler', 'zscaler'],
-      ['Rubrik', 'rubrik'],
       ['Samsara', 'samsara'],
       ['Databricks', 'databricks'],
       ['Nutanix', 'nutanix'],
@@ -174,18 +172,16 @@ async function initDb(): Promise<void> {
       ['Coherent Corp', 'coherent'],
       ['NVIDIA', 'nvidia'],
       ['Broadcom', 'broadcom'],
-      ['Snowflake', 'snowflake-computing'],
       ['Marvell Technology', 'marvell'],
       ['Calix', 'calix'],
       ['CommScope', 'commscope'],
       ['NetApp', 'netapp'],
       ['Iron Mountain', 'ironmountain'],
       ['Cohesity', 'cohesity'],
-      ['Veeam', 'veeam'],
-      ['Zerto', 'zerto'],
-      ['Commvault', 'commvault'],
       ['Bentley Systems', 'bentleysystems'],
       ['Crane NXT', 'cranenxt'],
+      ['Scale AI', 'scaleai'],
+      ['Veeva Systems', 'veeva'],
     ];
     for (const [name, slug] of greenhouse) {
       await pool.query(
@@ -272,6 +268,8 @@ async function initDb(): Promise<void> {
       ['Itron', 'https://www.itron.com/na/about/careers'],
       ['IDEX Corporation', 'https://www.idexcorp.com/careers'],
       ['Roper Technologies', 'https://www.ropertechnologies.com/careers'],
+      ['AWS', 'https://aws.amazon.com/careers'],
+      ['Google Cloud', 'https://careers.google.com'],
     ];
     for (const [name, url] of plain) {
       await pool.query(
@@ -306,8 +304,6 @@ async function initDb(): Promise<void> {
     // Greenhouse
     { name: 'Pure Storage', ats_type: 'greenhouse', ats_slug: 'purestorage' },
     { name: 'CoreWeave', ats_type: 'greenhouse', ats_slug: 'coreweave' },
-    { name: 'Zscaler', ats_type: 'greenhouse', ats_slug: 'zscaler' },
-    { name: 'Rubrik', ats_type: 'greenhouse', ats_slug: 'rubrik' },
     { name: 'Samsara', ats_type: 'greenhouse', ats_slug: 'samsara' },
     { name: 'Databricks', ats_type: 'greenhouse', ats_slug: 'databricks' },
     { name: 'Nutanix', ats_type: 'greenhouse', ats_slug: 'nutanix' },
@@ -317,18 +313,16 @@ async function initDb(): Promise<void> {
     { name: 'Coherent Corp', ats_type: 'greenhouse', ats_slug: 'coherent' },
     { name: 'NVIDIA', ats_type: 'greenhouse', ats_slug: 'nvidia' },
     { name: 'Broadcom', ats_type: 'greenhouse', ats_slug: 'broadcom' },
-    { name: 'Snowflake', ats_type: 'greenhouse', ats_slug: 'snowflake-computing' },
     { name: 'Marvell Technology', ats_type: 'greenhouse', ats_slug: 'marvell' },
     { name: 'Calix', ats_type: 'greenhouse', ats_slug: 'calix' },
     { name: 'CommScope', ats_type: 'greenhouse', ats_slug: 'commscope' },
     { name: 'NetApp', ats_type: 'greenhouse', ats_slug: 'netapp' },
     { name: 'Iron Mountain', ats_type: 'greenhouse', ats_slug: 'ironmountain' },
     { name: 'Cohesity', ats_type: 'greenhouse', ats_slug: 'cohesity' },
-    { name: 'Veeam', ats_type: 'greenhouse', ats_slug: 'veeam' },
-    { name: 'Zerto', ats_type: 'greenhouse', ats_slug: 'zerto' },
-    { name: 'Commvault', ats_type: 'greenhouse', ats_slug: 'commvault' },
     { name: 'Bentley Systems', ats_type: 'greenhouse', ats_slug: 'bentleysystems' },
     { name: 'Crane NXT', ats_type: 'greenhouse', ats_slug: 'cranenxt' },
+    { name: 'Scale AI', ats_type: 'greenhouse', ats_slug: 'scaleai' },
+    { name: 'Veeva Systems', ats_type: 'greenhouse', ats_slug: 'veeva' },
     // Lever
     { name: 'VAST Data', ats_type: 'lever', ats_slug: 'vast-data' },
     { name: 'Weka', ats_type: 'lever', ats_slug: 'weka' },
@@ -392,10 +386,12 @@ async function initDb(): Promise<void> {
     { name: 'Itron', ats_type: 'plain', careers_url: 'https://www.itron.com/na/about/careers' },
     { name: 'IDEX Corporation', ats_type: 'plain', careers_url: 'https://www.idexcorp.com/careers' },
     { name: 'Roper Technologies', ats_type: 'plain', careers_url: 'https://www.ropertechnologies.com/careers' },
+    { name: 'AWS', ats_type: 'plain', careers_url: 'https://aws.amazon.com/careers' },
+    { name: 'Google Cloud', ats_type: 'plain', careers_url: 'https://careers.google.com' },
   ];
 
   // Remove retired companies
-  const retiredNames = ['Anritsu', 'Datadog'];
+  const retiredNames = ['Anritsu', 'Datadog', 'Zscaler', 'CrowdStrike', 'Rubrik', 'Veeam', 'Zerto', 'Commvault', 'Snowflake', 'Dynatrace'];
   for (const name of retiredNames) {
     await pool.query('DELETE FROM companies WHERE LOWER(name) = LOWER($1)', [name]);
   }
