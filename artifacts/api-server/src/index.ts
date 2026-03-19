@@ -866,6 +866,19 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .add-form{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;max-width:640px;margin-top:16px}
 @media(max-width:600px){.add-form{grid-template-columns:1fr}}
 
+/* settings */
+.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:700px}
+@media(max-width:600px){.settings-grid{grid-template-columns:1fr}}
+.input-prefix{display:flex;align-items:center;background:var(--surface);border:1px solid var(--border);border-radius:7px;overflow:hidden}
+.input-prefix span{padding:9px 0 9px 12px;color:var(--muted);font-size:13px}
+.input-prefix input{border:none;background:transparent;padding-left:4px}
+.input-prefix input:focus{border:none;box-shadow:none}
+.tag-list{display:flex;flex-wrap:wrap;gap:6px;min-height:28px}
+.tag{display:inline-flex;align-items:center;gap:4px;background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:3px 8px;font-size:12px;color:var(--text)}
+.tag .x{cursor:pointer;color:var(--muted);font-size:14px;line-height:1}
+.tag .x:hover{color:var(--red)}
+.hint{font-size:9px;text-transform:none;letter-spacing:0;color:var(--muted);font-weight:400}
+
 .empty{padding:48px;text-align:center;color:var(--muted);font-size:13px}
 .sec-title{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
 
@@ -924,6 +937,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="tab" id="tab-resume" onclick="showTab('resume')">Resume</div>
   <div class="tab" id="tab-email" onclick="showTab('email')">Daily Jobs Report</div>
   <div class="tab" id="tab-runs" onclick="showTab('runs')">Run History</div>
+  <div class="tab" id="tab-settings" onclick="showTab('settings')">Settings</div>
 </nav>
 <div class="main-content">
 <div class="panel active" id="panel-jobs">
@@ -1024,6 +1038,67 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <button class="btn btn-gold" onclick="addCompany()">Add Company</button>
   </div>
 </div>
+<div class="panel" id="panel-settings">
+  <div class="sec-title" style="margin-bottom:16px">Search Criteria</div>
+  <div class="settings-grid">
+    <div class="fg">
+      <label>Minimum Base Pay</label>
+      <div class="input-prefix"><span>$</span><input type="number" id="set-salary" placeholder="150000" step="5000"></div>
+    </div>
+    <div class="fg">
+      <label>Work Type</label>
+      <select id="set-worktype">
+        <option value="any">Any</option>
+        <option value="remote">Remote</option>
+        <option value="office">Office / On-site</option>
+        <option value="hybrid">Hybrid</option>
+      </select>
+    </div>
+    <div class="fg full">
+      <label>Locations <span class="hint">(press Enter to add)</span></label>
+      <input type="text" id="set-loc-input" placeholder="e.g. New York, Remote, Austin TX">
+      <div class="tag-list" id="set-loc-tags"></div>
+    </div>
+    <div class="fg full">
+      <label>Target Roles <span class="hint">(press Enter to add)</span></label>
+      <input type="text" id="set-roles-input" placeholder="e.g. Enterprise Account Executive">
+      <div class="tag-list" id="set-roles-tags"></div>
+    </div>
+    <div class="fg full">
+      <label>Industries <span class="hint">(press Enter to add)</span></label>
+      <input type="text" id="set-ind-input" placeholder="e.g. AI Infrastructure, Semiconductors">
+      <div class="tag-list" id="set-ind-tags"></div>
+    </div>
+    <div class="fg full">
+      <label>Must-Have Keywords <span class="hint">(press Enter to add)</span></label>
+      <input type="text" id="set-must-input" placeholder="e.g. enterprise sales, quota carrying">
+      <div class="tag-list" id="set-must-tags"></div>
+    </div>
+    <div class="fg full">
+      <label>Nice-to-Have Keywords <span class="hint">(press Enter to add)</span></label>
+      <input type="text" id="set-nice-input" placeholder="e.g. AI, data center, GPU">
+      <div class="tag-list" id="set-nice-tags"></div>
+    </div>
+    <div class="fg full">
+      <label>Avoid Keywords <span class="hint">(press Enter to add)</span></label>
+      <input type="text" id="set-avoid-input" placeholder="e.g. SDR, BDR, inbound only">
+      <div class="tag-list" id="set-avoid-tags"></div>
+    </div>
+    <div class="fg">
+      <label>Your Name</label>
+      <input type="text" id="set-name" placeholder="Your full name">
+    </div>
+    <div class="fg">
+      <label>Your Email</label>
+      <input type="email" id="set-email" placeholder="you@example.com">
+    </div>
+  </div>
+  <div class="save-row">
+    <button class="btn btn-gold" onclick="saveCriteria()">Save Settings</button>
+    <span class="ok-msg" id="settings-msg" style="display:none">Saved!</span>
+  </div>
+</div>
+
 </div><!-- /main-content -->
 </div><!-- /app-body -->
 
@@ -1063,7 +1138,7 @@ function lines(id) {
 }
 
 // ── tabs ─────────────────────────────────────────────────────────────────
-var TABS = ['jobs','saved','companies','resume','email','runs'];
+var TABS = ['jobs','saved','companies','resume','email','runs','settings'];
 function showTab(name) {
   TABS.forEach(function(t) {
     document.getElementById('tab-' + t).classList.toggle('active', t === name);
@@ -1075,6 +1150,7 @@ function showTab(name) {
   if (name === 'companies') loadCompanies();
   if (name === 'resume')    loadResume();
   if (name === 'email')     { loadGmailStatus(); loadEmailPreview(); loadDigestTime(); }
+  if (name === 'settings')  loadCriteria();
 }
 
 // ── stats ─────────────────────────────────────────────────────────────────
@@ -1519,6 +1595,98 @@ async function runScout() {
       }
     } catch(e) {}
   }, 3000);
+}
+
+// ── settings / criteria ────────────────────────────────────────────────────
+var _criteriaTagState = {};
+function initTagInput(inputId, tagsId, stateKey) {
+  _criteriaTagState[stateKey] = _criteriaTagState[stateKey] || [];
+  var input = document.getElementById(inputId);
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      var val = input.value.trim();
+      if (val && _criteriaTagState[stateKey].indexOf(val) === -1) {
+        _criteriaTagState[stateKey].push(val);
+        renderTags(tagsId, stateKey);
+      }
+      input.value = '';
+    }
+  });
+}
+function renderTags(tagsId, stateKey) {
+  var el = document.getElementById(tagsId);
+  el.innerHTML = _criteriaTagState[stateKey].map(function(t, i) {
+    return '<span class="tag">' + esc(t) + ' <span class="x" data-key="' + stateKey + '" data-idx="' + i + '" data-tags="' + tagsId + '">&times;</span></span>';
+  }).join('');
+  el.querySelectorAll('.x').forEach(function(btn) {
+    btn.onclick = function() {
+      var key = btn.getAttribute('data-key');
+      var idx = Number(btn.getAttribute('data-idx'));
+      var tid = btn.getAttribute('data-tags');
+      _criteriaTagState[key].splice(idx, 1);
+      renderTags(tid, key);
+    };
+  });
+}
+function setTags(stateKey, tagsId, arr) {
+  _criteriaTagState[stateKey] = arr || [];
+  renderTags(tagsId, stateKey);
+}
+
+var _criteriaInitialized = false;
+async function loadCriteria() {
+  try {
+    var res = await fetch('/api/criteria');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var c = await res.json();
+    document.getElementById('set-salary').value = c.min_salary || '';
+    document.getElementById('set-worktype').value = c.work_type || 'any';
+    document.getElementById('set-name').value = c.your_name || '';
+    document.getElementById('set-email').value = c.your_email || '';
+    setTags('locations', 'set-loc-tags', c.locations);
+    setTags('roles', 'set-roles-tags', c.target_roles);
+    setTags('industries', 'set-ind-tags', c.industries);
+    setTags('must_have', 'set-must-tags', c.must_have);
+    setTags('nice_to_have', 'set-nice-tags', c.nice_to_have);
+    setTags('avoid', 'set-avoid-tags', c.avoid);
+    if (!_criteriaInitialized) {
+      initTagInput('set-loc-input', 'set-loc-tags', 'locations');
+      initTagInput('set-roles-input', 'set-roles-tags', 'roles');
+      initTagInput('set-ind-input', 'set-ind-tags', 'industries');
+      initTagInput('set-must-input', 'set-must-tags', 'must_have');
+      initTagInput('set-nice-input', 'set-nice-tags', 'nice_to_have');
+      initTagInput('set-avoid-input', 'set-avoid-tags', 'avoid');
+      _criteriaInitialized = true;
+    }
+  } catch(e) {
+    console.error('loadCriteria failed:', e);
+  }
+}
+async function saveCriteria() {
+  var body = {
+    min_salary: Number(document.getElementById('set-salary').value) || null,
+    work_type: document.getElementById('set-worktype').value,
+    your_name: document.getElementById('set-name').value.trim(),
+    your_email: document.getElementById('set-email').value.trim(),
+    locations: _criteriaTagState.locations || [],
+    target_roles: _criteriaTagState.roles || [],
+    industries: _criteriaTagState.industries || [],
+    must_have: _criteriaTagState.must_have || [],
+    nice_to_have: _criteriaTagState.nice_to_have || [],
+    avoid: _criteriaTagState.avoid || []
+  };
+  try {
+    var res = await fetch('/api/criteria', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var msg = document.getElementById('settings-msg');
+    msg.style.display = 'inline';
+    msg.textContent = 'Saved!';
+    setTimeout(function() { msg.style.display = 'none'; }, 2500);
+  } catch(e) {
+    console.error('saveCriteria failed:', e);
+    alert('Failed to save settings: ' + e.message);
+  }
 }
 
 // ── init ──────────────────────────────────────────────────────────────────
