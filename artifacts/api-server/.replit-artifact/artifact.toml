@@ -9,9 +9,6 @@ localPort = 8080
 name = "API Server"
 paths = ["/"]
 
-[services.development]
-run = "cd artifacts/api-server && PORT=8080 npm run dev"
-
 [services.production.run]
 args = ["node", "--import", "tsx", "artifacts/api-server/src/index.ts"]
 
