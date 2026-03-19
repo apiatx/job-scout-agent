@@ -1,3 +1,7 @@
+import { execFile } from 'child_process';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
 export interface ScrapedJob {
   title: string;
   company: string;
@@ -20,22 +24,6 @@ interface LeverJob {
   hostedUrl: string;
   categories?: { location?: string };
   descriptionPlain?: string;
-}
-
-interface AdzunaJob {
-  id: string;
-  title: string;
-  description: string;
-  redirect_url: string;
-  company: { display_name: string };
-  location: { display_name: string; area?: string[] };
-  salary_min?: number;
-  salary_max?: number;
-}
-
-interface AdzunaResponse {
-  results: AdzunaJob[];
-  count: number;
 }
 
 export async function scrapeGreenhouseJobs(slug: string, companyName: string): Promise<ScrapedJob[]> {
@@ -86,68 +74,69 @@ export async function scrapeLeverJobs(slug: string, companyName: string): Promis
   }
 }
 
-// Adzuna job search API — replaces broken Workday and plain website scrapers
-export async function searchAdzunaJobs(query: string, locationFilter?: string): Promise<ScrapedJob[]> {
-  const appId = process.env.ADZUNA_APP_ID;
-  const appKey = process.env.ADZUNA_APP_KEY;
-  if (!appId || !appKey) {
-    console.log(`Adzuna: skipping "${query}" — ADZUNA_APP_ID or ADZUNA_APP_KEY not set`);
-    return [];
-  }
-  try {
-    const params = new URLSearchParams({
-      app_id: appId,
-      app_key: appKey,
-      results_per_page: '50',
-      what: query,
-      'content-type': 'application/json',
-    });
-    if (locationFilter) {
-      params.set('where', locationFilter);
-    }
-    const url = `https://api.adzuna.com/v1/api/jobs/us/search/1?${params.toString()}`;
-    console.log(`Adzuna: searching "${query}"${locationFilter ? ` near "${locationFilter}"` : ''}...`);
-    const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
-    if (!response.ok) {
-      console.log(`Adzuna: search failed for "${query}" (status ${response.status})`);
-      return [];
-    }
-    const data = (await response.json()) as AdzunaResponse;
-    console.log(`Adzuna: found ${data.results?.length ?? 0} results for "${query}"`);
-    if (!data.results) return [];
-    return data.results.map((job) => {
-      let salary: string | undefined;
-      if (job.salary_min && job.salary_max) {
-        salary = `$${Math.round(job.salary_min).toLocaleString()} - $${Math.round(job.salary_max).toLocaleString()}`;
-      } else if (job.salary_min) {
-        salary = `$${Math.round(job.salary_min).toLocaleString()}+`;
-      }
-      return {
-        title: job.title,
-        company: job.company.display_name,
-        location: job.location.display_name,
-        salary,
-        applyUrl: job.redirect_url,
-        description: job.description?.slice(0, 2000),
-      };
-    });
-  } catch (e) {
-    console.log(`Adzuna error for "${query}":`, e);
-    return [];
-  }
-}
+// JobSpy scraper — calls Python script that searches LinkedIn, Indeed, and Glassdoor
+export async function runJobSpyScraper(): Promise<ScrapedJob[]> {
+  const scriptDir = dirname(fileURLToPath(import.meta.url));
+  const scriptPath = resolve(scriptDir, 'jobspy_scraper.py');
 
-// Search queries targeting enterprise hardware/infrastructure sales roles
-export const ADZUNA_SEARCH_QUERIES = [
-  'Enterprise Account Executive semiconductor',
-  'Enterprise Account Executive data center',
-  'Enterprise Account Executive networking hardware',
-  'Enterprise Account Executive storage',
-  'Enterprise Account Executive AI infrastructure',
-  'Strategic Account Executive hardware',
-  'Account Executive GPU compute',
-  'Account Executive industrial automation',
-  'Account Executive energy technology',
-  'Sales Director semiconductor',
-  'Regional Sales Manager data center',
-];
+  console.log(`\n──── JOBSPY SEARCH ────────────────────────────────────────`);
+  console.log(`Running JobSpy Python scraper (LinkedIn + Indeed + Glassdoor)...`);
+
+  return new Promise((resolvePromise) => {
+    const proc = execFile(
+      'python3',
+      [scriptPath],
+      { maxBuffer: 50 * 1024 * 1024, timeout: 600_000 },
+      (error, stdout, stderr) => {
+        // Log stderr (progress messages) line by line
+        if (stderr) {
+          for (const line of stderr.split('\n')) {
+            if (line.trim()) console.log(`  ${line}`);
+          }
+        }
+
+        if (error) {
+          console.log(`JobSpy: script error — ${error.message}`);
+          resolvePromise([]);
+          return;
+        }
+
+        try {
+          const jobs = JSON.parse(stdout) as Array<{
+            title: string;
+            company: string;
+            location: string;
+            salary?: string;
+            applyUrl: string;
+            description?: string;
+            source: string;
+          }>;
+          console.log(`JobSpy: received ${jobs.length} jobs from Python script`);
+          console.log(`───────────────────────────────────────────────────────────`);
+          return resolvePromise(
+            jobs.map((j) => ({
+              title: j.title,
+              company: j.company,
+              location: j.location,
+              salary: j.salary,
+              applyUrl: j.applyUrl,
+              description: j.description,
+            }))
+          );
+        } catch (parseErr) {
+          console.log(`JobSpy: failed to parse output — ${parseErr}`);
+          console.log(`JobSpy: raw stdout (first 500 chars): ${stdout?.slice(0, 500)}`);
+          resolvePromise([]);
+        }
+      }
+    );
+
+    // Forward stderr in real time
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      const lines = chunk.toString().split('\n');
+      for (const line of lines) {
+        if (line.trim()) console.log(`  [JobSpy] ${line}`);
+      }
+    });
+  });
+}

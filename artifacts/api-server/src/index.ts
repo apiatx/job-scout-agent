@@ -1,6 +1,6 @@
 import express, { type Request, type Response } from 'express';
 import pg from 'pg';
-import { scrapeGreenhouseJobs, scrapeLeverJobs, searchAdzunaJobs, ADZUNA_SEARCH_QUERIES } from './scraper.js';
+import { scrapeGreenhouseJobs, scrapeLeverJobs, runJobSpyScraper } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
 import { scoreJobsWithClaude, tailorResumeWithClaude } from './agent.js';
 
@@ -984,7 +984,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
           jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Lever' })));
         }
-        // Skip workday and plain — replaced by Adzuna below
+        // Skip workday and plain — replaced by JobSpy below
         if (co.ats_type === 'greenhouse' || co.ats_type === 'lever') {
           perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
         }
@@ -997,44 +997,14 @@ async function runScoutInBackground(runId: number): Promise<void> {
       }
     }
 
-    // ── Stage 2b: Search Adzuna for jobs from all target companies ──
-    // This replaces broken Workday API calls and plain website scraping
-    const companyNames = companies.map((c: any) => (c as { name: string }).name.toLowerCase());
-    console.log(`\n──── ADZUNA SEARCH ────────────────────────────────────────`);
-    console.log(`Running ${ADZUNA_SEARCH_QUERIES.length} Adzuna searches...`);
-    const adzunaSeenUrls = new Set<string>();
-    let adzunaTotalRaw = 0;
-    let adzunaMatched = 0;
-    for (const query of ADZUNA_SEARCH_QUERIES) {
-      try {
-        const results = await searchAdzunaJobs(query);
-        adzunaTotalRaw += results.length;
-        // Filter to only include jobs from our target companies
-        for (const job of results) {
-          if (adzunaSeenUrls.has(job.applyUrl)) continue;
-          const jobCompanyLower = job.company.toLowerCase();
-          const matched = companyNames.some((targetName: string) => {
-            // Partial match: "NVIDIA Corporation" matches target "nvidia"
-            return jobCompanyLower.includes(targetName) || targetName.includes(jobCompanyLower);
-          });
-          if (matched) {
-            adzunaSeenUrls.add(job.applyUrl);
-            // Normalize company name to match our target list
-            const matchedCompany = companies.find((c: any) =>
-              jobCompanyLower.includes((c as { name: string }).name.toLowerCase()) ||
-              (c as { name: string }).name.toLowerCase().includes(jobCompanyLower)
-            );
-            const normalizedCompany = matchedCompany ? (matchedCompany as { name: string }).name : job.company;
-            allJobs.push({ ...job, company: normalizedCompany, source: 'Adzuna' });
-            adzunaMatched++;
-          }
-        }
-      } catch (e) {
-        console.error(`Adzuna search error for "${query}":`, e);
-      }
+    // ── Stage 2b: JobSpy — scrape LinkedIn, Indeed, Glassdoor via Python ──
+    try {
+      const jobSpyResults = await runJobSpyScraper();
+      console.log(`JobSpy returned ${jobSpyResults.length} jobs — adding all to pipeline`);
+      allJobs.push(...jobSpyResults.map(j => ({ ...j, source: 'JobSpy' })));
+    } catch (e) {
+      console.error(`JobSpy scraper error:`, e);
     }
-    console.log(`Adzuna: ${adzunaTotalRaw} total results → ${adzunaMatched} matched target companies (${adzunaSeenUrls.size} unique)`);
-    console.log(`───────────────────────────────────────────────────────────`);
 
     console.log(`\n──── SCRAPE RESULTS ────────────────────────────────────────`);
     console.log(`Total scraped: ${allJobs.length} raw listings from ${companiesScanned} companies`);
