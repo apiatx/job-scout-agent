@@ -923,12 +923,25 @@ function buildDigestHtml(jobs: any[]): string {
 function buildTitleFilter(targetRoles: string[]): RegExp | null {
   if (!targetRoles || targetRoles.length === 0) return null;
   // Build a regex that matches any of the target role keywords in the title.
-  // Each role is split into words and joined with \s+ for flexible whitespace matching.
+  // Match full multi-word phrases AND individual significant keywords (3+ chars).
   const patterns = targetRoles.map(role => {
     const words = role.trim().split(/\s+/).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
     return words.join('\\s+');
   });
-  return new RegExp(`\\b(${patterns.join('|')})\\b`, 'i');
+  // Also extract individual keywords (3+ chars, skip common filler words) for broader matching
+  const fillerWords = new Set(['the', 'and', 'for', 'senior', 'junior', 'lead', 'staff', 'principal', 'vice', 'president', 'head']);
+  const keywords = new Set<string>();
+  for (const role of targetRoles) {
+    for (const word of role.trim().split(/\s+/)) {
+      const w = word.toLowerCase();
+      if (w.length >= 3 && !fillerWords.has(w)) {
+        keywords.add(word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      }
+    }
+  }
+  // Combine: match either the full phrase or any significant keyword
+  const allPatterns = [...patterns, ...keywords];
+  return new RegExp(`\\b(${allPatterns.join('|')})\\b`, 'i');
 }
 
 async function runScoutInBackground(runId: number): Promise<void> {
@@ -944,57 +957,98 @@ async function runScoutInBackground(runId: number): Promise<void> {
     };
 
     const { rows: companies } = await pool.query('SELECT * FROM companies');
+    console.log(`\n════════════════════════════════════════════════════════════`);
+    console.log(`SCOUT RUN #${runId} — ${companies.length} companies loaded from database`);
+    console.log(`════════════════════════════════════════════════════════════`);
+    const byType: Record<string, number> = {};
+    for (const c of companies) { byType[(c as any).ats_type] = (byType[(c as any).ats_type] || 0) + 1; }
+    console.log(`  Companies by ATS type:`, byType);
 
     type Job = { title: string; company: string; location: string; salary?: string; applyUrl: string; description?: string; source: string };
     const allJobs: Job[] = [];
     let companiesScanned = 0;
+    const perCompanyStats: { name: string; type: string; jobs: number; error?: string }[] = [];
 
     for (const c of companies) {
       const co = c as { name: string; ats_type: string; ats_slug: string | null; careers_url: string | null };
       try {
+        let jobCount = 0;
         if (co.ats_type === 'greenhouse' && co.ats_slug) {
           const jobs = await scrapeGreenhouseJobs(co.ats_slug, co.name);
+          jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Greenhouse' })));
         } else if (co.ats_type === 'lever' && co.ats_slug) {
           const jobs = await scrapeLeverJobs(co.ats_slug, co.name);
+          jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Lever' })));
         } else if (co.ats_type === 'workday') {
-          // Determine the workday domain and career site name.
-          // The domain (e.g. "cisco.wd5.myworkdayjobs.com") may be in careers_url or ats_slug.
           let domain = co.careers_url ?? '';
           let careerSite = co.ats_slug ?? undefined;
-          // If careers_url doesn't look like a domain but ats_slug does, swap them
           if (!domain.includes('.myworkdayjobs.com') && co.ats_slug?.includes('.myworkdayjobs.com')) {
             domain = co.ats_slug;
             careerSite = undefined;
           }
           if (!domain.includes('.myworkdayjobs.com')) {
-            // Try to construct domain from company name
             const guess = co.name.toLowerCase().replace(/[^a-z0-9]/g, '');
             domain = `${guess}.wd1.myworkdayjobs.com`;
           }
-          const slug = domain.split('.')[0]; // e.g. "cisco" from "cisco.wd5..."
+          const slug = domain.split('.')[0];
           const jobs = await scrapeWorkdayJobs(slug, domain, co.name, careerSite, criteria.target_roles);
+          jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Workday' })));
         } else if ((co.ats_type === 'plain' || co.ats_type === 'other') && co.careers_url) {
           const jobs = await scrapePlainWebsite(co.careers_url, co.name);
+          jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Website' })));
         }
+        perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
         companiesScanned++;
       } catch (e) {
+        const errMsg = e instanceof Error ? e.message : String(e);
+        perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: 0, error: errMsg });
         console.error(`Error scraping ${co.name}:`, e);
         companiesScanned++;
       }
     }
 
-    console.log(`\nTotal scraped: ${allJobs.length} listings from ${companiesScanned} companies`);
+    console.log(`\n──── SCRAPE RESULTS ────────────────────────────────────────`);
+    console.log(`Total scraped: ${allJobs.length} raw listings from ${companiesScanned} companies`);
+    const companiesWithJobs = perCompanyStats.filter(s => s.jobs > 0);
+    const companiesWithZero = perCompanyStats.filter(s => s.jobs === 0);
+    console.log(`  Companies WITH jobs (${companiesWithJobs.length}):`);
+    for (const s of companiesWithJobs) console.log(`    ✓ ${s.name} (${s.type}): ${s.jobs} jobs`);
+    console.log(`  Companies with ZERO jobs (${companiesWithZero.length}):`);
+    for (const s of companiesWithZero) console.log(`    ✗ ${s.name} (${s.type})${s.error ? ` — ERROR: ${s.error}` : ''}`);
+    console.log(`───────────────────────────────────────────────────────────`);
 
     const titleFilter = buildTitleFilter(criteria.target_roles);
+    console.log(`\n──── TITLE FILTER ──────────────────────────────────────────`);
+    console.log(`Title filter regex: ${titleFilter?.source.slice(0, 200)}...`);
+    // Skip title filter for plain/website scraped jobs — they have synthetic titles
+    // like "Jobs at X (page scan)" that will never match. Let Claude evaluate them.
     const filtered = titleFilter
-      ? allJobs.filter((j) => titleFilter.test(j.title))
+      ? allJobs.filter((j) => j.source === 'Website' || titleFilter.test(j.title))
       : allJobs;
     const toScore = filtered;
-    console.log(`Pre-filter: ${filtered.length} matched title filter out of ${allJobs.length}; sending ${toScore.length} to Claude`);
+    const droppedByTitle = allJobs.length - filtered.length;
+    console.log(`Title filter: ${allJobs.length} total → ${filtered.length} passed (${droppedByTitle} dropped)`);
+    // Show per-company breakdown of what passed the title filter
+    const passedByCompany: Record<string, number> = {};
+    const droppedByCompany: Record<string, number> = {};
+    for (const j of allJobs) {
+      if (j.source === 'Website' || (titleFilter && titleFilter.test(j.title))) {
+        passedByCompany[j.company] = (passedByCompany[j.company] || 0) + 1;
+      } else {
+        droppedByCompany[j.company] = (droppedByCompany[j.company] || 0) + 1;
+      }
+    }
+    console.log(`  Passed title filter by company:`);
+    for (const [co, count] of Object.entries(passedByCompany)) console.log(`    ✓ ${co}: ${count}`);
+    if (Object.keys(droppedByCompany).length > 0) {
+      console.log(`  Dropped by title filter (${Object.values(droppedByCompany).reduce((a,b) => a+b, 0)} total):`);
+      for (const [co, count] of Object.entries(droppedByCompany)) console.log(`    ✗ ${co}: ${count} dropped`);
+    }
+    console.log(`───────────────────────────────────────────────────────────`);
 
     if (toScore.length === 0) {
       await pool.query(
@@ -1016,6 +1070,16 @@ async function runScoutInBackground(runId: number): Promise<void> {
         avoid: criteria.avoid,
       }
     );
+
+    console.log(`\n──── CLAUDE SCORING RESULTS ────────────────────────────────`);
+    console.log(`Claude returned ${matches.length} matches from ${toScore.length} candidates`);
+    if (matches.length > 0) {
+      const matchesByCompany: Record<string, number> = {};
+      for (const m of matches) matchesByCompany[m.company] = (matchesByCompany[m.company] || 0) + 1;
+      console.log(`  Matches by company:`);
+      for (const [co, count] of Object.entries(matchesByCompany)) console.log(`    ✓ ${co}: ${count} (scores: ${matches.filter(m=>m.company===co).map(m=>m.matchScore).join(', ')})`);
+    }
+    console.log(`───────────────────────────────────────────────────────────`);
 
     // Hard server-side location filter — ALLOWLIST approach
     // Build allowed location terms from the candidate's criteria locations,
@@ -1061,7 +1125,19 @@ async function runScoutInBackground(runId: number): Promise<void> {
       }
       return false;
     });
-    console.log(`Location filter (allowlist): ${matches.length} → ${locationFiltered.length} (rejected ${matches.length - locationFiltered.length} outside preferred regions)`);
+    console.log(`\n──── LOCATION FILTER ───────────────────────────────────────`);
+    console.log(`Location filter: ${matches.length} → ${locationFiltered.length} (rejected ${matches.length - locationFiltered.length})`);
+    // Log rejected jobs so we can see what's being dropped
+    const locationRejected = matches.filter(m => !locationFiltered.includes(m));
+    if (locationRejected.length > 0) {
+      console.log(`  Rejected by location:`);
+      for (const m of locationRejected) console.log(`    ✗ ${m.company} — "${m.title}" — location: "${m.location}" (score: ${m.matchScore})`);
+    }
+    if (locationFiltered.length > 0) {
+      console.log(`  Passed location filter:`);
+      for (const m of locationFiltered) console.log(`    ✓ ${m.company} — "${m.title}" — location: "${m.location}" (score: ${m.matchScore})`);
+    }
+    console.log(`───────────────────────────────────────────────────────────`);
 
     for (const m of locationFiltered) {
       const source = toScore.find(j => j.applyUrl === m.applyUrl)?.source ?? '';
@@ -1076,6 +1152,18 @@ async function runScoutInBackground(runId: number): Promise<void> {
         [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false]
       );
     }
+
+    console.log(`\n──── DATABASE INSERT ───────────────────────────────────────`);
+    console.log(`Saved ${locationFiltered.length} jobs to database for scout run #${runId}`);
+    console.log(`════════════════════════════════════════════════════════════`);
+    console.log(`SCOUT RUN #${runId} COMPLETE`);
+    console.log(`  Companies scanned: ${companiesScanned}`);
+    console.log(`  Raw jobs scraped:  ${allJobs.length}`);
+    console.log(`  Passed title filter: ${toScore.length}`);
+    console.log(`  Claude matches (score >= 60): ${matches.length}`);
+    console.log(`  Passed location filter: ${locationFiltered.length}`);
+    console.log(`  Saved to database: ${locationFiltered.length}`);
+    console.log(`════════════════════════════════════════════════════════════\n`);
 
     await pool.query(
       "UPDATE scout_runs SET status='completed', companies_scanned=$1, jobs_found=$2, matches_found=$3, completed_at=NOW() WHERE id=$4",

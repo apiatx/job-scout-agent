@@ -80,7 +80,12 @@ Respond ONLY with a JSON object (no markdown, no extra text):
 
     const text = block.text.trim().replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(text) as { matchScore: number; whyGoodFit: string; isMatch: boolean; isHardware?: boolean };
-    if (!parsed.isMatch) return null;
+    if (!parsed.isMatch) {
+      if (parsed.matchScore >= 30) {
+        console.log(`  Claude rejected (score ${parsed.matchScore}): ${job.company} — "${job.title}" — ${job.location} — ${parsed.whyGoodFit?.slice(0, 100)}`);
+      }
+      return null;
+    }
 
     return {
       title: job.title,

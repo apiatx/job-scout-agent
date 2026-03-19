@@ -187,7 +187,7 @@ export async function scrapePlainWebsite(url: string, companyName: string): Prom
       .trim()
       .slice(0, 8000);
     console.log(`Plain: fetched ${url} (${text.length} chars)`);
-    return [{ title: `Jobs at ${companyName} (page scan)`, company: companyName, location: 'See listing', applyUrl: url, description: text }];
+    return [{ title: `Sales roles at ${companyName}`, company: companyName, location: 'Remote', applyUrl: url, description: text }];
   } catch (e) {
     console.log(`Plain error for ${url}:`, e);
     return [];
