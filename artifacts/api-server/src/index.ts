@@ -809,8 +809,10 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .copy-btn{margin-top:8px}
 
 /* email tab */
-.email-section{max-width:640px}
-.email-preview{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:12px;max-height:400px;overflow-y:auto}
+.email-section{max-width:100%}
+.email-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;font-size:12px}
+.toolbar-sep{width:1px;height:18px;background:var(--border);flex-shrink:0}
+.email-preview{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;max-height:calc(100vh - 260px);overflow-y:auto}
 </style>
 </head>
 <body>
@@ -862,23 +864,19 @@ textarea:focus,input:focus{border-color:var(--gold)}
 
 <div class="panel" id="panel-email">
   <div class="email-section">
-    <div class="sec-title" style="margin-bottom:12px">Gmail Integration</div>
-    <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
-      <button class="btn btn-gold" id="gmail-connect-btn" onclick="connectGmail()">Connect Gmail</button>
+    <div class="email-toolbar">
+      <button class="btn btn-gold btn-sm" id="gmail-connect-btn" onclick="connectGmail()">Connect Gmail</button>
       <button class="btn btn-red btn-sm" id="gmail-disconnect-btn" onclick="disconnectGmail()" style="display:none">Disconnect</button>
-      <span id="gmail-status-text" style="font-size:12px;color:var(--muted)"></span>
-    </div>
-    <div class="sec-title" style="margin-bottom:8px;margin-top:20px">Daily Digest Schedule</div>
-    <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
-      <input type="time" id="digest-time" value="08:00" style="width:140px">
+      <span id="gmail-status-text" style="font-size:11px;color:var(--muted)"></span>
+      <span class="toolbar-sep"></span>
+      <input type="time" id="digest-time" value="08:00" style="width:110px;padding:4px 8px;font-size:12px">
       <button class="btn btn-ghost btn-sm" onclick="saveDigestTime()">Save Time</button>
       <span class="ok-msg" id="digest-time-msg" style="display:none">Saved!</span>
+      <span class="toolbar-sep"></span>
+      <button class="btn btn-gold btn-sm" onclick="sendTestDigest()">Send Test Email</button>
+      <span id="test-email-msg" style="font-size:11px;color:var(--muted)"></span>
     </div>
-    <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
-      <button class="btn btn-gold" onclick="sendTestDigest()">Send Test Email</button>
-      <span id="test-email-msg" style="font-size:12px;color:var(--muted)"></span>
-    </div>
-    <div class="sec-title" style="margin-bottom:8px;margin-top:20px">Email Preview</div>
+    <div class="sec-title" style="margin-bottom:8px">Daily Jobs Report</div>
     <div class="email-preview" id="email-preview">Loading preview...</div>
   </div>
 </div>
