@@ -250,7 +250,7 @@ app.get('/api/jobs', async (req: Request, res: Response) => {
   try {
     const minScore = Number(req.query.min_score) || 0;
     const { rows } = await pool.query(
-      'SELECT * FROM jobs WHERE match_score >= $1 ORDER BY match_score DESC, created_at DESC LIMIT 200',
+      'SELECT * FROM jobs WHERE match_score >= $1 ORDER BY match_score DESC, found_at DESC LIMIT 200',
       [minScore]
     );
     res.json(rows);
@@ -411,7 +411,7 @@ app.get('/api/gmail/callback', async (req: Request, res: Response) => {
     await pool.query('DELETE FROM gmail_tokens');
     const expiry = tokenData.expires_in ? new Date(Date.now() + tokenData.expires_in * 1000) : null;
     await pool.query(
-      'INSERT INTO gmail_tokens (access_token, refresh_token, expiry) VALUES ($1, $2, $3)',
+      'INSERT INTO gmail_tokens (access_token, refresh_token, expiry_date) VALUES ($1, $2, $3)',
       [tokenData.access_token, tokenData.refresh_token ?? null, expiry]
     );
     res.send('<html><body style="background:#0f0f0f;color:#c8a96e;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;font-size:20px"><div>Gmail connected! You can close this tab.</div></body></html>');
@@ -430,7 +430,7 @@ async function getGmailAccessToken(): Promise<string | null> {
   if (rows.length === 0) return null;
   const token = rows[0];
   // Check if expired and refresh
-  if (token.expiry && new Date(token.expiry) < new Date() && token.refresh_token) {
+  if (token.expiry_date && new Date(token.expiry_date) < new Date() && token.refresh_token) {
     try {
       const refreshRes = await fetch('https://oauth2.googleapis.com/token', {
         method: 'POST',
@@ -446,7 +446,7 @@ async function getGmailAccessToken(): Promise<string | null> {
       if (data.access_token) {
         const expiry = data.expires_in ? new Date(Date.now() + data.expires_in * 1000) : null;
         await pool.query(
-          'UPDATE gmail_tokens SET access_token=$1, expiry=$2 WHERE id=$3',
+          'UPDATE gmail_tokens SET access_token=$1, expiry_date=$2 WHERE id=$3',
           [data.access_token, expiry, token.id]
         );
         return data.access_token;
@@ -663,13 +663,13 @@ app.get('/api/stats', async (_req, res: Response) => {
   try {
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const { rows: todayJobs } = await pool.query(
-      'SELECT COUNT(*) as count FROM jobs WHERE created_at >= $1', [today]
+      'SELECT COUNT(*) as count FROM jobs WHERE found_at >= $1', [today]
     );
     const { rows: todayMatches } = await pool.query(
-      'SELECT COUNT(*) as count FROM jobs WHERE created_at >= $1 AND match_score >= 60', [today]
+      'SELECT COUNT(*) as count FROM jobs WHERE found_at >= $1 AND match_score >= 60', [today]
     );
     const { rows: topScore } = await pool.query(
-      'SELECT MAX(match_score) as score FROM jobs WHERE created_at >= $1', [today]
+      'SELECT MAX(match_score) as score FROM jobs WHERE found_at >= $1', [today]
     );
     const { rows: lastRun } = await pool.query(
       'SELECT * FROM scout_runs ORDER BY started_at DESC LIMIT 1'
@@ -1035,8 +1035,10 @@ async function loadStats() {
 // ── jobs ─────────────────────────────────────────────────────────────────
 var _jobsById = {};
 async function loadJobs() {
+  try {
   var res = await fetch('/api/jobs?min_score=60');
-  var jobs = await res.json();
+  var data = await res.json();
+  var jobs = Array.isArray(data) ? data : [];
   _jobsById = {};
   jobs.forEach(function(j) { _jobsById[j.id] = j; });
   var grid = document.getElementById('jobs-grid');
@@ -1071,6 +1073,7 @@ async function loadJobs() {
       '</div>';
   });
   grid.innerHTML = html;
+  } catch(e) { console.error('loadJobs error:', e); }
 }
 
 // ── runs ──────────────────────────────────────────────────────────────────
