@@ -628,7 +628,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     console.log(`\nTotal scraped: ${allJobs.length} listings from ${companiesScanned} companies`);
 
     const filtered = allJobs.filter((j) => SALES_INCLUDE.test(j.title));
-    const toScore = filtered.slice(0, 80);
+    const toScore = filtered;
     console.log(`Pre-filter: ${filtered.length} matched title filter; sending ${toScore.length} to Claude`);
 
     if (toScore.length === 0) {
@@ -1174,12 +1174,20 @@ function renderJobs() {
 }
 
 async function loadJobs() {
-  var res = await fetch('/api/jobs?min_score=60');
-  var jobs = await res.json();
-  _allJobs = jobs;
-  _jobsById = {};
-  jobs.forEach(function(j) { _jobsById[j.id] = j; });
-  renderJobs();
+  try {
+    var res = await fetch('/api/jobs?min_score=60');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var jobs = await res.json();
+    _allJobs = jobs;
+    _jobsById = {};
+    jobs.forEach(function(j) { _jobsById[j.id] = j; });
+    renderJobs();
+  } catch(e) {
+    console.error('loadJobs failed:', e);
+    var cnt = document.getElementById('jobs-count');
+    cnt.textContent = 'Failed to load jobs \u2014 retrying\u2026';
+    setTimeout(loadJobs, 3000);
+  }
 }
 
 async function toggleSave(jobId) {
@@ -1476,8 +1484,13 @@ async function runScout() {
         document.getElementById('dot').className = 'dot';
         loadStats();
         if (latest.status === 'completed') {
-          msg.textContent = 'Done! Found ' + (latest.matches_found || latest.jobs_found) + ' match' + ((latest.matches_found || latest.jobs_found) !== 1 ? 'es' : '');
-          loadJobs();
+          var found = latest.matches_found || latest.jobs_found;
+          msg.textContent = 'Done! Found ' + found + ' new match' + (found !== 1 ? 'es' : '') + ' this run';
+          loadJobs().then(function() {
+            if (_allJobs.length > found) {
+              msg.textContent = 'Done! Found ' + found + ' new match' + (found !== 1 ? 'es' : '') + ' (' + _allJobs.length + ' total)';
+            }
+          });
         } else {
           msg.textContent = 'Run failed: ' + (latest.error || 'unknown error');
         }
