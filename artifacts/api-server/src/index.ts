@@ -160,7 +160,8 @@ async function initDb(): Promise<void> {
       ['Veeam', 'veeam'],
       ['Zerto', 'zerto'],
       ['Commvault', 'commvault'],
-      ['Fluence', 'fluence'],
+      ['Bentley Systems', 'bentleysystems'],
+      ['Crane NXT', 'cranenxt'],
     ];
     for (const [name, slug] of greenhouse) {
       await pool.query(
@@ -197,6 +198,11 @@ async function initDb(): Promise<void> {
       ['Cognex', 'cognex.wd1.myworkdayjobs.com', 'External_Career_Site'],
       ['Bloom Energy', 'bloomenergy.wd1.myworkdayjobs.com', 'BloomEnergyCareers'],
       ['3M', '3m.wd1.myworkdayjobs.com', 'Search'],
+      ['Honeywell', 'honeywell.wd5.myworkdayjobs.com', 'Honeywell'],
+      ['Cadence Design Systems', 'cadence.wd1.myworkdayjobs.com', 'External_Careers'],
+      ['Xylem', 'xylem.wd1.myworkdayjobs.com', 'Xylem'],
+      ['Trimble', 'trimble.wd1.myworkdayjobs.com', 'TrimbleCareers'],
+      ['Aspen Technology', 'aspentech.wd1.myworkdayjobs.com', 'AspenTech'],
     ];
     for (const [name, domain, careerSite] of workday) {
       await pool.query(
@@ -227,8 +233,7 @@ async function initDb(): Promise<void> {
       ['Zebra Technologies', 'https://careers.zebra.com'],
       ['Halliburton', 'https://www.halliburton.com/en/careers'],
       ['Schlumberger', 'https://www.slb.com/careers'],
-      ['Honeywell', 'https://careers.honeywell.com'],
-      ['ABB', 'https://new.abb.com/jobs'],
+      ['ABB', 'https://careers.abb/global/en/jobs'],
       ['Siemens', 'https://jobs.siemens.com/careers'],
       ['Dow', 'https://www.dow.com/en-us/careers'],
       ['PPG Industries', 'https://careers.ppg.com'],
@@ -237,6 +242,12 @@ async function initDb(): Promise<void> {
       ['First Solar', 'https://www.firstsolar.com/careers'],
       ['Ameresco', 'https://www.ameresco.com/careers'],
       ['Keyence', 'https://www.keyence.com/company/jobs'],
+      ['Fluence', 'https://fluenceenergy.com/energy-storage-careers/'],
+      ['Emerson Electric', 'https://www.emerson.com/en-us/careers/career-opportunities'],
+      ['AVEVA', 'https://www.aveva.com/en/about/careers'],
+      ['Itron', 'https://www.itron.com/na/about/careers'],
+      ['IDEX Corporation', 'https://www.idexcorp.com/careers'],
+      ['Roper Technologies', 'https://www.ropertechnologies.com/careers'],
     ];
     for (const [name, url] of plain) {
       await pool.query(
@@ -292,7 +303,8 @@ async function initDb(): Promise<void> {
     { name: 'Veeam', ats_type: 'greenhouse', ats_slug: 'veeam' },
     { name: 'Zerto', ats_type: 'greenhouse', ats_slug: 'zerto' },
     { name: 'Commvault', ats_type: 'greenhouse', ats_slug: 'commvault' },
-    { name: 'Fluence', ats_type: 'greenhouse', ats_slug: 'fluence' },
+    { name: 'Bentley Systems', ats_type: 'greenhouse', ats_slug: 'bentleysystems' },
+    { name: 'Crane NXT', ats_type: 'greenhouse', ats_slug: 'cranenxt' },
     // Lever
     { name: 'VAST Data', ats_type: 'lever', ats_slug: 'vast-data' },
     { name: 'Weka', ats_type: 'lever', ats_slug: 'weka' },
@@ -313,6 +325,11 @@ async function initDb(): Promise<void> {
     { name: 'Cognex', ats_type: 'workday', careers_url: 'cognex.wd1.myworkdayjobs.com', ats_slug: 'External_Career_Site' },
     { name: 'Bloom Energy', ats_type: 'workday', careers_url: 'bloomenergy.wd1.myworkdayjobs.com', ats_slug: 'BloomEnergyCareers' },
     { name: '3M', ats_type: 'workday', careers_url: '3m.wd1.myworkdayjobs.com', ats_slug: 'Search' },
+    { name: 'Honeywell', ats_type: 'workday', careers_url: 'honeywell.wd5.myworkdayjobs.com', ats_slug: 'Honeywell' },
+    { name: 'Cadence Design Systems', ats_type: 'workday', careers_url: 'cadence.wd1.myworkdayjobs.com', ats_slug: 'External_Careers' },
+    { name: 'Xylem', ats_type: 'workday', careers_url: 'xylem.wd1.myworkdayjobs.com', ats_slug: 'Xylem' },
+    { name: 'Trimble', ats_type: 'workday', careers_url: 'trimble.wd1.myworkdayjobs.com', ats_slug: 'TrimbleCareers' },
+    { name: 'Aspen Technology', ats_type: 'workday', careers_url: 'aspentech.wd1.myworkdayjobs.com', ats_slug: 'AspenTech' },
     // Plain / Other
     { name: 'Juniper Networks', ats_type: 'other', careers_url: 'https://jobs.juniper.net' },
     { name: 'Eaton', ats_type: 'other', careers_url: 'https://jobs.eaton.com' },
@@ -330,15 +347,13 @@ async function initDb(): Promise<void> {
     { name: 'Tenstorrent', ats_type: 'plain', careers_url: 'https://tenstorrent.com/careers' },
     { name: 'Digital Realty', ats_type: 'plain', careers_url: 'https://www.digitalrealty.com/careers' },
     { name: 'One Stop Systems', ats_type: 'plain', careers_url: 'https://onestopsystems.com/pages/sales-account-manager' },
-    { name: 'Cadence Design Systems', ats_type: 'workday', careers_url: 'cadence.wd1.myworkdayjobs.com' },
     { name: 'VAST Data', ats_type: 'plain', careers_url: 'https://www.vastdata.com/careers' },
     { name: 'Weka', ats_type: 'plain', careers_url: 'https://www.weka.io/company/careers' },
     { name: 'Teradyne', ats_type: 'plain', careers_url: 'https://jobs.teradyne.com' },
     { name: 'Zebra Technologies', ats_type: 'plain', careers_url: 'https://careers.zebra.com' },
     { name: 'Halliburton', ats_type: 'plain', careers_url: 'https://www.halliburton.com/en/careers' },
     { name: 'Schlumberger', ats_type: 'plain', careers_url: 'https://www.slb.com/careers' },
-    { name: 'Honeywell', ats_type: 'plain', careers_url: 'https://careers.honeywell.com' },
-    { name: 'ABB', ats_type: 'plain', careers_url: 'https://new.abb.com/jobs' },
+    { name: 'ABB', ats_type: 'plain', careers_url: 'https://careers.abb/global/en/jobs' },
     { name: 'Siemens', ats_type: 'plain', careers_url: 'https://jobs.siemens.com/careers' },
     { name: 'Dow', ats_type: 'plain', careers_url: 'https://www.dow.com/en-us/careers' },
     { name: 'PPG Industries', ats_type: 'plain', careers_url: 'https://careers.ppg.com' },
@@ -347,6 +362,12 @@ async function initDb(): Promise<void> {
     { name: 'First Solar', ats_type: 'plain', careers_url: 'https://www.firstsolar.com/careers' },
     { name: 'Ameresco', ats_type: 'plain', careers_url: 'https://www.ameresco.com/careers' },
     { name: 'Keyence', ats_type: 'plain', careers_url: 'https://www.keyence.com/company/jobs' },
+    { name: 'Fluence', ats_type: 'plain', careers_url: 'https://fluenceenergy.com/energy-storage-careers/' },
+    { name: 'Emerson Electric', ats_type: 'plain', careers_url: 'https://www.emerson.com/en-us/careers/career-opportunities' },
+    { name: 'AVEVA', ats_type: 'plain', careers_url: 'https://www.aveva.com/en/about/careers' },
+    { name: 'Itron', ats_type: 'plain', careers_url: 'https://www.itron.com/na/about/careers' },
+    { name: 'IDEX Corporation', ats_type: 'plain', careers_url: 'https://www.idexcorp.com/careers' },
+    { name: 'Roper Technologies', ats_type: 'plain', careers_url: 'https://www.ropertechnologies.com/careers' },
   ];
 
   // Remove retired companies
@@ -366,6 +387,20 @@ async function initDb(): Promise<void> {
       );
       console.log(`Added company: ${co.name}`);
     }
+  }
+
+  // Fix existing entries that changed ATS type or URL
+  const fixes: { name: string; ats_type: string; careers_url: string | null; ats_slug: string | null }[] = [
+    { name: 'Honeywell', ats_type: 'workday', careers_url: 'honeywell.wd5.myworkdayjobs.com', ats_slug: 'Honeywell' },
+    { name: 'ABB', ats_type: 'plain', careers_url: 'https://careers.abb/global/en/jobs', ats_slug: null },
+    { name: 'Cadence Design Systems', ats_type: 'workday', careers_url: 'cadence.wd1.myworkdayjobs.com', ats_slug: 'External_Careers' },
+    { name: 'Fluence', ats_type: 'plain', careers_url: 'https://fluenceenergy.com/energy-storage-careers/', ats_slug: null },
+  ];
+  for (const fix of fixes) {
+    await pool.query(
+      `UPDATE companies SET ats_type=$1, careers_url=$2, ats_slug=$3 WHERE LOWER(name) = LOWER($4)`,
+      [fix.ats_type, fix.careers_url, fix.ats_slug, fix.name]
+    );
   }
 
   // Mark any stale running records as failed
