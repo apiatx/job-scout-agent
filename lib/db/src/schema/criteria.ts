@@ -7,6 +7,7 @@ export const criteriaTable = pgTable("criteria", {
   targetRoles: text("target_roles").array().notNull().default([]),
   industries: text("industries").array().notNull().default([]),
   minSalary: integer("min_salary"),
+  workType: text("work_type").notNull().default("any"),
   locations: text("locations").array().notNull().default([]),
   mustHave: text("must_have").array().notNull().default([]),
   niceToHave: text("nice_to_have").array().notNull().default([]),

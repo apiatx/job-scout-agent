@@ -9,12 +9,21 @@ export interface HealthStatus {
   status: string;
 }
 
+export type CriteriaWorkType = (typeof CriteriaWorkType)[keyof typeof CriteriaWorkType];
+export const CriteriaWorkType = {
+  any: "any",
+  remote: "remote",
+  office: "office",
+  hybrid: "hybrid",
+} as const;
+
 export interface Criteria {
   id: number;
   targetRoles: string[];
   industries: string[];
   /** @nullable */
   minSalary?: number | null;
+  workType: CriteriaWorkType;
   locations: string[];
   mustHave: string[];
   niceToHave: string[];
@@ -29,6 +38,7 @@ export interface UpdateCriteriaBody {
   industries?: string[];
   /** @nullable */
   minSalary?: number | null;
+  workType?: CriteriaWorkType;
   locations?: string[];
   mustHave?: string[];
   niceToHave?: string[];
