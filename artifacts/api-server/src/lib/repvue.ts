@@ -9,7 +9,7 @@ try {
   const pw = await import('playwright');
   chromium = pw.chromium;
 } catch {
-  console.warn('Playwright not available — RepVue integration disabled. Run: npx playwright install chromium');
+  // Playwright not installed — RepVue features silently disabled
 }
 type Browser = import('playwright').Browser;
 
