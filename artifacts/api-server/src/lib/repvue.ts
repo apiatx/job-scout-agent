@@ -17,21 +17,48 @@ export interface RepVueData {
   scrapedAt: string;
 }
 
-/**
- * Convert a company display name into the RepVue URL slug.
- * "Pure Storage" → "PureStorage", "Hewlett Packard Enterprise" → "HewlettPackardEnterprise"
- */
-function toRepVueSlug(name: string): string {
-  let cleaned = name
-    .replace(/\s*\|.*$/, '')            // strip pipe-suffix ("HPE | Aruba" → "HPE")
-    .replace(/\s*\(.*?\)\s*/g, '')      // strip parenthesised text
-    .replace(/,?\s*(Inc\.?|LLC|Ltd\.?|Corp\.?|Corporation|Company|Co\.?)$/i, '')
-    .trim();
-  // Remove spaces — RepVue slugs are PascalCase without separators
-  return cleaned.replace(/\s+/g, '');
+// ── In-memory cache & request queue ─────────────────────────────────────
+const cache = new Map<string, RepVueData | null>();
+const inflight = new Map<string, Promise<RepVueData | null>>();
+
+// Serialise all RepVue requests through a queue with delay between them
+const REQUEST_DELAY_MS = 3000; // 3 seconds between requests
+const MAX_RETRIES = 2;
+const RETRY_DELAY_MS = 5000;
+let lastRequestTime = 0;
+
+async function throttle(): Promise<void> {
+  const now = Date.now();
+  const elapsed = now - lastRequestTime;
+  if (elapsed < REQUEST_DELAY_MS) {
+    await new Promise(r => setTimeout(r, REQUEST_DELAY_MS - elapsed));
+  }
+  lastRequestTime = Date.now();
 }
 
-// Common headers to avoid bot detection
+/**
+ * Convert a company display name into the RepVue URL slug.
+ */
+function toRepVueSlug(name: string): string {
+  return name
+    .replace(/\s*\|.*$/, '')
+    .replace(/\s*\(.*?\)\s*/g, '')
+    .replace(/,?\s*(Inc\.?|LLC|Ltd\.?|Corp\.?|Corporation|Company|Co\.?)$/i, '')
+    .trim()
+    .replace(/\s+/g, '');
+}
+
+function toKebabSlug(name: string): string {
+  return name
+    .replace(/\s*\|.*$/, '')
+    .replace(/\s*\(.*?\)\s*/g, '')
+    .replace(/,?\s*(Inc\.?|LLC|Ltd\.?|Corp\.?|Corporation|Company|Co\.?)$/i, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
+}
+
 const BROWSER_HEADERS: Record<string, string> = {
   'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -46,50 +73,54 @@ const BROWSER_HEADERS: Record<string, string> = {
 };
 
 /**
+ * Fetch a single URL with retry on 429.
+ */
+async function fetchWithRetry(url: string, retries = MAX_RETRIES): Promise<Response | null> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    await throttle();
+    try {
+      const res = await fetch(url, { headers: BROWSER_HEADERS, redirect: 'follow' });
+      if (res.status === 429) {
+        const delay = RETRY_DELAY_MS * (attempt + 1);
+        console.log(`RepVue [fetch]: 429 for ${url}, waiting ${delay / 1000}s (attempt ${attempt + 1}/${retries + 1})`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      console.error(`RepVue [fetch]: network error for ${url}:`, err);
+      return null;
+    }
+  }
+  console.log(`RepVue [fetch]: giving up on ${url} after ${retries + 1} attempts`);
+  return null;
+}
+
+/**
  * Try to extract RepVue data using plain HTTP fetch (no browser required).
- * Works by fetching the company page HTML and parsing __NEXT_DATA__ or text.
  */
 async function fetchRepVueData(companyName: string): Promise<RepVueData | null> {
   const slug = toRepVueSlug(companyName);
   const url = `https://www.repvue.com/companies/${slug}`;
   console.log(`RepVue [fetch]: trying ${url}`);
 
-  try {
-    const res = await fetch(url, {
-      headers: BROWSER_HEADERS,
-      redirect: 'follow',
-    });
-
-    console.log(`RepVue [fetch]: ${url} → ${res.status}`);
-
-    if (!res.ok) {
-      // Try alternate slug formats for multi-word names
-      // e.g., "hewlett-packard-enterprise" or lowercase
-      const altSlug = companyName
-        .replace(/\s*\|.*$/, '')
-        .replace(/\s*\(.*?\)\s*/g, '')
-        .replace(/,?\s*(Inc\.?|LLC|Ltd\.?|Corp\.?|Corporation|Company|Co\.?)$/i, '')
-        .trim()
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/(^-|-$)/g, '');
-
-      if (altSlug !== slug.toLowerCase()) {
-        const altUrl = `https://www.repvue.com/companies/${altSlug}`;
-        console.log(`RepVue [fetch]: trying alternate slug: ${altUrl}`);
-        const altRes = await fetch(altUrl, { headers: BROWSER_HEADERS, redirect: 'follow' });
-        console.log(`RepVue [fetch]: ${altUrl} → ${altRes.status}`);
-        if (!altRes.ok) return null;
-        return parseRepVueHtml(await altRes.text(), companyName);
-      }
-      return null;
-    }
-
+  const res = await fetchWithRetry(url);
+  if (res && res.ok) {
     return parseRepVueHtml(await res.text(), companyName);
-  } catch (err) {
-    console.error(`RepVue [fetch] error for "${companyName}":`, err);
-    return null;
   }
+
+  // Try kebab-case slug if different
+  const kebab = toKebabSlug(companyName);
+  if (kebab !== slug.toLowerCase()) {
+    const altUrl = `https://www.repvue.com/companies/${kebab}`;
+    console.log(`RepVue [fetch]: trying alternate slug: ${altUrl}`);
+    const altRes = await fetchWithRetry(altUrl);
+    if (altRes && altRes.ok) {
+      return parseRepVueHtml(await altRes.text(), companyName);
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -105,46 +136,36 @@ function parseRepVueHtml(html: string, companyName: string): RepVueData | null {
   let oteSalaryRange: string | null = null;
   let inboundLeadFlow: string | null = null;
 
-  // ── Strategy 1: Parse __NEXT_DATA__ JSON ──────────────────────────
+  // Strategy 1: Parse __NEXT_DATA__ JSON
   const nextDataMatch = html.match(/<script\s+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
   if (nextDataMatch) {
     try {
       const nextData = JSON.parse(nextDataMatch[1]);
       const props = nextData?.props?.pageProps;
       if (props) {
-        console.log(`RepVue [parse]: __NEXT_DATA__ pageProps keys: ${Object.keys(props).join(', ')}`);
-
-        // Walk through props looking for score-like fields
+        console.log(`RepVue [parse]: __NEXT_DATA__ keys: ${Object.keys(props).join(', ')}`);
         const findData = (obj: any): void => {
           if (!obj || typeof obj !== 'object') return;
           for (const [key, val] of Object.entries(obj)) {
             const k = key.toLowerCase();
             if (typeof val === 'number') {
-              if (k.includes('repvuescore') || k.includes('repvue_score') || k === 'score' || k === 'overallscore' || k === 'overall_score') {
-                if (repVueScore === null && val > 0 && val <= 100) repVueScore = val;
-              }
-              if (k.includes('quotaattainment') || k.includes('quota_attainment')) {
-                if (quotaAttainment === null) quotaAttainment = val;
-              }
-              if (k.includes('percenthitting') || k.includes('percent_hitting') || k.includes('hittingquota') || k.includes('hitting_quota')) {
-                if (percentHittingQuota === null) percentHittingQuota = val;
-              }
-              if (k.includes('culture')) {
-                if (cultureRating === null && val > 0 && val <= 5) cultureRating = val;
-              }
-              if (k.includes('product') && (k.includes('rating') || k.includes('market') || k.includes('fit'))) {
-                if (productRating === null && val > 0 && val <= 5) productRating = val;
-              }
+              if ((k.includes('repvuescore') || k.includes('repvue_score') || k === 'score' || k === 'overallscore' || k === 'overall_score') && repVueScore === null && val > 0 && val <= 100)
+                repVueScore = val;
+              if ((k.includes('quotaattainment') || k.includes('quota_attainment')) && quotaAttainment === null)
+                quotaAttainment = val;
+              if ((k.includes('percenthitting') || k.includes('percent_hitting') || k.includes('hittingquota') || k.includes('hitting_quota')) && percentHittingQuota === null)
+                percentHittingQuota = val;
+              if (k.includes('culture') && cultureRating === null && val > 0 && val <= 5)
+                cultureRating = val;
+              if (k.includes('product') && (k.includes('rating') || k.includes('market') || k.includes('fit')) && productRating === null && val > 0 && val <= 5)
+                productRating = val;
             }
             if (typeof val === 'string') {
               if (k.includes('basesalary') || k.includes('base_salary')) baseSalaryRange = val;
               if (k.includes('otesalary') || k.includes('ote_salary') || k === 'ote') oteSalaryRange = val;
               if (k.includes('inbound') && k.includes('lead')) inboundLeadFlow = val;
             }
-            // Recurse into nested objects (but not too deep)
-            if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
-              findData(val);
-            }
+            if (typeof val === 'object' && val !== null && !Array.isArray(val)) findData(val);
           }
         };
         findData(props);
@@ -152,15 +173,11 @@ function parseRepVueHtml(html: string, companyName: string): RepVueData | null {
     } catch (e) {
       console.log(`RepVue [parse]: failed to parse __NEXT_DATA__: ${e}`);
     }
-  } else {
-    console.log('RepVue [parse]: no __NEXT_DATA__ found in HTML');
   }
 
-  // ── Strategy 2: Regex on raw HTML text ────────────────────────────
+  // Strategy 2: Regex on raw HTML text
   if (repVueScore === null) {
-    // Strip HTML tags for text analysis
     const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-
     const scoreMatch = text.match(/RepVue\s*Score[:\s]*(\d+(?:\.\d+)?)/i)
       || text.match(/Overall\s*Score[:\s]*(\d+(?:\.\d+)?)/i);
     if (scoreMatch) repVueScore = parseFloat(scoreMatch[1]);
@@ -176,8 +193,7 @@ function parseRepVueHtml(html: string, companyName: string): RepVueData | null {
     if (productMatch) productRating = parseFloat(productMatch[1]);
 
     // Log a snippet for debugging
-    const preview = text.substring(0, 800);
-    console.log(`RepVue [parse]: text preview: ${preview}`);
+    console.log(`RepVue [parse]: text preview (first 500 chars): ${text.substring(0, 500)}`);
   }
 
   if (repVueScore === null) {
@@ -186,84 +202,35 @@ function parseRepVueHtml(html: string, companyName: string): RepVueData | null {
   }
 
   console.log(`RepVue [parse]: extracted score ${repVueScore} for "${companyName}"`);
-
   return {
-    companyName,
-    repVueScore,
-    quotaAttainment,
-    percentHittingQuota,
-    baseSalaryRange,
-    oteSalaryRange,
-    cultureRating,
-    productRating,
-    inboundLeadFlow,
-    reviews: [],
-    scrapedAt: new Date().toISOString(),
+    companyName, repVueScore, quotaAttainment, percentHittingQuota,
+    baseSalaryRange, oteSalaryRange, cultureRating, productRating,
+    inboundLeadFlow, reviews: [], scrapedAt: new Date().toISOString(),
   };
 }
 
-// ── Playwright fallback (only if fetch approach fails) ──────────────────
-let chromium: typeof import('playwright')['chromium'] | null = null;
-try {
-  const pw = await import('playwright');
-  chromium = pw.chromium;
-  // Verify browsers are actually installed
-  const browser = await chromium.launch({ headless: true });
-  await browser.close();
-  console.log('RepVue: Playwright browsers available');
-} catch {
-  chromium = null;
-  console.log('RepVue: Playwright browsers NOT available — using fetch-only mode');
-}
-type Browser = import('playwright').Browser;
-
-async function playwrightRepVue(companyName: string): Promise<RepVueData | null> {
-  if (!chromium) return null;
-
-  const email = process.env.REPVUE_EMAIL;
-  const password = process.env.REPVUE_PASSWORD;
-  if (!email || !password) return null;
-
-  let browser: Browser | null = null;
-  try {
-    browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({ userAgent: BROWSER_HEADERS['User-Agent'] });
-    const page = await context.newPage();
-    page.setDefaultTimeout(15000);
-
-    // Log in
-    await page.goto('https://www.repvue.com/login', { waitUntil: 'networkidle' });
-    await page.fill('input[name="email"], input[type="email"]', email);
-    await page.fill('input[name="password"], input[type="password"]', password);
-    await page.click('button[type="submit"]');
-    await page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15000 }).catch(() =>
-      page.waitForLoadState('networkidle', { timeout: 10000 })
-    );
-    console.log(`RepVue [playwright]: logged in, at ${page.url()}`);
-
-    // Go to company page
-    const slug = toRepVueSlug(companyName);
-    await page.goto(`https://www.repvue.com/companies/${slug}`, { waitUntil: 'networkidle' });
-    console.log(`RepVue [playwright]: navigated to ${page.url()}`);
-
-    await page.waitForTimeout(2000);
-    const html = await page.content();
-    return parseRepVueHtml(html, companyName);
-  } catch (e) {
-    console.error(`RepVue [playwright] error for "${companyName}":`, e);
-    return null;
-  } finally {
-    if (browser) await browser.close().catch(() => {});
-  }
-}
-
-// ── Public entry point ──────────────────────────────────────────────────
+// ── Public entry point (with dedup + cache) ─────────────────────────────
 export async function scrapeRepVue(companyName: string): Promise<RepVueData | null> {
-  // Try fetch first (fast, no browser needed)
-  const fetchResult = await fetchRepVueData(companyName);
-  if (fetchResult) return fetchResult;
+  const key = companyName.toLowerCase().trim();
 
-  // Fall back to Playwright if available
-  console.log(`RepVue: fetch failed for "${companyName}", trying Playwright fallback...`);
-  return playwrightRepVue(companyName);
+  // Return cached result
+  if (cache.has(key)) {
+    console.log(`RepVue: cache hit for "${companyName}"`);
+    return cache.get(key) ?? null;
+  }
+
+  // Deduplicate concurrent requests for the same company
+  if (inflight.has(key)) {
+    console.log(`RepVue: waiting on in-flight request for "${companyName}"`);
+    return inflight.get(key)!;
+  }
+
+  const promise = fetchRepVueData(companyName).then(result => {
+    cache.set(key, result);
+    inflight.delete(key);
+    return result;
+  });
+
+  inflight.set(key, promise);
+  return promise;
 }
