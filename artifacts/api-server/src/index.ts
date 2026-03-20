@@ -909,7 +909,7 @@ app.get('/api/repvue/:companyName', async (req: Request, res: Response) => {
 
     // Scrape on demand (lazy-load playwright)
     const scrapeRepVueFn = await loadRepVue();
-    if (!scrapeRepVueFn) { res.json({ data: null }); return; }
+    if (!scrapeRepVueFn) { res.json({ data: null, unavailable: true }); return; }
     const data = await scrapeRepVueFn(companyName);
     if (!data) {
       res.json({ data: null });
@@ -2076,15 +2076,18 @@ document.addEventListener('click', function() {
   for (var i = 0; i < allPops.length; i++) allPops[i].classList.remove('show');
 });
 
+var _repvueDisabled = false;
 function loadRepVueData(companyName) {
+  if (_repvueDisabled) return;
   if (_repvueData[companyName] !== undefined) return;
   _repvueData[companyName] = null; // mark as loading
   fetch('/api/repvue/' + encodeURIComponent(companyName))
     .then(function(r) { return r.json(); })
     .then(function(d) {
+      if (d && d.unavailable) { _repvueDisabled = true; return; }
       if (d && d.data) {
         _repvueData[companyName] = d.data;
-        renderJobs(); // re-render to show badge
+        renderJobs();
       }
     })
     .catch(function() { /* ignore RepVue failures */ });
