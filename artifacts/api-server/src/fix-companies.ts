@@ -13,7 +13,6 @@ const companies: { name: string; ats_type: string; ats_slug?: string; careers_ur
   // Greenhouse
   { name: 'Pure Storage', ats_type: 'greenhouse', ats_slug: 'purestorage' },
   { name: 'CoreWeave', ats_type: 'greenhouse', ats_slug: 'coreweave' },
-
   { name: 'Databricks', ats_type: 'greenhouse', ats_slug: 'databricks' },
   { name: 'Iron Mountain', ats_type: 'greenhouse', ats_slug: 'ironmountainsolutions' },
   { name: 'Cohesity', ats_type: 'greenhouse', ats_slug: 'cohesity' },
