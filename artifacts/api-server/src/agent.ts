@@ -227,6 +227,48 @@ For jobs NOT from the pre-approved list, apply normal scoring criteria.`;
   return results;
 }
 
+export async function researchCompanyWithClaude(companyName: string): Promise<Record<string, unknown>> {
+  const prompt = `You are a sales intelligence researcher preparing a briefing for an enterprise account executive interviewing at or preparing for a first call with ${companyName}. Research this company thoroughly using web search. Find the most current information available. Return ONLY a valid JSON object with no other text:
+{
+  "companyName": "string",
+  "oneLiner": "one sentence — what they make and who buys it",
+  "overview": "2-3 paragraphs on what they do, why it matters, market position",
+  "recentNews": ["3-5 most recent notable news items with dates"],
+  "keyProducts": ["main products and solutions relevant to enterprise sales"],
+  "whatTheySolve": "the specific pain point they uniquely solve",
+  "aiStrategy": "how AI factors into their product and go-to-market right now",
+  "competitors": ["top 3-5 direct competitors"],
+  "competitiveAdvantage": "what makes them win deals vs competitors",
+  "salesMotion": "how they sell — direct vs channel, deal sizes, typical buyer titles",
+  "keyExecutives": ["CEO name", "CRO or VP Sales name", "other relevant leaders"],
+  "fundingValuation": "market cap or most recent funding round and valuation",
+  "revenueGrowth": "most recent revenue figures or growth metrics if public",
+  "whyApply": "2-3 sentences on why this is a compelling enterprise sales role specifically",
+  "talkingPoints": ["5 specific talking points for an interview or discovery call based on recent news — be specific not generic"],
+  "generatedAt": "current ISO timestamp"
+}`;
+
+  const message = await anthropic.messages.create({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 4000,
+    tools: [{ type: 'web_search_20250305', name: 'web_search' }] as unknown as Anthropic.Messages.Tool[],
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  // Extract the final text block from the response (after tool use)
+  let jsonText = '';
+  for (const block of message.content) {
+    if (block.type === 'text') {
+      jsonText = block.text;
+    }
+  }
+
+  // Clean and parse JSON
+  jsonText = jsonText.trim().replace(/```json|```/g, '').trim();
+  const parsed = JSON.parse(jsonText) as Record<string, unknown>;
+  return parsed;
+}
+
 export async function tailorResumeWithClaude(
   job: { title: string; company: string; location: string; description?: string; why_good_fit?: string; apply_url?: string },
   baseResume: string

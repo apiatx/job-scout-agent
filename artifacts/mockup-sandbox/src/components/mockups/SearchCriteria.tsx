@@ -10,19 +10,21 @@ import { X } from "lucide-react";
 type WorkType = "any" | "remote" | "office" | "hybrid";
 
 const DEFAULT_CRITERIA: CriteriaData = {
-  min_salary: 120000,
+  min_salary: 130000,
   work_type: "any",
   locations: [
     "Remote", "United States", "South Carolina", "North Carolina",
-    "Georgia", "Florida", "South East", "East Coast", "South",
+    "Georgia", "Florida", "South East", "South",
   ],
   target_roles: [
-    "Enterprise Account Executive", "Senior Account Executive",
-    "Regional Sales Manager", "Named Account Executive",
-    "sales account executive", "Account Director", "Account Manager",
-    "Enterprise Account Manager", "Senior Account Manager",
-    "National Account Manager", "Partner Manager", "Channel Manager",
-    "Channel Account Manager", "Territory Sales Manager",
+    "Enterprise Account Executive", "Strategic Account Executive",
+    "Senior Account Executive", "Regional Sales Manager",
+    "Named Account Executive", "sales account executive",
+    "sales executive", "senior sales executive", "sr. sales executive",
+    "mid market account executive", "mid-market account executive",
+    "account manager", "Enterprise account manager",
+    "senior account manager", "sr. account manager",
+    "strategic account manager",
   ],
   industries: [
     "AI Infrastructure", "Data Center Hardware", "Semiconductors",
@@ -31,13 +33,18 @@ const DEFAULT_CRITERIA: CriteriaData = {
     "Industrial Automation", "Oilfield Services Technology",
     "Energy Technology", "Clean Energy / Energy Storage", "Machine Vision",
     "Test and Measurement", "Materials Science / Specialty Chemicals",
-    "Robotics",
+    "Robotics", "Servers", "HPC", "Compute",
   ],
-  must_have: ["enterprise sales", "quota carrying"],
+  must_have: [
+    "enterprise sales",
+    "hardware OR infrastructure OR networking OR storage OR semiconductor OR compute OR optical",
+  ],
   nice_to_have: [
     "AI", "data center", "GPU", "NVIDIA", "industrial automation",
     "energy technology", "machine vision", "robotics",
-    "oilfield services", "energy storage",
+    "oilfield services", "energy storage", "industrial AI",
+    "oil and gas software", "utility software", "grid technology",
+    "clean energy",
   ],
   avoid: [
     "SDR", "BDR", "inbound only", "SMB only", "pure SaaS",

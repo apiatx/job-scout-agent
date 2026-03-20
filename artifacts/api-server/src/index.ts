@@ -2,7 +2,7 @@ import express, { type Request, type Response } from 'express';
 import pg from 'pg';
 import { scrapeGreenhouseJobs, scrapeLeverJobs, runJobSpyScraper } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
-import { scoreJobsWithClaude, tailorResumeWithClaude, filterUnsafeCompanies } from './agent.js';
+import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies } from './agent.js';
 
 const { Pool } = pg;
 const app = express();
@@ -100,6 +100,13 @@ async function initDb(): Promise<void> {
       expiry        TIMESTAMPTZ,
       created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS research_briefs (
+      id           SERIAL PRIMARY KEY,
+      company_name TEXT NOT NULL,
+      brief_json   JSONB NOT NULL,
+      created_at   TIMESTAMP DEFAULT NOW()
+    );
   `);
 
   // Add columns if they don't exist (for existing installs)
@@ -147,12 +154,12 @@ async function initDb(): Promise<void> {
       `INSERT INTO criteria (target_roles, industries, min_salary, locations, must_have, nice_to_have, avoid)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
-        ['Enterprise Account Executive', 'Strategic Account Executive', 'Senior Account Executive', 'Regional Sales Manager', 'Sales Director', 'Named Account Executive', 'sales account executive', 'sales executive'],
-        ['AI Infrastructure', 'Data Center Hardware', 'Semiconductors', 'Networking Hardware', 'Storage Hardware', 'Optical Networking', 'Edge Computing', 'Power & Cooling Infrastructure', 'Server Hardware', 'Industrial Automation', 'Oilfield Services Technology', 'Energy Technology', 'Clean Energy / Energy Storage', 'Machine Vision', 'Test and Measurement', 'Materials Science / Specialty Chemicals', 'Robotics'],
+        ['Enterprise Account Executive', 'Strategic Account Executive', 'Senior Account Executive', 'Regional Sales Manager', 'Named Account Executive', 'sales account executive', 'sales executive', 'senior sales executive', 'sr. sales executive', 'mid market account executive', 'mid-market account executive', 'account manager', 'Enterprise account manager', 'senior account manager', 'sr. account manager', 'strategic account manager'],
+        ['AI Infrastructure', 'Data Center Hardware', 'Semiconductors', 'Networking Hardware', 'Storage Hardware', 'Optical Networking', 'Edge Computing', 'Power & Cooling Infrastructure', 'Server Hardware', 'Industrial Automation', 'Oilfield Services Technology', 'Energy Technology', 'Clean Energy / Energy Storage', 'Machine Vision', 'Test and Measurement', 'Materials Science / Specialty Chemicals', 'Robotics', 'Servers', 'HPC', 'Compute'],
         130000,
-        ['Remote', 'United States', 'South Carolina', 'North Carolina', 'Georgia', 'Florida', 'South East', 'East Coast', 'South'],
+        ['Remote', 'United States', 'South Carolina', 'North Carolina', 'Georgia', 'Florida', 'South East', 'South'],
         ['enterprise sales', 'hardware OR infrastructure OR networking OR storage OR semiconductor OR compute OR optical'],
-        ['AI', 'data center', 'GPU', 'NVIDIA', 'industrial automation', 'energy technology', 'machine vision', 'robotics', 'oilfield services', 'energy storage'],
+        ['AI', 'data center', 'GPU', 'NVIDIA', 'industrial automation', 'energy technology', 'machine vision', 'robotics', 'oilfield services', 'energy storage', 'industrial AI', 'oil and gas software', 'utility software', 'grid technology', 'clean energy'],
         ['SDR', 'BDR', 'inbound only', 'SMB only', 'pure SaaS', 'marketing', 'recruiting'],
       ]
     );
@@ -663,6 +670,57 @@ app.post('/api/tailor-freeform', async (req: Request, res: Response) => {
     const result = await tailorResumeWithClaude(fakeJob, resume);
     res.json({ resume_text: result.resume, cover_letter: result.coverLetter });
   } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Company Research ──────────────────────────────────────────────────────
+app.post('/api/jobs/:id/research', async (req: Request, res: Response) => {
+  try {
+    const jobId = Number(req.params.id);
+    const forceRefresh = req.body?.refresh === true;
+
+    // Get job record
+    const { rows: jobRows } = await pool.query('SELECT * FROM jobs WHERE id=$1', [jobId]);
+    if (jobRows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const job = jobRows[0];
+    const companyName = job.company;
+
+    // Check cache (case-insensitive, < 24 hours old)
+    if (!forceRefresh) {
+      const { rows: cached } = await pool.query(
+        `SELECT * FROM research_briefs WHERE LOWER(company_name) = LOWER($1) AND created_at > NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 1`,
+        [companyName]
+      );
+      if (cached.length > 0) {
+        const { rows: coRows } = await pool.query(
+          `SELECT careers_url FROM companies WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+          [companyName]
+        );
+        res.json({ brief: cached[0].brief_json, cached: true, created_at: cached[0].created_at, careers_url: coRows[0]?.careers_url || null });
+        return;
+      }
+    }
+
+    // Look up careers_url from companies table
+    const { rows: companyRows } = await pool.query(
+      `SELECT careers_url FROM companies WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+      [companyName]
+    );
+    const careersUrl = companyRows[0]?.careers_url || null;
+
+    // Call Claude with web search
+    const brief = await researchCompanyWithClaude(companyName);
+
+    // Save to cache
+    const { rows: inserted } = await pool.query(
+      `INSERT INTO research_briefs (company_name, brief_json) VALUES ($1, $2) RETURNING *`,
+      [companyName, JSON.stringify(brief)]
+    );
+
+    res.json({ brief: inserted[0].brief_json, cached: false, created_at: inserted[0].created_at, careers_url: careersUrl });
+  } catch (e) {
+    console.error('Research company error:', e);
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 // Gmail OAuth
@@ -1387,6 +1445,41 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .email-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;font-size:12px}
 .toolbar-sep{width:1px;height:18px;background:var(--border);flex-shrink:0}
 .email-preview{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;max-height:calc(100vh - 260px);overflow-y:auto}
+
+/* research modal */
+.research-modal{max-width:800px;width:95%}
+.research-header{text-align:center;padding-bottom:16px;border-bottom:1px solid var(--border);margin-bottom:0}
+.research-company-name{font-size:22px;font-weight:700;color:var(--text);margin-bottom:4px}
+.research-oneliner{font-size:13px;color:var(--muted);margin-bottom:12px}
+.research-chips{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:8px}
+.research-chip{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:4px 12px;font-size:12px;color:var(--text)}
+.research-chip .chip-label{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.05em;display:block}
+.research-chip .chip-val{font-weight:600;color:var(--gold)}
+.research-meta{font-size:11px;color:var(--muted);text-align:center;margin-top:8px}
+.research-meta a{color:var(--gold);cursor:pointer;text-decoration:underline}
+.research-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);overflow-x:auto;margin-bottom:16px}
+.research-tab{padding:10px 16px;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;transition:color .12s}
+.research-tab:hover{color:var(--text)}
+.research-tab.active{color:var(--gold);border-bottom-color:var(--gold)}
+.research-body{padding:0 4px;min-height:200px}
+.research-body h4{font-size:12px;color:var(--gold);text-transform:uppercase;letter-spacing:.08em;margin:16px 0 8px}
+.research-body h4:first-child{margin-top:0}
+.research-body p{font-size:13px;color:var(--text);line-height:1.7;margin-bottom:12px}
+.research-body ol{list-style:none;counter-reset:tp;padding:0;margin:0}
+.research-body ol li{counter-increment:tp;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:7px;margin-bottom:8px;font-size:13px;line-height:1.6;color:var(--text);position:relative;padding-left:36px}
+.research-body ol li::before{content:counter(tp);position:absolute;left:12px;top:10px;color:var(--gold);font-weight:700;font-size:14px}
+.research-body ul{list-style:none;padding:0;margin:0}
+.research-body ul li{padding:6px 0;font-size:13px;color:var(--text);border-bottom:1px solid #1e1e1e}
+.research-body ul li:last-child{border-bottom:none}
+.research-tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.research-tag{background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:4px 10px;font-size:12px;color:var(--text)}
+.research-footer{display:flex;gap:8px;padding-top:16px;border-top:1px solid var(--border);margin-top:16px}
+.research-loading{text-align:center;padding:48px 24px}
+.research-loading .spinner{display:inline-block;width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--gold);border-radius:50%;animation:spin 0.8s linear infinite;margin-bottom:12px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.research-loading p{color:var(--muted);font-size:13px}
+.research-loading .elapsed{font-size:11px;color:var(--muted);margin-top:8px}
+.research-error{text-align:center;padding:32px;color:var(--red);font-size:13px}
 </style>
 </head>
 <body>
@@ -1611,6 +1704,49 @@ textarea:focus,input:focus{border-color:var(--gold)}
   </div>
 </div>
 
+<!-- Research Company Modal -->
+<div class="modal-overlay" id="research-modal">
+  <div class="modal research-modal">
+    <div class="modal-header">
+      <div></div>
+      <button class="modal-close" onclick="closeResearchModal()">&times;</button>
+    </div>
+    <div id="research-loading" class="research-loading">
+      <div class="spinner"></div>
+      <p>Researching company with AI-powered web search...</p>
+      <p>This takes 15-30 seconds</p>
+      <div class="elapsed" id="research-elapsed"></div>
+    </div>
+    <div id="research-error" class="research-error" style="display:none">
+      <p id="research-error-msg"></p>
+      <button class="btn btn-gold btn-sm" style="margin-top:12px" onclick="retryResearch()">Retry</button>
+    </div>
+    <div id="research-content" style="display:none">
+      <div class="research-header">
+        <div class="research-company-name" id="research-company-name"></div>
+        <div class="research-oneliner" id="research-oneliner"></div>
+        <div class="research-chips">
+          <div class="research-chip"><span class="chip-label">Funding / Valuation</span><span class="chip-val" id="research-funding"></span></div>
+          <div class="research-chip"><span class="chip-label">Revenue / Growth</span><span class="chip-val" id="research-revenue"></span></div>
+        </div>
+        <div class="research-meta" id="research-meta"></div>
+      </div>
+      <div class="research-tabs" id="research-tabs">
+        <div class="research-tab active" onclick="showResearchTab('interview')">Interview Prep</div>
+        <div class="research-tab" onclick="showResearchTab('overview')">Overview</div>
+        <div class="research-tab" onclick="showResearchTab('market')">Market Position</div>
+        <div class="research-tab" onclick="showResearchTab('sales')">Sales Intel</div>
+        <div class="research-tab" onclick="showResearchTab('news')">Recent News</div>
+      </div>
+      <div class="research-body" id="research-body"></div>
+      <div class="research-footer">
+        <button class="btn btn-ghost btn-sm" onclick="copyFullBrief()">Copy Full Brief</button>
+        <a class="btn btn-ghost btn-sm" id="research-careers-link" href="#" target="_blank" rel="noopener">Open Careers Page</a>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 // ── helpers ──────────────────────────────────────────────────────────────
 function esc(s) {
@@ -1716,6 +1852,7 @@ function renderJobCard(j, opts) {
     '<div class="card-foot">' +
       '<a href="' + esc(j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-gold btn-sm">View Posting \\u2192</a>' +
       '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ')">Tailor Resume</button>' +
+      '<button class="btn btn-ghost btn-sm" id="research-btn-' + j.id + '" onclick="researchCompany(' + j.id + ')">\\uD83D\\uDD0D Research Company</button>' +
       '<button class="' + saveClass + '" onclick="toggleSave(' + j.id + ')" id="save-btn-' + j.id + '">' + saveLabel + '</button>' +
     '</div>' +
   '</div>';
@@ -2192,6 +2329,207 @@ async function saveCriteria() {
     console.error('saveCriteria failed:', e);
     alert('Failed to save settings: ' + e.message);
   }
+}
+
+// ── research company ────────────────────────────────────────────────────
+var _researchBrief = null;
+var _researchJobId = null;
+var _researchTimer = null;
+var _researchStart = 0;
+
+function closeResearchModal() {
+  document.getElementById('research-modal').classList.remove('show');
+  if (_researchTimer) { clearInterval(_researchTimer); _researchTimer = null; }
+}
+
+function showResearchTab(tab) {
+  var tabs = document.getElementById('research-tabs').children;
+  var tabNames = ['interview','overview','market','sales','news'];
+  for (var i = 0; i < tabs.length; i++) {
+    tabs[i].classList.toggle('active', tabNames[i] === tab);
+  }
+  renderResearchTab(tab);
+}
+
+function renderResearchTab(tab) {
+  var b = _researchBrief;
+  if (!b) return;
+  var body = document.getElementById('research-body');
+  var html = '';
+  if (tab === 'interview') {
+    html += '<h4>Talking Points for Interview / Discovery Call</h4>';
+    html += '<ol>';
+    (b.talkingPoints || []).forEach(function(tp) { html += '<li>' + esc(tp) + '</li>'; });
+    html += '</ol>';
+  } else if (tab === 'overview') {
+    html += '<h4>Company Overview</h4>';
+    html += '<p>' + esc(b.overview || '').replace(/\\n/g, '</p><p>') + '</p>';
+    html += '<h4>What They Solve</h4>';
+    html += '<p>' + esc(b.whatTheySolve || '') + '</p>';
+    html += '<h4>Key Products</h4>';
+    html += '<div class="research-tags">';
+    (b.keyProducts || []).forEach(function(p) { html += '<span class="research-tag">' + esc(p) + '</span>'; });
+    html += '</div>';
+  } else if (tab === 'market') {
+    html += '<h4>AI Strategy</h4>';
+    html += '<p>' + esc(b.aiStrategy || '') + '</p>';
+    html += '<h4>Competitive Advantage</h4>';
+    html += '<p>' + esc(b.competitiveAdvantage || '') + '</p>';
+    html += '<h4>Competitors</h4>';
+    html += '<div class="research-tags">';
+    (b.competitors || []).forEach(function(c) { html += '<span class="research-tag">' + esc(c) + '</span>'; });
+    html += '</div>';
+  } else if (tab === 'sales') {
+    html += '<h4>Sales Motion</h4>';
+    html += '<p>' + esc(b.salesMotion || '') + '</p>';
+    html += '<h4>Why Apply</h4>';
+    html += '<p>' + esc(b.whyApply || '') + '</p>';
+    html += '<h4>Key Executives</h4>';
+    html += '<ul>';
+    (b.keyExecutives || []).forEach(function(e) { html += '<li>' + esc(e) + '</li>'; });
+    html += '</ul>';
+  } else if (tab === 'news') {
+    html += '<h4>Recent News</h4>';
+    html += '<ul>';
+    (b.recentNews || []).forEach(function(n) { html += '<li>' + esc(n) + '</li>'; });
+    html += '</ul>';
+  }
+  body.innerHTML = html;
+}
+
+function displayResearchBrief(data) {
+  var b = typeof data.brief === 'string' ? JSON.parse(data.brief) : data.brief;
+  _researchBrief = b;
+  document.getElementById('research-loading').style.display = 'none';
+  document.getElementById('research-error').style.display = 'none';
+  document.getElementById('research-content').style.display = '';
+  document.getElementById('research-company-name').textContent = b.companyName || '';
+  document.getElementById('research-oneliner').textContent = b.oneLiner || '';
+  document.getElementById('research-funding').textContent = b.fundingValuation || 'N/A';
+  document.getElementById('research-revenue').textContent = b.revenueGrowth || 'N/A';
+
+  var genAt = b.generatedAt || data.created_at;
+  var ago = '';
+  if (genAt) {
+    var diffMs = Date.now() - new Date(genAt).getTime();
+    var mins = Math.floor(diffMs / 60000);
+    if (mins < 1) ago = 'just now';
+    else if (mins < 60) ago = mins + ' minute' + (mins !== 1 ? 's' : '') + ' ago';
+    else { var hrs = Math.floor(mins / 60); ago = hrs + ' hour' + (hrs !== 1 ? 's' : '') + ' ago'; }
+  }
+  document.getElementById('research-meta').innerHTML = 'Generated ' + esc(ago) + ' \\u00B7 <a onclick="refreshResearch()">Refresh</a>';
+
+  var j = _jobsById[_researchJobId] || {};
+  var careersLink = document.getElementById('research-careers-link');
+  if (data.careers_url) {
+    careersLink.href = data.careers_url;
+  } else {
+    careersLink.href = 'https://www.google.com/search?q=' + encodeURIComponent(j.company + ' careers jobs');
+  }
+
+  showResearchTab('interview');
+}
+
+async function researchCompany(jobId) {
+  _researchJobId = jobId;
+  var j = _jobsById[jobId] || {};
+  var btn = document.getElementById('research-btn-' + jobId);
+  if (btn) { btn.textContent = 'Researching...'; btn.disabled = true; }
+
+  var modal = document.getElementById('research-modal');
+  document.getElementById('research-loading').style.display = '';
+  document.getElementById('research-error').style.display = 'none';
+  document.getElementById('research-content').style.display = 'none';
+  modal.classList.add('show');
+
+  _researchStart = Date.now();
+  if (_researchTimer) clearInterval(_researchTimer);
+  _researchTimer = setInterval(function() {
+    var secs = Math.floor((Date.now() - _researchStart) / 1000);
+    var el = document.getElementById('research-elapsed');
+    if (el) el.textContent = secs + 's elapsed';
+  }, 1000);
+
+  try {
+    var res = await fetch('/api/jobs/' + jobId + '/research', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({})
+    });
+    if (_researchTimer) { clearInterval(_researchTimer); _researchTimer = null; }
+    if (!res.ok) {
+      var errData = await res.json();
+      throw new Error(errData.error || 'HTTP ' + res.status);
+    }
+    var data = await res.json();
+    displayResearchBrief(data);
+  } catch(e) {
+    if (_researchTimer) { clearInterval(_researchTimer); _researchTimer = null; }
+    document.getElementById('research-loading').style.display = 'none';
+    document.getElementById('research-error').style.display = '';
+    document.getElementById('research-error-msg').textContent = 'Error: ' + e.message;
+  } finally {
+    if (btn) { btn.textContent = '\\uD83D\\uDD0D Research Company'; btn.disabled = false; }
+  }
+}
+
+async function refreshResearch() {
+  if (!_researchJobId) return;
+  document.getElementById('research-loading').style.display = '';
+  document.getElementById('research-error').style.display = 'none';
+  document.getElementById('research-content').style.display = 'none';
+
+  _researchStart = Date.now();
+  if (_researchTimer) clearInterval(_researchTimer);
+  _researchTimer = setInterval(function() {
+    var secs = Math.floor((Date.now() - _researchStart) / 1000);
+    var el = document.getElementById('research-elapsed');
+    if (el) el.textContent = secs + 's elapsed';
+  }, 1000);
+
+  try {
+    var res = await fetch('/api/jobs/' + _researchJobId + '/research', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ refresh: true })
+    });
+    if (_researchTimer) { clearInterval(_researchTimer); _researchTimer = null; }
+    if (!res.ok) {
+      var errData = await res.json();
+      throw new Error(errData.error || 'HTTP ' + res.status);
+    }
+    var data = await res.json();
+    displayResearchBrief(data);
+  } catch(e) {
+    if (_researchTimer) { clearInterval(_researchTimer); _researchTimer = null; }
+    document.getElementById('research-loading').style.display = 'none';
+    document.getElementById('research-error').style.display = '';
+    document.getElementById('research-error-msg').textContent = 'Error: ' + e.message;
+  }
+}
+
+function retryResearch() {
+  if (_researchJobId) researchCompany(_researchJobId);
+}
+
+function copyFullBrief() {
+  var b = _researchBrief;
+  if (!b) return;
+  var text = b.companyName + '\\n' + (b.oneLiner || '') + '\\n\\n';
+  text += 'OVERVIEW\\n' + (b.overview || '') + '\\n\\n';
+  text += 'WHAT THEY SOLVE\\n' + (b.whatTheySolve || '') + '\\n\\n';
+  text += 'KEY PRODUCTS\\n' + (b.keyProducts || []).join(', ') + '\\n\\n';
+  text += 'AI STRATEGY\\n' + (b.aiStrategy || '') + '\\n\\n';
+  text += 'COMPETITIVE ADVANTAGE\\n' + (b.competitiveAdvantage || '') + '\\n\\n';
+  text += 'COMPETITORS\\n' + (b.competitors || []).join(', ') + '\\n\\n';
+  text += 'SALES MOTION\\n' + (b.salesMotion || '') + '\\n\\n';
+  text += 'WHY APPLY\\n' + (b.whyApply || '') + '\\n\\n';
+  text += 'KEY EXECUTIVES\\n' + (b.keyExecutives || []).join(', ') + '\\n\\n';
+  text += 'FUNDING / VALUATION\\n' + (b.fundingValuation || '') + '\\n\\n';
+  text += 'REVENUE / GROWTH\\n' + (b.revenueGrowth || '') + '\\n\\n';
+  text += 'TALKING POINTS\\n' + (b.talkingPoints || []).map(function(tp, i) { return (i + 1) + '. ' + tp; }).join('\\n') + '\\n\\n';
+  text += 'RECENT NEWS\\n' + (b.recentNews || []).map(function(n) { return '- ' + n; }).join('\\n');
+  navigator.clipboard.writeText(text);
 }
 
 // ── init ──────────────────────────────────────────────────────────────────
