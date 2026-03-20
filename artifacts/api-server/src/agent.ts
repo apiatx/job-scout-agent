@@ -249,24 +249,47 @@ export async function researchCompanyWithClaude(companyName: string): Promise<Re
 }`;
 
   const message = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 4000,
+    model: 'claude-sonnet-4-5-20250929',
+    max_tokens: 8000,
+    system: 'You are a research assistant. After using web search to gather information, you MUST respond with ONLY a valid JSON object. No conversational text, no explanations, no markdown — just the raw JSON object starting with { and ending with }.',
     tools: [{ type: 'web_search_20250305', name: 'web_search' }] as unknown as Anthropic.Messages.Tool[],
     messages: [{ role: 'user', content: prompt }],
   });
 
-  // Extract the final text block from the response (after tool use)
-  let jsonText = '';
+  // Extract text from all text blocks in the response
+  const textBlocks: string[] = [];
   for (const block of message.content) {
     if (block.type === 'text') {
-      jsonText = block.text;
+      textBlocks.push(block.text);
     }
   }
 
-  // Clean and parse JSON
-  jsonText = jsonText.trim().replace(/```json|```/g, '').trim();
-  const parsed = JSON.parse(jsonText) as Record<string, unknown>;
-  return parsed;
+  // Try each text block (last first, as that's most likely the final answer)
+  for (let i = textBlocks.length - 1; i >= 0; i--) {
+    let text = textBlocks[i].trim();
+
+    // Strip markdown code fences
+    text = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+
+    // Try direct parse first
+    try {
+      return JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      // Try to extract a JSON object from within conversational text
+      const jsonMatch = text.match(/\{[\s\S]*"companyName"[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          return JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+        } catch {
+          // continue to next block
+        }
+      }
+    }
+  }
+
+  // If no valid JSON found in any block, throw descriptive error
+  const preview = textBlocks.map(t => t.substring(0, 100)).join(' | ');
+  throw new Error(`Failed to parse research JSON from Claude response. Text blocks preview: ${preview}`);
 }
 
 export async function tailorResumeWithClaude(
