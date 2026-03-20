@@ -3,7 +3,15 @@
 //   REPVUE_EMAIL    — your RepVue account email
 //   REPVUE_PASSWORD — your RepVue account password
 
-import { chromium, type Browser } from 'playwright';
+// Dynamic import to avoid crash if playwright browsers aren't installed
+let chromium: typeof import('playwright')['chromium'] | null = null;
+try {
+  const pw = await import('playwright');
+  chromium = pw.chromium;
+} catch {
+  console.warn('Playwright not available — RepVue integration disabled. Run: npx playwright install chromium');
+}
+type Browser = import('playwright').Browser;
 
 export interface RepVueData {
   companyName: string;
@@ -20,6 +28,10 @@ export interface RepVueData {
 }
 
 export async function scrapeRepVue(companyName: string): Promise<RepVueData | null> {
+  if (!chromium) {
+    console.log('Playwright not available — skipping RepVue');
+    return null;
+  }
   const email = process.env.REPVUE_EMAIL;
   const password = process.env.REPVUE_PASSWORD;
   if (!email || !password) {

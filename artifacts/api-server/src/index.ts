@@ -4,7 +4,8 @@ import { scrapeGreenhouseJobs, scrapeLeverJobs, runJobSpyScraper } from './scrap
 import type { ScrapedJob } from './scraper.js';
 import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
-import { scrapeRepVue } from './lib/repvue.js';
+// Lazy import repvue to avoid crashing if playwright browsers aren't installed
+const loadRepVue = () => import('./lib/repvue.js').then(m => m.scrapeRepVue).catch(() => null);
 
 const { Pool } = pg;
 const app = express();
@@ -906,8 +907,10 @@ app.get('/api/repvue/:companyName', async (req: Request, res: Response) => {
       return;
     }
 
-    // Scrape on demand
-    const data = await scrapeRepVue(companyName);
+    // Scrape on demand (lazy-load playwright)
+    const scrapeRepVueFn = await loadRepVue();
+    if (!scrapeRepVueFn) { res.json({ data: null }); return; }
+    const data = await scrapeRepVueFn(companyName);
     if (!data) {
       res.json({ data: null });
       return;
