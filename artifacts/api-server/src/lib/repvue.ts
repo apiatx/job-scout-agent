@@ -29,7 +29,6 @@ export interface RepVueData {
 
 export async function scrapeRepVue(companyName: string): Promise<RepVueData | null> {
   if (!chromium) {
-    console.log('Playwright not available — skipping RepVue');
     return null;
   }
   const email = process.env.REPVUE_EMAIL;
