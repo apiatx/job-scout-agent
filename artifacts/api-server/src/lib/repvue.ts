@@ -17,28 +17,33 @@ export interface RepVueData {
   scrapedAt: string;
 }
 
-// ── In-memory cache & request queue ─────────────────────────────────────
-const cache = new Map<string, RepVueData | null>();
-const inflight = new Map<string, Promise<RepVueData | null>>();
-
-// Serialise all RepVue requests through a queue with delay between them
-const REQUEST_DELAY_MS = 3000; // 3 seconds between requests
+// ── Sequential queue ────────────────────────────────────────────────────
+// Only ONE request to RepVue at a time, with a delay between each.
+const DELAY_BETWEEN_REQUESTS_MS = 3000;
 const MAX_RETRIES = 2;
-const RETRY_DELAY_MS = 5000;
-let lastRequestTime = 0;
+const RETRY_BASE_DELAY_MS = 5000;
 
-async function throttle(): Promise<void> {
-  const now = Date.now();
-  const elapsed = now - lastRequestTime;
-  if (elapsed < REQUEST_DELAY_MS) {
-    await new Promise(r => setTimeout(r, REQUEST_DELAY_MS - elapsed));
-  }
-  lastRequestTime = Date.now();
+const cache = new Map<string, RepVueData | null>();
+
+// The queue: a chain of promises. Each new request appends to the end.
+let queueTail: Promise<void> = Promise.resolve();
+
+function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    queueTail = queueTail.then(async () => {
+      try {
+        const result = await fn();
+        resolve(result);
+      } catch (err) {
+        reject(err);
+      }
+      // Wait before allowing the next queued request
+      await new Promise(r => setTimeout(r, DELAY_BETWEEN_REQUESTS_MS));
+    });
+  });
 }
 
-/**
- * Convert a company display name into the RepVue URL slug.
- */
+// ── Slug helpers ────────────────────────────────────────────────────────
 function toRepVueSlug(name: string): string {
   return name
     .replace(/\s*\|.*$/, '')
@@ -73,38 +78,38 @@ const BROWSER_HEADERS: Record<string, string> = {
 };
 
 /**
- * Fetch a single URL with retry on 429.
+ * Fetch a single URL with retry on 429. NOT queued — called from within the queue.
  */
-async function fetchWithRetry(url: string, retries = MAX_RETRIES): Promise<Response | null> {
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    await throttle();
+async function fetchOne(url: string): Promise<Response | null> {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const res = await fetch(url, { headers: BROWSER_HEADERS, redirect: 'follow' });
       if (res.status === 429) {
-        const delay = RETRY_DELAY_MS * (attempt + 1);
-        console.log(`RepVue [fetch]: 429 for ${url}, waiting ${delay / 1000}s (attempt ${attempt + 1}/${retries + 1})`);
+        const delay = RETRY_BASE_DELAY_MS * (attempt + 1);
+        console.log(`RepVue [fetch]: 429 for ${url}, retrying in ${delay / 1000}s (${attempt + 1}/${MAX_RETRIES + 1})`);
         await new Promise(r => setTimeout(r, delay));
         continue;
       }
+      console.log(`RepVue [fetch]: ${url} → ${res.status}`);
       return res;
     } catch (err) {
       console.error(`RepVue [fetch]: network error for ${url}:`, err);
       return null;
     }
   }
-  console.log(`RepVue [fetch]: giving up on ${url} after ${retries + 1} attempts`);
+  console.log(`RepVue [fetch]: giving up on ${url} after ${MAX_RETRIES + 1} attempts`);
   return null;
 }
 
 /**
- * Try to extract RepVue data using plain HTTP fetch (no browser required).
+ * Fetch RepVue data for a company. Runs inside the queue (one at a time).
  */
 async function fetchRepVueData(companyName: string): Promise<RepVueData | null> {
   const slug = toRepVueSlug(companyName);
   const url = `https://www.repvue.com/companies/${slug}`;
-  console.log(`RepVue [fetch]: trying ${url}`);
+  console.log(`RepVue [queue]: fetching "${companyName}" → ${url}`);
 
-  const res = await fetchWithRetry(url);
+  const res = await fetchOne(url);
   if (res && res.ok) {
     return parseRepVueHtml(await res.text(), companyName);
   }
@@ -113,8 +118,8 @@ async function fetchRepVueData(companyName: string): Promise<RepVueData | null> 
   const kebab = toKebabSlug(companyName);
   if (kebab !== slug.toLowerCase()) {
     const altUrl = `https://www.repvue.com/companies/${kebab}`;
-    console.log(`RepVue [fetch]: trying alternate slug: ${altUrl}`);
-    const altRes = await fetchWithRetry(altUrl);
+    console.log(`RepVue [queue]: trying alternate slug → ${altUrl}`);
+    const altRes = await fetchOne(altUrl);
     if (altRes && altRes.ok) {
       return parseRepVueHtml(await altRes.text(), companyName);
     }
@@ -192,8 +197,7 @@ function parseRepVueHtml(html: string, companyName: string): RepVueData | null {
     const productMatch = text.match(/Product[\s-]*Market\s*Fit[^:]*?[:\s]*(\d+(?:\.\d+)?)\s*(?:\/\s*5|out of 5)/i);
     if (productMatch) productRating = parseFloat(productMatch[1]);
 
-    // Log a snippet for debugging
-    console.log(`RepVue [parse]: text preview (first 500 chars): ${text.substring(0, 500)}`);
+    console.log(`RepVue [parse]: text preview: ${text.substring(0, 500)}`);
   }
 
   if (repVueScore === null) {
@@ -201,7 +205,7 @@ function parseRepVueHtml(html: string, companyName: string): RepVueData | null {
     return null;
   }
 
-  console.log(`RepVue [parse]: extracted score ${repVueScore} for "${companyName}"`);
+  console.log(`RepVue [parse]: score=${repVueScore} for "${companyName}"`);
   return {
     companyName, repVueScore, quotaAttainment, percentHittingQuota,
     baseSalaryRange, oteSalaryRange, cultureRating, productRating,
@@ -209,28 +213,30 @@ function parseRepVueHtml(html: string, companyName: string): RepVueData | null {
   };
 }
 
-// ── Public entry point (with dedup + cache) ─────────────────────────────
+// ── Public entry point ──────────────────────────────────────────────────
+// Deduplicates + caches + queues one-at-a-time with delays.
+const pending = new Map<string, Promise<RepVueData | null>>();
+
 export async function scrapeRepVue(companyName: string): Promise<RepVueData | null> {
   const key = companyName.toLowerCase().trim();
 
-  // Return cached result
+  // Return cached result instantly
   if (cache.has(key)) {
-    console.log(`RepVue: cache hit for "${companyName}"`);
     return cache.get(key) ?? null;
   }
 
-  // Deduplicate concurrent requests for the same company
-  if (inflight.has(key)) {
-    console.log(`RepVue: waiting on in-flight request for "${companyName}"`);
-    return inflight.get(key)!;
+  // Deduplicate: if already queued/in-flight, return the same promise
+  if (pending.has(key)) {
+    return pending.get(key)!;
   }
 
-  const promise = fetchRepVueData(companyName).then(result => {
+  // Queue this request — it will wait its turn
+  const promise = enqueue(() => fetchRepVueData(companyName)).then(result => {
     cache.set(key, result);
-    inflight.delete(key);
+    pending.delete(key);
     return result;
   });
 
-  inflight.set(key, promise);
+  pending.set(key, promise);
   return promise;
 }
