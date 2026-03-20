@@ -3,6 +3,8 @@ import pg from 'pg';
 import { scrapeGreenhouseJobs, scrapeLeverJobs, runJobSpyScraper } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
 import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies } from './agent.js';
+import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
+import { scrapeRepVue } from './lib/repvue.js';
 
 const { Pool } = pg;
 const app = express();
@@ -106,6 +108,21 @@ async function initDb(): Promise<void> {
       company_name TEXT NOT NULL,
       brief_json   JSONB NOT NULL,
       saved        BOOLEAN NOT NULL DEFAULT false,
+      created_at   TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS salary_estimates (
+      id           SERIAL PRIMARY KEY,
+      job_title    TEXT NOT NULL,
+      company_name TEXT NOT NULL,
+      estimate_json JSONB NOT NULL,
+      created_at   TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS repvue_cache (
+      id           SERIAL PRIMARY KEY,
+      company_name TEXT NOT NULL,
+      data_json    JSONB NOT NULL,
       created_at   TIMESTAMP DEFAULT NOW()
     );
   `);
@@ -527,6 +544,21 @@ app.get('/api/jobs', async (req: Request, res: Response) => {
       'SELECT * FROM jobs WHERE match_score >= $1 ORDER BY match_score DESC, created_at DESC',
       [minScore]
     );
+
+    // Attach salary estimates for jobs missing salary
+    const jobsNeedingEstimate = rows.filter((j: Record<string, unknown>) => !j.salary || j.salary === 'Unknown' || j.salary === 'N/A' || (j.salary as string).trim() === '');
+    if (jobsNeedingEstimate.length > 0) {
+      for (const j of jobsNeedingEstimate) {
+        const { rows: est } = await pool.query(
+          `SELECT estimate_json FROM salary_estimates WHERE LOWER(job_title) = LOWER($1) AND LOWER(company_name) = LOWER($2) AND created_at > NOW() - INTERVAL '7 days' ORDER BY created_at DESC LIMIT 1`,
+          [j.title, j.company]
+        );
+        if (est.length > 0) {
+          (j as Record<string, unknown>).salary_estimate = est[0].estimate_json;
+        }
+      }
+    }
+
     res.json(rows);
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
@@ -537,6 +569,16 @@ app.get('/api/jobs/saved', async (_req, res: Response) => {
     const { rows } = await pool.query(
       'SELECT * FROM jobs WHERE saved_at IS NOT NULL ORDER BY saved_at DESC LIMIT 200'
     );
+    // Attach salary estimates for jobs missing salary
+    for (const j of rows) {
+      if (!j.salary || j.salary === 'Unknown' || j.salary === 'N/A' || j.salary.trim() === '') {
+        const { rows: est } = await pool.query(
+          `SELECT estimate_json FROM salary_estimates WHERE LOWER(job_title) = LOWER($1) AND LOWER(company_name) = LOWER($2) AND created_at > NOW() - INTERVAL '7 days' ORDER BY created_at DESC LIMIT 1`,
+          [j.title, j.company]
+        );
+        if (est.length > 0) j.salary_estimate = est[0].estimate_json;
+      }
+    }
     res.json(rows);
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
@@ -800,6 +842,82 @@ app.delete('/api/research/:id', async (req: Request, res: Response) => {
     const id = Number(req.params.id);
     await pool.query('DELETE FROM research_briefs WHERE id = $1', [id]);
     res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Salary Estimates ─────────────────────────────────────────────────────
+app.get('/api/salary-estimate', async (req: Request, res: Response) => {
+  try {
+    const title = String(req.query.title || '');
+    const company = String(req.query.company || '');
+    if (!title || !company) { res.json({ estimate: null }); return; }
+
+    // Check cache (7-day validity)
+    const { rows: cached } = await pool.query(
+      `SELECT * FROM salary_estimates WHERE LOWER(job_title) = LOWER($1) AND LOWER(company_name) = LOWER($2) AND created_at > NOW() - INTERVAL '7 days' ORDER BY created_at DESC LIMIT 1`,
+      [title, company]
+    );
+    if (cached.length > 0) {
+      res.json({ estimate: cached[0].estimate_json, cached: true });
+      return;
+    }
+    res.json({ estimate: null });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Batch salary estimates for multiple jobs
+app.post('/api/salary-estimates/batch', async (req: Request, res: Response) => {
+  try {
+    const jobIds: number[] = req.body?.jobIds || [];
+    if (!jobIds.length) { res.json({}); return; }
+
+    // Get jobs info
+    const { rows: jobs } = await pool.query(
+      `SELECT id, title, company, salary FROM jobs WHERE id = ANY($1)`,
+      [jobIds]
+    );
+
+    const result: Record<number, unknown> = {};
+    for (const job of jobs) {
+      const { rows: cached } = await pool.query(
+        `SELECT estimate_json FROM salary_estimates WHERE LOWER(job_title) = LOWER($1) AND LOWER(company_name) = LOWER($2) AND created_at > NOW() - INTERVAL '7 days' ORDER BY created_at DESC LIMIT 1`,
+        [job.title, job.company]
+      );
+      if (cached.length > 0) {
+        result[job.id] = cached[0].estimate_json;
+      }
+    }
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── RepVue ──────────────────────────────────────────────────────────────
+app.get('/api/repvue/:companyName', async (req: Request, res: Response) => {
+  try {
+    const companyName = req.params.companyName;
+
+    // Check cache (3-day validity)
+    const { rows: cached } = await pool.query(
+      `SELECT * FROM repvue_cache WHERE LOWER(company_name) = LOWER($1) AND created_at > NOW() - INTERVAL '3 days' ORDER BY created_at DESC LIMIT 1`,
+      [companyName]
+    );
+    if (cached.length > 0) {
+      res.json({ data: cached[0].data_json, cached: true });
+      return;
+    }
+
+    // Scrape on demand
+    const data = await scrapeRepVue(companyName);
+    if (!data) {
+      res.json({ data: null });
+      return;
+    }
+
+    await pool.query(
+      `INSERT INTO repvue_cache (company_name, data_json) VALUES ($1, $2)`,
+      [companyName, JSON.stringify(data)]
+    );
+    res.json({ data, cached: false });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -1256,6 +1374,40 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
     console.log(`\n──── DATABASE INSERT ───────────────────────────────────────`);
     console.log(`Saved ${matches.length} jobs to database for scout run #${runId}`);
+
+    // ── Salary estimation for jobs missing salary ──────────────────────
+    const needsSalary = matches.filter(m => !m.salary || m.salary === 'Unknown' || m.salary === 'N/A' || m.salary.trim() === '');
+    if (needsSalary.length > 0) {
+      console.log(`\n──── SALARY ESTIMATION ─────────────────────────────────────`);
+      console.log(`Estimating salary for ${needsSalary.length} jobs missing salary data (up to 5 in parallel)...`);
+      // Process in batches of 5
+      for (let i = 0; i < needsSalary.length; i += 5) {
+        const batch = needsSalary.slice(i, i + 5);
+        await Promise.allSettled(batch.map(async (m) => {
+          try {
+            // Check cache first (7-day validity)
+            const { rows: cached } = await pool.query(
+              `SELECT * FROM salary_estimates WHERE LOWER(job_title) = LOWER($1) AND LOWER(company_name) = LOWER($2) AND created_at > NOW() - INTERVAL '7 days' LIMIT 1`,
+              [m.title, m.company]
+            );
+            if (cached.length > 0) {
+              console.log(`  ✓ ${m.title} @ ${m.company}: cached estimate`);
+              return;
+            }
+            const estimate = await estimateSalary(m.title, m.company);
+            await pool.query(
+              `INSERT INTO salary_estimates (job_title, company_name, estimate_json) VALUES ($1, $2, $3)`,
+              [m.title, m.company, JSON.stringify(estimate)]
+            );
+            console.log(`  ✓ ${m.title} @ ${m.company}: $${Math.round(estimate.oteLow/1000)}k-$${Math.round(estimate.oteHigh/1000)}k OTE (${estimate.confidence})`);
+          } catch (e) {
+            console.error(`  ✗ Salary estimate failed for ${m.title} @ ${m.company}:`, e instanceof Error ? e.message : e);
+          }
+        }));
+      }
+      console.log(`───────────────────────────────────────────────────────────`);
+    }
+
     console.log(`════════════════════════════════════════════════════════════`);
     console.log(`SCOUT RUN #${runId} COMPLETE`);
     console.log(`  Companies scanned: ${companiesScanned}`);
@@ -1457,6 +1609,25 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .card-foot{padding:12px 18px;display:flex;gap:8px;flex-wrap:wrap}
 .source-badge{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;background:#222;color:var(--muted)}
 .age-badge{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:500;background:transparent;color:var(--muted);border:1px solid #333}
+.salary-estimated{color:#d4a843;font-size:12px}
+.salary-estimated .est-prefix{opacity:0.7;font-size:10px}
+.salary-tooltip{position:relative;cursor:help}
+.salary-tooltip .tooltip-text{visibility:hidden;position:absolute;bottom:120%;left:50%;transform:translateX(-50%);background:#222;color:#ccc;padding:6px 10px;border-radius:6px;font-size:11px;white-space:nowrap;z-index:10;border:1px solid #333}
+.salary-tooltip:hover .tooltip-text{visibility:visible}
+.repvue-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#1a1a2e;border:1px solid #333;color:#7c8dff;cursor:pointer;position:relative}
+.repvue-badge .rv-dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.rv-green{background:#22c55e}
+.rv-yellow{background:#eab308}
+.rv-red{background:#ef4444}
+.repvue-popover{display:none;position:absolute;top:100%;left:0;margin-top:6px;background:#1a1a2e;border:1px solid #333;border-radius:8px;padding:12px 16px;z-index:100;width:300px;font-size:12px;color:#ccc;box-shadow:0 8px 24px rgba(0,0,0,0.5)}
+.repvue-popover.show{display:block}
+.repvue-popover h4{margin:0 0 8px;font-size:13px;color:#7c8dff}
+.repvue-popover .rv-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #222}
+.repvue-popover .rv-row:last-child{border-bottom:none}
+.repvue-popover .rv-label{color:var(--muted)}
+.repvue-popover .rv-val{font-weight:600;color:#eee}
+.repvue-popover .rv-reviews{margin-top:8px;font-size:11px;color:#999;max-height:120px;overflow-y:auto}
+.repvue-popover .rv-review{padding:4px 0;border-bottom:1px solid #1e1e1e}
 
 /* table */
 .tbl{width:100%;border-collapse:collapse}
@@ -1884,6 +2055,37 @@ var _jobsById = {};
 var _allJobs = [];
 var _currentJobsTab = 'top';
 var _jobsRetries = 0;
+var _repvueData = {};
+
+function toggleRepVuePopover(jobId) {
+  var pop = document.getElementById('rv-pop-' + jobId);
+  if (!pop) return;
+  var isShowing = pop.classList.contains('show');
+  // Close all popovers first
+  var allPops = document.querySelectorAll('.repvue-popover.show');
+  for (var i = 0; i < allPops.length; i++) allPops[i].classList.remove('show');
+  if (!isShowing) pop.classList.add('show');
+}
+
+// Close RepVue popovers when clicking outside
+document.addEventListener('click', function() {
+  var allPops = document.querySelectorAll('.repvue-popover.show');
+  for (var i = 0; i < allPops.length; i++) allPops[i].classList.remove('show');
+});
+
+function loadRepVueData(companyName) {
+  if (_repvueData[companyName] !== undefined) return;
+  _repvueData[companyName] = null; // mark as loading
+  fetch('/api/repvue/' + encodeURIComponent(companyName))
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d && d.data) {
+        _repvueData[companyName] = d.data;
+        renderJobs(); // re-render to show badge
+      }
+    })
+    .catch(function() { /* ignore RepVue failures */ });
+}
 
 function showJobsTab(tab) {
   _currentJobsTab = tab;
@@ -1915,6 +2117,50 @@ function jobAge(j) {
   return Math.floor(days / 30) + 'mo ago';
 }
 
+function formatSalaryEstimate(est) {
+  if (!est) return '';
+  var bLow = Math.round(est.baseLow / 1000);
+  var bHigh = Math.round(est.baseHigh / 1000);
+  var oLow = Math.round(est.oteLow / 1000);
+  var oHigh = Math.round(est.oteHigh / 1000);
+  var tooltip = esc(est.confidence) + ' confidence';
+  if (est.sources && est.sources.length) tooltip += ' \\u00B7 Sources: ' + esc(est.sources.join(', '));
+  if (est.notes) tooltip += ' \\u00B7 ' + esc(est.notes);
+  return '<span class="salary-estimated salary-tooltip"><span class="est-prefix">~</span> $' + bLow + 'k-$' + bHigh + 'k base / $' + oLow + 'k-$' + oHigh + 'k OTE<span class="tooltip-text">' + tooltip + '</span></span>';
+}
+
+function renderRepVueBadge(j) {
+  var rv = _repvueData[j.company];
+  if (!rv) return '';
+  var score = rv.repVueScore != null ? rv.repVueScore : '?';
+  var pct = rv.percentHittingQuota;
+  var dotClass = pct == null ? 'rv-yellow' : (pct > 50 ? 'rv-green' : (pct >= 40 ? 'rv-yellow' : 'rv-red'));
+  var quotaText = rv.quotaAttainment != null ? rv.quotaAttainment + '%' : 'N/A';
+  var pctText = pct != null ? pct + '%' : 'N/A';
+
+  var popoverHtml = '<div class="repvue-popover" id="rv-pop-' + j.id + '">' +
+    '<h4>RepVue: ' + esc(j.company) + '</h4>' +
+    '<div class="rv-row"><span class="rv-label">Overall Score</span><span class="rv-val">' + score + '/100</span></div>' +
+    '<div class="rv-row"><span class="rv-label">Quota Attainment</span><span class="rv-val">' + quotaText + '</span></div>' +
+    '<div class="rv-row"><span class="rv-label">% Hitting Quota</span><span class="rv-val">' + pctText + '</span></div>' +
+    (rv.baseSalaryRange ? '<div class="rv-row"><span class="rv-label">Base Salary</span><span class="rv-val">' + esc(rv.baseSalaryRange) + '</span></div>' : '') +
+    (rv.oteSalaryRange ? '<div class="rv-row"><span class="rv-label">OTE</span><span class="rv-val">' + esc(rv.oteSalaryRange) + '</span></div>' : '') +
+    (rv.cultureRating != null ? '<div class="rv-row"><span class="rv-label">Culture</span><span class="rv-val">' + rv.cultureRating + '/5</span></div>' : '') +
+    (rv.productRating != null ? '<div class="rv-row"><span class="rv-label">Product</span><span class="rv-val">' + rv.productRating + '/5</span></div>' : '') +
+    (rv.inboundLeadFlow ? '<div class="rv-row"><span class="rv-label">Inbound Lead Flow</span><span class="rv-val">' + esc(rv.inboundLeadFlow) + '</span></div>' : '');
+
+  if (rv.reviews && rv.reviews.length) {
+    popoverHtml += '<div class="rv-reviews"><strong>Recent Reviews:</strong>';
+    for (var i = 0; i < rv.reviews.length; i++) {
+      popoverHtml += '<div class="rv-review">' + esc(rv.reviews[i].substring(0, 200)) + '</div>';
+    }
+    popoverHtml += '</div>';
+  }
+  popoverHtml += '</div>';
+
+  return '<span class="repvue-badge" onclick="toggleRepVuePopover(' + j.id + ');event.stopPropagation()"><span class="rv-dot ' + dotClass + '"></span>RV ' + score + popoverHtml + '</span>';
+}
+
 function renderJobCard(j, opts) {
   opts = opts || {};
   var barColor = j.match_score >= 80 ? 'var(--green)' : j.match_score >= 50 ? 'var(--gold)' : 'var(--red)';
@@ -1923,6 +2169,17 @@ function renderJobCard(j, opts) {
   var savedDate = (opts.showSavedDate && j.saved_at) ? '<div class="saved-date">Saved ' + new Date(j.saved_at).toLocaleDateString() + '</div>' : '';
   var saveLabel = isSaved ? 'Saved' : 'Save';
   var saveClass = isSaved ? 'save-btn saved' : 'save-btn';
+
+  // Salary display logic
+  var salaryHtml = '';
+  if (j.salary && j.salary !== 'Unknown' && j.salary !== 'N/A' && j.salary.trim() !== '') {
+    salaryHtml = '<span style="color:var(--green)">\\uD83D\\uDCB0 ' + esc(j.salary) + '</span>';
+  } else if (j.salary_estimate) {
+    salaryHtml = formatSalaryEstimate(typeof j.salary_estimate === 'string' ? JSON.parse(j.salary_estimate) : j.salary_estimate);
+  }
+
+  var repvueBadge = renderRepVueBadge(j);
+
   return '<div class="card">' +
     '<div class="card-head">' +
       '<div class="score-row"><span>Match Score</span><span class="score-val">' + esc(j.match_score) + ' / 100</span></div>' +
@@ -1933,7 +2190,8 @@ function renderJobCard(j, opts) {
     '</div>' +
     '<div class="card-meta">' +
       '<span>\\uD83D\\uDCCD ' + esc(j.location) + '</span>' +
-      (j.salary ? '<span>\\uD83D\\uDCB0 ' + esc(j.salary) + '</span>' : '') +
+      salaryHtml +
+      repvueBadge +
       (j.source ? '<span class="source-badge">' + esc(j.source) + '</span>' : '') +
       (jobAge(j) ? '<span class="age-badge">' + jobAge(j) + '</span>' : '') +
     '</div>' +
@@ -1998,6 +2256,9 @@ async function loadJobs() {
     jobs.forEach(function(j) { _jobsById[j.id] = j; });
     _jobsRetries = 0;
     renderJobs();
+    // Trigger RepVue data loading for unique companies
+    var companies = {};
+    jobs.forEach(function(j) { if (j.company && !companies[j.company]) { companies[j.company] = true; loadRepVueData(j.company); } });
   } catch(e) {
     console.error('loadJobs failed:', e);
     _jobsRetries++;
