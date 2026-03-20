@@ -3,16 +3,6 @@
 //   REPVUE_EMAIL    — your RepVue account email
 //   REPVUE_PASSWORD — your RepVue account password
 
-// Dynamic import to avoid crash if playwright browsers aren't installed
-let chromium: typeof import('playwright')['chromium'] | null = null;
-try {
-  const pw = await import('playwright');
-  chromium = pw.chromium;
-} catch {
-  // Playwright not installed — RepVue features silently disabled
-}
-type Browser = import('playwright').Browser;
-
 export interface RepVueData {
   companyName: string;
   repVueScore: number | null;
@@ -30,7 +20,6 @@ export interface RepVueData {
 /**
  * Convert a company display name into the RepVue URL slug.
  * "Pure Storage" → "PureStorage", "Hewlett Packard Enterprise" → "HewlettPackardEnterprise"
- * Strips suffixes like "Inc", "Inc.", "LLC", parenthesised text, pipes, etc.
  */
 function toRepVueSlug(name: string): string {
   let cleaned = name
@@ -42,157 +31,239 @@ function toRepVueSlug(name: string): string {
   return cleaned.replace(/\s+/g, '');
 }
 
-export async function scrapeRepVue(companyName: string): Promise<RepVueData | null> {
-  if (!chromium) {
+// Common headers to avoid bot detection
+const BROWSER_HEADERS: Record<string, string> = {
+  'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Cache-Control': 'no-cache',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'none',
+  'Sec-Fetch-User': '?1',
+  'Upgrade-Insecure-Requests': '1',
+};
+
+/**
+ * Try to extract RepVue data using plain HTTP fetch (no browser required).
+ * Works by fetching the company page HTML and parsing __NEXT_DATA__ or text.
+ */
+async function fetchRepVueData(companyName: string): Promise<RepVueData | null> {
+  const slug = toRepVueSlug(companyName);
+  const url = `https://www.repvue.com/companies/${slug}`;
+  console.log(`RepVue [fetch]: trying ${url}`);
+
+  try {
+    const res = await fetch(url, {
+      headers: BROWSER_HEADERS,
+      redirect: 'follow',
+    });
+
+    console.log(`RepVue [fetch]: ${url} → ${res.status}`);
+
+    if (!res.ok) {
+      // Try alternate slug formats for multi-word names
+      // e.g., "hewlett-packard-enterprise" or lowercase
+      const altSlug = companyName
+        .replace(/\s*\|.*$/, '')
+        .replace(/\s*\(.*?\)\s*/g, '')
+        .replace(/,?\s*(Inc\.?|LLC|Ltd\.?|Corp\.?|Corporation|Company|Co\.?)$/i, '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/(^-|-$)/g, '');
+
+      if (altSlug !== slug.toLowerCase()) {
+        const altUrl = `https://www.repvue.com/companies/${altSlug}`;
+        console.log(`RepVue [fetch]: trying alternate slug: ${altUrl}`);
+        const altRes = await fetch(altUrl, { headers: BROWSER_HEADERS, redirect: 'follow' });
+        console.log(`RepVue [fetch]: ${altUrl} → ${altRes.status}`);
+        if (!altRes.ok) return null;
+        return parseRepVueHtml(await altRes.text(), companyName);
+      }
+      return null;
+    }
+
+    return parseRepVueHtml(await res.text(), companyName);
+  } catch (err) {
+    console.error(`RepVue [fetch] error for "${companyName}":`, err);
     return null;
   }
+}
+
+/**
+ * Parse RepVue company page HTML for embedded data.
+ */
+function parseRepVueHtml(html: string, companyName: string): RepVueData | null {
+  let repVueScore: number | null = null;
+  let quotaAttainment: number | null = null;
+  let percentHittingQuota: number | null = null;
+  let cultureRating: number | null = null;
+  let productRating: number | null = null;
+  let baseSalaryRange: string | null = null;
+  let oteSalaryRange: string | null = null;
+  let inboundLeadFlow: string | null = null;
+
+  // ── Strategy 1: Parse __NEXT_DATA__ JSON ──────────────────────────
+  const nextDataMatch = html.match(/<script\s+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+  if (nextDataMatch) {
+    try {
+      const nextData = JSON.parse(nextDataMatch[1]);
+      const props = nextData?.props?.pageProps;
+      if (props) {
+        console.log(`RepVue [parse]: __NEXT_DATA__ pageProps keys: ${Object.keys(props).join(', ')}`);
+
+        // Walk through props looking for score-like fields
+        const findData = (obj: any): void => {
+          if (!obj || typeof obj !== 'object') return;
+          for (const [key, val] of Object.entries(obj)) {
+            const k = key.toLowerCase();
+            if (typeof val === 'number') {
+              if (k.includes('repvuescore') || k.includes('repvue_score') || k === 'score' || k === 'overallscore' || k === 'overall_score') {
+                if (repVueScore === null && val > 0 && val <= 100) repVueScore = val;
+              }
+              if (k.includes('quotaattainment') || k.includes('quota_attainment')) {
+                if (quotaAttainment === null) quotaAttainment = val;
+              }
+              if (k.includes('percenthitting') || k.includes('percent_hitting') || k.includes('hittingquota') || k.includes('hitting_quota')) {
+                if (percentHittingQuota === null) percentHittingQuota = val;
+              }
+              if (k.includes('culture')) {
+                if (cultureRating === null && val > 0 && val <= 5) cultureRating = val;
+              }
+              if (k.includes('product') && (k.includes('rating') || k.includes('market') || k.includes('fit'))) {
+                if (productRating === null && val > 0 && val <= 5) productRating = val;
+              }
+            }
+            if (typeof val === 'string') {
+              if (k.includes('basesalary') || k.includes('base_salary')) baseSalaryRange = val;
+              if (k.includes('otesalary') || k.includes('ote_salary') || k === 'ote') oteSalaryRange = val;
+              if (k.includes('inbound') && k.includes('lead')) inboundLeadFlow = val;
+            }
+            // Recurse into nested objects (but not too deep)
+            if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
+              findData(val);
+            }
+          }
+        };
+        findData(props);
+      }
+    } catch (e) {
+      console.log(`RepVue [parse]: failed to parse __NEXT_DATA__: ${e}`);
+    }
+  } else {
+    console.log('RepVue [parse]: no __NEXT_DATA__ found in HTML');
+  }
+
+  // ── Strategy 2: Regex on raw HTML text ────────────────────────────
+  if (repVueScore === null) {
+    // Strip HTML tags for text analysis
+    const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+
+    const scoreMatch = text.match(/RepVue\s*Score[:\s]*(\d+(?:\.\d+)?)/i)
+      || text.match(/Overall\s*Score[:\s]*(\d+(?:\.\d+)?)/i);
+    if (scoreMatch) repVueScore = parseFloat(scoreMatch[1]);
+
+    const quotaMatch = text.match(/(\d+(?:\.\d+)?)\s*%\s*(?:of\s+reps?\s+)?(?:hitting|meeting|attaining)\s+quota/i)
+      || text.match(/Quota\s*Attainment[:\s]*(\d+(?:\.\d+)?)/i);
+    if (quotaMatch) percentHittingQuota = parseFloat(quotaMatch[1]);
+
+    const cultureMatch = text.match(/Culture[^:]*?[:\s]*(\d+(?:\.\d+)?)\s*(?:\/\s*5|out of 5)/i);
+    if (cultureMatch) cultureRating = parseFloat(cultureMatch[1]);
+
+    const productMatch = text.match(/Product[\s-]*Market\s*Fit[^:]*?[:\s]*(\d+(?:\.\d+)?)\s*(?:\/\s*5|out of 5)/i);
+    if (productMatch) productRating = parseFloat(productMatch[1]);
+
+    // Log a snippet for debugging
+    const preview = text.substring(0, 800);
+    console.log(`RepVue [parse]: text preview: ${preview}`);
+  }
+
+  if (repVueScore === null) {
+    console.log(`RepVue [parse]: could not extract score for "${companyName}"`);
+    return null;
+  }
+
+  console.log(`RepVue [parse]: extracted score ${repVueScore} for "${companyName}"`);
+
+  return {
+    companyName,
+    repVueScore,
+    quotaAttainment,
+    percentHittingQuota,
+    baseSalaryRange,
+    oteSalaryRange,
+    cultureRating,
+    productRating,
+    inboundLeadFlow,
+    reviews: [],
+    scrapedAt: new Date().toISOString(),
+  };
+}
+
+// ── Playwright fallback (only if fetch approach fails) ──────────────────
+let chromium: typeof import('playwright')['chromium'] | null = null;
+try {
+  const pw = await import('playwright');
+  chromium = pw.chromium;
+  // Verify browsers are actually installed
+  const browser = await chromium.launch({ headless: true });
+  await browser.close();
+  console.log('RepVue: Playwright browsers available');
+} catch {
+  chromium = null;
+  console.log('RepVue: Playwright browsers NOT available — using fetch-only mode');
+}
+type Browser = import('playwright').Browser;
+
+async function playwrightRepVue(companyName: string): Promise<RepVueData | null> {
+  if (!chromium) return null;
+
   const email = process.env.REPVUE_EMAIL;
   const password = process.env.REPVUE_PASSWORD;
-  if (!email || !password) {
-    console.log('RepVue credentials not configured — skipping');
-    return null;
-  }
+  if (!email || !password) return null;
 
   let browser: Browser | null = null;
   try {
     browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    });
+    const context = await browser.newContext({ userAgent: BROWSER_HEADERS['User-Agent'] });
     const page = await context.newPage();
     page.setDefaultTimeout(15000);
 
-    // ── Step 1: Log in ────────────────────────────────────────────────
+    // Log in
     await page.goto('https://www.repvue.com/login', { waitUntil: 'networkidle' });
     await page.fill('input[name="email"], input[type="email"]', email);
     await page.fill('input[name="password"], input[type="password"]', password);
     await page.click('button[type="submit"]');
+    await page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15000 }).catch(() =>
+      page.waitForLoadState('networkidle', { timeout: 10000 })
+    );
+    console.log(`RepVue [playwright]: logged in, at ${page.url()}`);
 
-    // Wait for navigation away from the login page
-    await page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15000 }).catch(() => {
-      return page.waitForLoadState('networkidle', { timeout: 10000 });
-    });
-    console.log(`RepVue: logged in, now at ${page.url()}`);
-
-    // ── Step 2: Navigate directly to company page ─────────────────────
+    // Go to company page
     const slug = toRepVueSlug(companyName);
-    const companyUrl = `https://www.repvue.com/companies/${slug}`;
-    console.log(`RepVue: navigating to ${companyUrl}`);
-    const response = await page.goto(companyUrl, { waitUntil: 'networkidle' });
+    await page.goto(`https://www.repvue.com/companies/${slug}`, { waitUntil: 'networkidle' });
+    console.log(`RepVue [playwright]: navigated to ${page.url()}`);
 
-    // Check if the page loaded (not a 404 or redirect to search)
-    const finalUrl = page.url();
-    const status = response?.status() ?? 0;
-    console.log(`RepVue: landed on ${finalUrl} (status ${status})`);
-
-    if (status === 404 || finalUrl.includes('/search') || finalUrl.includes('/404')) {
-      // Direct slug didn't work — try searching instead
-      console.log(`RepVue: slug "${slug}" not found, trying search fallback`);
-      await page.goto(`https://www.repvue.com/companies?q=${encodeURIComponent(companyName)}`, { waitUntil: 'networkidle' });
-      // Look for the first company link in results
-      const firstLink = page.locator('a[href*="/companies/"]').first();
-      const linkVisible = await firstLink.isVisible().catch(() => false);
-      if (!linkVisible) {
-        console.log(`RepVue: company "${companyName}" not found via search either`);
-        return null;
-      }
-      await firstLink.click();
-      await page.waitForLoadState('networkidle', { timeout: 10000 });
-      console.log(`RepVue: search redirected to ${page.url()}`);
-    }
-
-    // ── Step 3: Extract data from the page ────────────────────────────
-    // Wait a moment for any client-side rendering
     await page.waitForTimeout(2000);
-
-    // Try to find __NEXT_DATA__ (Next.js pages embed data as JSON)
-    const nextData = await page.evaluate(() => {
-      const el = document.getElementById('__NEXT_DATA__');
-      if (el?.textContent) {
-        try { return JSON.parse(el.textContent); } catch { return null; }
-      }
-      return null;
-    });
-
-    let repVueScore: number | null = null;
-    let quotaAttainment: number | null = null;
-    let percentHittingQuota: number | null = null;
-    let cultureRating: number | null = null;
-    let productRating: number | null = null;
-    let baseSalaryRange: string | null = null;
-    let oteSalaryRange: string | null = null;
-    let inboundLeadFlow: string | null = null;
-    const reviews: string[] = [];
-
-    if (nextData?.props?.pageProps) {
-      // Extract from Next.js page data
-      const props = nextData.props.pageProps;
-      console.log(`RepVue: found __NEXT_DATA__, pageProps keys: ${Object.keys(props).join(', ')}`);
-
-      // Try common data shapes — the exact key depends on the site
-      const org = props.organization || props.company || props.org || props;
-      if (org) {
-        repVueScore = org.repvueScore ?? org.repVueScore ?? org.overall_score ?? org.score ?? null;
-        quotaAttainment = org.quotaAttainment ?? org.quota_attainment ?? null;
-        percentHittingQuota = org.percentHittingQuota ?? org.percent_hitting_quota ?? null;
-        cultureRating = org.cultureRating ?? org.culture_rating ?? org.culture ?? null;
-        productRating = org.productRating ?? org.product_rating ?? org.productMarketFit ?? null;
-        baseSalaryRange = org.baseSalary ?? org.base_salary ?? null;
-        oteSalaryRange = org.oteSalary ?? org.ote_salary ?? org.ote ?? null;
-        inboundLeadFlow = org.inboundLeadFlow ?? org.inbound_lead_flow ?? null;
-      }
-    }
-
-    // Fallback: extract from visible page text
-    if (repVueScore === null) {
-      console.log('RepVue: __NEXT_DATA__ extraction missed score, trying page text...');
-      const pageText = await page.evaluate(() => document.body.innerText);
-
-      // Look for RepVue Score pattern (usually a prominent number like "85.89")
-      const scoreMatch = pageText.match(/RepVue\s*Score[:\s]*(\d+(?:\.\d+)?)/i)
-        || pageText.match(/Overall\s*Score[:\s]*(\d+(?:\.\d+)?)/i);
-      if (scoreMatch) repVueScore = parseFloat(scoreMatch[1]);
-
-      // Quota attainment
-      const quotaMatch = pageText.match(/(\d+(?:\.\d+)?)\s*%\s*(?:of\s+reps?\s+)?(?:hitting|meeting|attaining)\s+quota/i)
-        || pageText.match(/Quota\s*Attainment[:\s]*(\d+(?:\.\d+)?)/i);
-      if (quotaMatch) percentHittingQuota = parseFloat(quotaMatch[1]);
-
-      // Culture rating (out of 5)
-      const cultureMatch = pageText.match(/Culture[^:]*?[:\s]*(\d+(?:\.\d+)?)\s*(?:\/\s*5|out of 5)/i);
-      if (cultureMatch) cultureRating = parseFloat(cultureMatch[1]);
-
-      // Product-Market Fit
-      const productMatch = pageText.match(/Product[\s-]*Market\s*Fit[^:]*?[:\s]*(\d+(?:\.\d+)?)\s*(?:\/\s*5|out of 5)/i);
-      if (productMatch) productRating = parseFloat(productMatch[1]);
-
-      // Log a snippet of the page text for debugging
-      console.log(`RepVue: page text preview (first 500 chars): ${pageText.substring(0, 500).replace(/\n/g, ' | ')}`);
-    }
-
-    // If we still have no score, this company page didn't load properly
-    if (repVueScore === null) {
-      console.log(`RepVue: could not extract score for "${companyName}" — page may require different selectors`);
-      // Return partial data if we have anything
-    }
-
-    return {
-      companyName,
-      repVueScore,
-      quotaAttainment,
-      percentHittingQuota,
-      baseSalaryRange,
-      oteSalaryRange,
-      cultureRating,
-      productRating,
-      inboundLeadFlow,
-      reviews,
-      scrapedAt: new Date().toISOString(),
-    };
+    const html = await page.content();
+    return parseRepVueHtml(html, companyName);
   } catch (e) {
-    console.error(`RepVue scrape error for "${companyName}":`, e);
+    console.error(`RepVue [playwright] error for "${companyName}":`, e);
     return null;
   } finally {
     if (browser) await browser.close().catch(() => {});
   }
+}
+
+// ── Public entry point ──────────────────────────────────────────────────
+export async function scrapeRepVue(companyName: string): Promise<RepVueData | null> {
+  // Try fetch first (fast, no browser needed)
+  const fetchResult = await fetchRepVueData(companyName);
+  if (fetchResult) return fetchResult;
+
+  // Fall back to Playwright if available
+  console.log(`RepVue: fetch failed for "${companyName}", trying Playwright fallback...`);
+  return playwrightRepVue(companyName);
 }
