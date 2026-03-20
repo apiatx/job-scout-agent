@@ -27,6 +27,21 @@ export interface RepVueData {
   scrapedAt: string;
 }
 
+/**
+ * Convert a company display name into the RepVue URL slug.
+ * "Pure Storage" → "PureStorage", "Hewlett Packard Enterprise" → "HewlettPackardEnterprise"
+ * Strips suffixes like "Inc", "Inc.", "LLC", parenthesised text, pipes, etc.
+ */
+function toRepVueSlug(name: string): string {
+  let cleaned = name
+    .replace(/\s*\|.*$/, '')            // strip pipe-suffix ("HPE | Aruba" → "HPE")
+    .replace(/\s*\(.*?\)\s*/g, '')      // strip parenthesised text
+    .replace(/,?\s*(Inc\.?|LLC|Ltd\.?|Corp\.?|Corporation|Company|Co\.?)$/i, '')
+    .trim();
+  // Remove spaces — RepVue slugs are PascalCase without separators
+  return cleaned.replace(/\s+/g, '');
+}
+
 export async function scrapeRepVue(companyName: string): Promise<RepVueData | null> {
   if (!chromium) {
     return null;
@@ -41,69 +56,124 @@ export async function scrapeRepVue(companyName: string): Promise<RepVueData | nu
   let browser: Browser | null = null;
   try {
     browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext();
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    });
     const page = await context.newPage();
     page.setDefaultTimeout(15000);
 
-    // Navigate to RepVue and log in
-    await page.goto('https://www.repvue.com/login');
+    // ── Step 1: Log in ────────────────────────────────────────────────
+    await page.goto('https://www.repvue.com/login', { waitUntil: 'networkidle' });
     await page.fill('input[name="email"], input[type="email"]', email);
     await page.fill('input[name="password"], input[type="password"]', password);
     await page.click('button[type="submit"]');
 
-    // Wait for login to complete
-    await page.waitForURL('**/dashboard**', { timeout: 15000 }).catch(() => {
-      // Some accounts redirect elsewhere; just wait for navigation
+    // Wait for navigation away from the login page
+    await page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15000 }).catch(() => {
       return page.waitForLoadState('networkidle', { timeout: 10000 });
     });
+    console.log(`RepVue: logged in, now at ${page.url()}`);
 
-    // Search for the company
-    await page.goto(`https://www.repvue.com/search?q=${encodeURIComponent(companyName)}`);
-    await page.waitForLoadState('networkidle', { timeout: 10000 });
+    // ── Step 2: Navigate directly to company page ─────────────────────
+    const slug = toRepVueSlug(companyName);
+    const companyUrl = `https://www.repvue.com/companies/${slug}`;
+    console.log(`RepVue: navigating to ${companyUrl}`);
+    const response = await page.goto(companyUrl, { waitUntil: 'networkidle' });
 
-    // Click the first matching company result
-    const firstResult = page.locator('a[href*="/companies/"], a[href*="/org/"]').first();
-    const resultExists = await firstResult.isVisible().catch(() => false);
-    if (!resultExists) {
-      console.log(`RepVue: company "${companyName}" not found in search results`);
-      return null;
+    // Check if the page loaded (not a 404 or redirect to search)
+    const finalUrl = page.url();
+    const status = response?.status() ?? 0;
+    console.log(`RepVue: landed on ${finalUrl} (status ${status})`);
+
+    if (status === 404 || finalUrl.includes('/search') || finalUrl.includes('/404')) {
+      // Direct slug didn't work — try searching instead
+      console.log(`RepVue: slug "${slug}" not found, trying search fallback`);
+      await page.goto(`https://www.repvue.com/companies?q=${encodeURIComponent(companyName)}`, { waitUntil: 'networkidle' });
+      // Look for the first company link in results
+      const firstLink = page.locator('a[href*="/companies/"]').first();
+      const linkVisible = await firstLink.isVisible().catch(() => false);
+      if (!linkVisible) {
+        console.log(`RepVue: company "${companyName}" not found via search either`);
+        return null;
+      }
+      await firstLink.click();
+      await page.waitForLoadState('networkidle', { timeout: 10000 });
+      console.log(`RepVue: search redirected to ${page.url()}`);
     }
-    await firstResult.click();
-    await page.waitForLoadState('networkidle', { timeout: 10000 });
 
-    // Scrape data from the company page
-    const getText = async (sel: string) => {
-      try {
-        const el = page.locator(sel).first();
-        const visible = await el.isVisible().catch(() => false);
-        return visible ? (await el.textContent())?.trim() || null : null;
-      } catch { return null; }
-    };
+    // ── Step 3: Extract data from the page ────────────────────────────
+    // Wait a moment for any client-side rendering
+    await page.waitForTimeout(2000);
 
-    const getNum = async (sel: string): Promise<number | null> => {
-      const text = await getText(sel);
-      if (!text) return null;
-      const num = parseFloat(text.replace(/[^0-9.]/g, ''));
-      return isNaN(num) ? null : num;
-    };
+    // Try to find __NEXT_DATA__ (Next.js pages embed data as JSON)
+    const nextData = await page.evaluate(() => {
+      const el = document.getElementById('__NEXT_DATA__');
+      if (el?.textContent) {
+        try { return JSON.parse(el.textContent); } catch { return null; }
+      }
+      return null;
+    });
 
-    // Try common selectors for RepVue company pages
-    const repVueScore = await getNum('[data-testid="overall-score"], .overall-score, .score-value');
-    const quotaAttainment = await getNum('[data-testid="quota-attainment"], .quota-attainment');
-    const percentHittingQuota = await getNum('[data-testid="percent-hitting-quota"], .percent-hitting');
-    const baseSalaryRange = await getText('[data-testid="base-salary"], .base-salary');
-    const oteSalaryRange = await getText('[data-testid="ote-salary"], .ote-salary');
-    const cultureRating = await getNum('[data-testid="culture-rating"], .culture-rating');
-    const productRating = await getNum('[data-testid="product-rating"], .product-rating');
-    const inboundLeadFlow = await getText('[data-testid="inbound-leads"], .inbound-leads');
-
-    // Scrape top 3 reviews
+    let repVueScore: number | null = null;
+    let quotaAttainment: number | null = null;
+    let percentHittingQuota: number | null = null;
+    let cultureRating: number | null = null;
+    let productRating: number | null = null;
+    let baseSalaryRange: string | null = null;
+    let oteSalaryRange: string | null = null;
+    let inboundLeadFlow: string | null = null;
     const reviews: string[] = [];
-    const reviewEls = page.locator('.review-text, .review-content, [data-testid="review"]');
-    const reviewCount = Math.min(await reviewEls.count(), 3);
-    for (let i = 0; i < reviewCount; i++) {
-      const text = await reviewEls.nth(i).textContent();
-      if (text?.trim()) reviews.push(text.trim());
+
+    if (nextData?.props?.pageProps) {
+      // Extract from Next.js page data
+      const props = nextData.props.pageProps;
+      console.log(`RepVue: found __NEXT_DATA__, pageProps keys: ${Object.keys(props).join(', ')}`);
+
+      // Try common data shapes — the exact key depends on the site
+      const org = props.organization || props.company || props.org || props;
+      if (org) {
+        repVueScore = org.repvueScore ?? org.repVueScore ?? org.overall_score ?? org.score ?? null;
+        quotaAttainment = org.quotaAttainment ?? org.quota_attainment ?? null;
+        percentHittingQuota = org.percentHittingQuota ?? org.percent_hitting_quota ?? null;
+        cultureRating = org.cultureRating ?? org.culture_rating ?? org.culture ?? null;
+        productRating = org.productRating ?? org.product_rating ?? org.productMarketFit ?? null;
+        baseSalaryRange = org.baseSalary ?? org.base_salary ?? null;
+        oteSalaryRange = org.oteSalary ?? org.ote_salary ?? org.ote ?? null;
+        inboundLeadFlow = org.inboundLeadFlow ?? org.inbound_lead_flow ?? null;
+      }
+    }
+
+    // Fallback: extract from visible page text
+    if (repVueScore === null) {
+      console.log('RepVue: __NEXT_DATA__ extraction missed score, trying page text...');
+      const pageText = await page.evaluate(() => document.body.innerText);
+
+      // Look for RepVue Score pattern (usually a prominent number like "85.89")
+      const scoreMatch = pageText.match(/RepVue\s*Score[:\s]*(\d+(?:\.\d+)?)/i)
+        || pageText.match(/Overall\s*Score[:\s]*(\d+(?:\.\d+)?)/i);
+      if (scoreMatch) repVueScore = parseFloat(scoreMatch[1]);
+
+      // Quota attainment
+      const quotaMatch = pageText.match(/(\d+(?:\.\d+)?)\s*%\s*(?:of\s+reps?\s+)?(?:hitting|meeting|attaining)\s+quota/i)
+        || pageText.match(/Quota\s*Attainment[:\s]*(\d+(?:\.\d+)?)/i);
+      if (quotaMatch) percentHittingQuota = parseFloat(quotaMatch[1]);
+
+      // Culture rating (out of 5)
+      const cultureMatch = pageText.match(/Culture[^:]*?[:\s]*(\d+(?:\.\d+)?)\s*(?:\/\s*5|out of 5)/i);
+      if (cultureMatch) cultureRating = parseFloat(cultureMatch[1]);
+
+      // Product-Market Fit
+      const productMatch = pageText.match(/Product[\s-]*Market\s*Fit[^:]*?[:\s]*(\d+(?:\.\d+)?)\s*(?:\/\s*5|out of 5)/i);
+      if (productMatch) productRating = parseFloat(productMatch[1]);
+
+      // Log a snippet of the page text for debugging
+      console.log(`RepVue: page text preview (first 500 chars): ${pageText.substring(0, 500).replace(/\n/g, ' | ')}`);
+    }
+
+    // If we still have no score, this company page didn't load properly
+    if (repVueScore === null) {
+      console.log(`RepVue: could not extract score for "${companyName}" — page may require different selectors`);
+      // Return partial data if we have anything
     }
 
     return {

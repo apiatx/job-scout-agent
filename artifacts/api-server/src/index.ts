@@ -919,11 +919,14 @@ app.get('/api/repvue/:companyName', async (req: Request, res: Response) => {
     }
     console.log(`RepVue: got data for "${companyName}" — score: ${data.repVueScore}`);
 
-    await pool.query(
-      `INSERT INTO repvue_cache (company_name, data_json) VALUES ($1, $2)`,
-      [companyName, JSON.stringify(data)]
-    );
-    res.json({ data, cached: false });
+    // Only cache if we actually got a score
+    if (data.repVueScore != null) {
+      await pool.query(
+        `INSERT INTO repvue_cache (company_name, data_json) VALUES ($1, $2)`,
+        [companyName, JSON.stringify(data)]
+      );
+    }
+    res.json({ data: data.repVueScore != null ? data : null, cached: false });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
