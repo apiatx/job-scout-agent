@@ -1,4 +1,4 @@
-modules = ["nodejs-24", "postgresql-16"]
+modules = ["nodejs-24", "postgresql-16", "python-3.11"]
 
 
 [postMerge]
@@ -7,6 +7,7 @@ timeoutMs = 20000
 
 [nix]
 channel = "stable-25_05"
+packages = ["glibcLocales"]
 
 [userenv]
 
