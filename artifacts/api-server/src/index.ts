@@ -910,11 +910,14 @@ app.get('/api/repvue/:companyName', async (req: Request, res: Response) => {
     // Scrape on demand (lazy-load playwright)
     const scrapeRepVueFn = await loadRepVue();
     if (!scrapeRepVueFn) { res.json({ data: null, unavailable: true }); return; }
+    console.log(`RepVue: scraping data for "${companyName}"...`);
     const data = await scrapeRepVueFn(companyName);
     if (!data) {
+      console.log(`RepVue: no data found for "${companyName}"`);
       res.json({ data: null });
       return;
     }
+    console.log(`RepVue: got data for "${companyName}" — score: ${data.repVueScore}`);
 
     await pool.query(
       `INSERT INTO repvue_cache (company_name, data_json) VALUES ($1, $2)`,
