@@ -2537,22 +2537,40 @@ function displayResearchBrief(data) {
   showResearchTab('interview');
 }
 
+async function _safeFetchJson(url, opts) {
+  var res = await fetch(url, opts);
+  var text = await res.text();
+  if (!text || !text.trim()) throw new Error('Empty response from server — retrying...');
+  try {
+    var json = JSON.parse(text);
+  } catch(e) {
+    if (text.includes('<!DOCTYPE') || text.includes('<html')) {
+      throw new Error('Server proxy timeout — still working, retrying...');
+    }
+    throw new Error('Invalid response: ' + text.substring(0, 100));
+  }
+  if (!res.ok) throw new Error(json.error || 'HTTP ' + res.status);
+  return json;
+}
+
 async function _pollResearch(briefId) {
-  var maxAttempts = 120; // poll for up to ~4 minutes
+  var maxAttempts = 150; // poll for up to ~5 minutes
+  var consecutiveErrors = 0;
   for (var i = 0; i < maxAttempts; i++) {
     await new Promise(function(r) { setTimeout(r, 2000); });
     try {
-      var pollRes = await fetch('/api/research/status/' + briefId);
-      if (!pollRes.ok) continue;
-      var pollData = await pollRes.json();
+      var pollData = await _safeFetchJson('/api/research/status/' + briefId);
+      consecutiveErrors = 0;
       if (pollData.status === 'ready') return pollData;
       if (pollData.status === 'error') throw new Error(pollData.error || 'Research failed');
     } catch(e) {
-      if (e.message && e.message !== 'Research failed' && !e.message.startsWith('Failed')) continue;
-      throw e;
+      consecutiveErrors++;
+      if (e.message === 'Research failed' || e.message.startsWith('Failed to parse')) throw e;
+      if (consecutiveErrors > 5) throw new Error('Lost connection to server — please try again');
+      // Otherwise keep polling (transient proxy/network error)
     }
   }
-  throw new Error('Research timed out — please try again');
+  throw new Error('Research is taking too long — please try again');
 }
 
 async function researchCompany(jobId) {
@@ -2576,16 +2594,23 @@ async function researchCompany(jobId) {
   }, 1000);
 
   try {
-    var res = await fetch('/api/jobs/' + jobId + '/research', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({})
-    });
-    if (!res.ok) {
-      var errData = await res.json();
-      throw new Error(errData.error || 'HTTP ' + res.status);
+    // Try initial POST up to 3 times (Replit proxy can be flaky)
+    var data;
+    var lastErr;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        data = await _safeFetchJson('/api/jobs/' + jobId + '/research', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({})
+        });
+        break;
+      } catch(e) {
+        lastErr = e;
+        if (attempt < 2) await new Promise(function(r) { setTimeout(r, 1000); });
+      }
     }
-    var data = await res.json();
+    if (!data) throw lastErr;
     if (data.status === 'processing') {
       data = await _pollResearch(data.id);
     }
@@ -2616,16 +2641,22 @@ async function refreshResearch() {
   }, 1000);
 
   try {
-    var res = await fetch('/api/jobs/' + _researchJobId + '/research', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ refresh: true })
-    });
-    if (!res.ok) {
-      var errData = await res.json();
-      throw new Error(errData.error || 'HTTP ' + res.status);
+    var data;
+    var lastErr;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        data = await _safeFetchJson('/api/jobs/' + _researchJobId + '/research', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ refresh: true })
+        });
+        break;
+      } catch(e) {
+        lastErr = e;
+        if (attempt < 2) await new Promise(function(r) { setTimeout(r, 1000); });
+      }
     }
-    var data = await res.json();
+    if (!data) throw lastErr;
     if (data.status === 'processing') {
       data = await _pollResearch(data.id);
     }
