@@ -115,6 +115,8 @@ async function initDb(): Promise<void> {
     try { await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${col} ${type}`); } catch { /* ignore */ }
   };
   await safeAddColumn('research_briefs', 'saved', 'BOOLEAN NOT NULL DEFAULT false');
+  await safeAddColumn('research_briefs', 'status', "TEXT NOT NULL DEFAULT 'ready'");
+  await safeAddColumn('research_briefs', 'error', 'TEXT');
   await safeAddColumn('criteria', 'work_type', "TEXT NOT NULL DEFAULT 'any'");
   await safeAddColumn('jobs', 'saved_at', 'TIMESTAMPTZ');
   await safeAddColumn('scout_runs', 'companies_scanned', 'INT NOT NULL DEFAULT 0');
@@ -686,10 +688,10 @@ app.post('/api/jobs/:id/research', async (req: Request, res: Response) => {
     const job = jobRows[0];
     const companyName = job.company;
 
-    // Check cache (case-insensitive, < 24 hours old)
+    // Check cache (case-insensitive, < 24 hours old, completed)
     if (!forceRefresh) {
       const { rows: cached } = await pool.query(
-        `SELECT * FROM research_briefs WHERE LOWER(company_name) = LOWER($1) AND created_at > NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 1`,
+        `SELECT * FROM research_briefs WHERE LOWER(company_name) = LOWER($1) AND created_at > NOW() - INTERVAL '24 hours' AND status = 'ready' ORDER BY created_at DESC LIMIT 1`,
         [companyName]
       );
       if (cached.length > 0) {
@@ -697,30 +699,74 @@ app.post('/api/jobs/:id/research', async (req: Request, res: Response) => {
           `SELECT careers_url FROM companies WHERE LOWER(name) = LOWER($1) LIMIT 1`,
           [companyName]
         );
-        res.json({ brief: cached[0].brief_json, cached: true, created_at: cached[0].created_at, careers_url: coRows[0]?.careers_url || null, id: cached[0].id, saved: cached[0].saved });
+        res.json({ brief: cached[0].brief_json, cached: true, created_at: cached[0].created_at, careers_url: coRows[0]?.careers_url || null, id: cached[0].id, saved: cached[0].saved, status: 'ready' });
+        return;
+      }
+
+      // Check if already processing
+      const { rows: processing } = await pool.query(
+        `SELECT * FROM research_briefs WHERE LOWER(company_name) = LOWER($1) AND status = 'processing' AND created_at > NOW() - INTERVAL '5 minutes' ORDER BY created_at DESC LIMIT 1`,
+        [companyName]
+      );
+      if (processing.length > 0) {
+        res.json({ status: 'processing', id: processing[0].id });
         return;
       }
     }
 
-    // Look up careers_url from companies table
-    const { rows: companyRows } = await pool.query(
-      `SELECT careers_url FROM companies WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+    // Create a placeholder row with 'processing' status, return immediately
+    const { rows: placeholder } = await pool.query(
+      `INSERT INTO research_briefs (company_name, brief_json, status) VALUES ($1, '{}', 'processing') RETURNING *`,
       [companyName]
     );
-    const careersUrl = companyRows[0]?.careers_url || null;
+    const briefId = placeholder[0].id;
 
-    // Call Claude with web search
-    const brief = await researchCompanyWithClaude(companyName);
+    // Return immediately so Replit proxy doesn't timeout
+    res.json({ status: 'processing', id: briefId });
 
-    // Save to cache
-    const { rows: inserted } = await pool.query(
-      `INSERT INTO research_briefs (company_name, brief_json) VALUES ($1, $2) RETURNING *`,
-      [companyName, JSON.stringify(brief)]
-    );
-
-    res.json({ brief: inserted[0].brief_json, cached: false, created_at: inserted[0].created_at, careers_url: careersUrl, id: inserted[0].id, saved: false });
+    // Run research in background (fire-and-forget)
+    (async () => {
+      try {
+        const brief = await researchCompanyWithClaude(companyName);
+        await pool.query(
+          `UPDATE research_briefs SET brief_json = $1, status = 'ready' WHERE id = $2`,
+          [JSON.stringify(brief), briefId]
+        );
+        console.log(`Research complete for ${companyName} (id=${briefId})`);
+      } catch (e) {
+        console.error(`Research failed for ${companyName}:`, e);
+        await pool.query(
+          `UPDATE research_briefs SET status = 'error', error = $1 WHERE id = $2`,
+          [String(e), briefId]
+        ).catch(() => {});
+      }
+    })();
   } catch (e) {
     console.error('Research company error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// Poll for research status
+app.get('/api/research/status/:id', async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const { rows } = await pool.query('SELECT * FROM research_briefs WHERE id = $1', [id]);
+    if (rows.length === 0) { res.status(404).json({ error: 'Not found' }); return; }
+    const row = rows[0];
+
+    if (row.status === 'ready') {
+      const { rows: coRows } = await pool.query(
+        `SELECT careers_url FROM companies WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+        [row.company_name]
+      );
+      res.json({ status: 'ready', brief: row.brief_json, cached: false, created_at: row.created_at, careers_url: coRows[0]?.careers_url || null, id: row.id, saved: row.saved });
+    } else if (row.status === 'error') {
+      res.json({ status: 'error', error: row.error });
+    } else {
+      res.json({ status: 'processing', id: row.id });
+    }
+  } catch (e) {
     res.status(500).json({ error: String(e) });
   }
 });
@@ -2491,6 +2537,24 @@ function displayResearchBrief(data) {
   showResearchTab('interview');
 }
 
+async function _pollResearch(briefId) {
+  var maxAttempts = 120; // poll for up to ~4 minutes
+  for (var i = 0; i < maxAttempts; i++) {
+    await new Promise(function(r) { setTimeout(r, 2000); });
+    try {
+      var pollRes = await fetch('/api/research/status/' + briefId);
+      if (!pollRes.ok) continue;
+      var pollData = await pollRes.json();
+      if (pollData.status === 'ready') return pollData;
+      if (pollData.status === 'error') throw new Error(pollData.error || 'Research failed');
+    } catch(e) {
+      if (e.message && e.message !== 'Research failed' && !e.message.startsWith('Failed')) continue;
+      throw e;
+    }
+  }
+  throw new Error('Research timed out — please try again');
+}
+
 async function researchCompany(jobId) {
   _researchJobId = jobId;
   var j = _jobsById[jobId] || {};
@@ -2517,12 +2581,15 @@ async function researchCompany(jobId) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({})
     });
-    if (_researchTimer) { clearInterval(_researchTimer); _researchTimer = null; }
     if (!res.ok) {
       var errData = await res.json();
       throw new Error(errData.error || 'HTTP ' + res.status);
     }
     var data = await res.json();
+    if (data.status === 'processing') {
+      data = await _pollResearch(data.id);
+    }
+    if (_researchTimer) { clearInterval(_researchTimer); _researchTimer = null; }
     displayResearchBrief(data);
   } catch(e) {
     if (_researchTimer) { clearInterval(_researchTimer); _researchTimer = null; }
@@ -2554,12 +2621,15 @@ async function refreshResearch() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ refresh: true })
     });
-    if (_researchTimer) { clearInterval(_researchTimer); _researchTimer = null; }
     if (!res.ok) {
       var errData = await res.json();
       throw new Error(errData.error || 'HTTP ' + res.status);
     }
     var data = await res.json();
+    if (data.status === 'processing') {
+      data = await _pollResearch(data.id);
+    }
+    if (_researchTimer) { clearInterval(_researchTimer); _researchTimer = null; }
     displayResearchBrief(data);
   } catch(e) {
     if (_researchTimer) { clearInterval(_researchTimer); _researchTimer = null; }
