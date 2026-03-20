@@ -4,8 +4,7 @@ import { scrapeGreenhouseJobs, scrapeLeverJobs, runJobSpyScraper } from './scrap
 import type { ScrapedJob } from './scraper.js';
 import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
-// Lazy import repvue to avoid crashing if playwright browsers aren't installed
-const loadRepVue = () => import('./lib/repvue.js').then(m => m.scrapeRepVue).catch(() => null);
+// RepVue: link-out only (no scraping — RepVue blocks automated requests)
 
 const { Pool } = pg;
 const app = express();
@@ -892,43 +891,7 @@ app.post('/api/salary-estimates/batch', async (req: Request, res: Response) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-// ── RepVue ──────────────────────────────────────────────────────────────
-app.get('/api/repvue/:companyName', async (req: Request, res: Response) => {
-  try {
-    const companyName = req.params.companyName;
-
-    // Check cache (3-day validity)
-    const { rows: cached } = await pool.query(
-      `SELECT * FROM repvue_cache WHERE LOWER(company_name) = LOWER($1) AND created_at > NOW() - INTERVAL '3 days' ORDER BY created_at DESC LIMIT 1`,
-      [companyName]
-    );
-    if (cached.length > 0) {
-      res.json({ data: cached[0].data_json, cached: true });
-      return;
-    }
-
-    // Scrape on demand (lazy-load playwright)
-    const scrapeRepVueFn = await loadRepVue();
-    if (!scrapeRepVueFn) { res.json({ data: null, unavailable: true }); return; }
-    console.log(`RepVue: scraping data for "${companyName}"...`);
-    const data = await scrapeRepVueFn(companyName);
-    if (!data) {
-      console.log(`RepVue: no data found for "${companyName}"`);
-      res.json({ data: null });
-      return;
-    }
-    console.log(`RepVue: got data for "${companyName}" — score: ${data.repVueScore}`);
-
-    // Only cache if we actually got a score
-    if (data.repVueScore != null) {
-      await pool.query(
-        `INSERT INTO repvue_cache (company_name, data_json) VALUES ($1, $2)`,
-        [companyName, JSON.stringify(data)]
-      );
-    }
-    res.json({ data: data.repVueScore != null ? data : null, cached: false });
-  } catch (e) { res.status(500).json({ error: String(e) }); }
-});
+// ── RepVue (link-out only) ───────────────────────────────────────────────
 
 // Gmail OAuth
 app.get('/api/gmail/status', async (_req, res: Response) => {
@@ -1623,20 +1586,8 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .salary-tooltip{position:relative;cursor:help}
 .salary-tooltip .tooltip-text{visibility:hidden;position:absolute;bottom:120%;left:50%;transform:translateX(-50%);background:#222;color:#ccc;padding:6px 10px;border-radius:6px;font-size:11px;white-space:nowrap;z-index:10;border:1px solid #333}
 .salary-tooltip:hover .tooltip-text{visibility:visible}
-.repvue-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#1a1a2e;border:1px solid #333;color:#7c8dff;cursor:pointer;position:relative}
-.repvue-badge .rv-dot{width:7px;height:7px;border-radius:50%;display:inline-block}
-.rv-green{background:#22c55e}
-.rv-yellow{background:#eab308}
-.rv-red{background:#ef4444}
-.repvue-popover{display:none;position:absolute;top:100%;left:0;margin-top:6px;background:#1a1a2e;border:1px solid #333;border-radius:8px;padding:12px 16px;z-index:100;width:300px;font-size:12px;color:#ccc;box-shadow:0 8px 24px rgba(0,0,0,0.5)}
-.repvue-popover.show{display:block}
-.repvue-popover h4{margin:0 0 8px;font-size:13px;color:#7c8dff}
-.repvue-popover .rv-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #222}
-.repvue-popover .rv-row:last-child{border-bottom:none}
-.repvue-popover .rv-label{color:var(--muted)}
-.repvue-popover .rv-val{font-weight:600;color:#eee}
-.repvue-popover .rv-reviews{margin-top:8px;font-size:11px;color:#999;max-height:120px;overflow-y:auto}
-.repvue-popover .rv-review{padding:4px 0;border-bottom:1px solid #1e1e1e}
+.repvue-link{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#1a1a2e;border:1px solid #333;color:#7c8dff;cursor:pointer;text-decoration:none;transition:border-color .15s,color .15s}
+.repvue-link:hover{border-color:#7c8dff;color:#a0b0ff}
 
 /* table */
 .tbl{width:100%;border-collapse:collapse}
@@ -2064,39 +2015,8 @@ var _jobsById = {};
 var _allJobs = [];
 var _currentJobsTab = 'top';
 var _jobsRetries = 0;
-var _repvueData = {};
-
-function toggleRepVuePopover(jobId) {
-  var pop = document.getElementById('rv-pop-' + jobId);
-  if (!pop) return;
-  var isShowing = pop.classList.contains('show');
-  // Close all popovers first
-  var allPops = document.querySelectorAll('.repvue-popover.show');
-  for (var i = 0; i < allPops.length; i++) allPops[i].classList.remove('show');
-  if (!isShowing) pop.classList.add('show');
-}
-
-// Close RepVue popovers when clicking outside
-document.addEventListener('click', function() {
-  var allPops = document.querySelectorAll('.repvue-popover.show');
-  for (var i = 0; i < allPops.length; i++) allPops[i].classList.remove('show');
-});
-
-var _repvueDisabled = false;
-function loadRepVueData(companyName) {
-  if (_repvueDisabled) return;
-  if (_repvueData[companyName] !== undefined) return;
-  _repvueData[companyName] = null; // mark as loading
-  fetch('/api/repvue/' + encodeURIComponent(companyName))
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      if (d && d.unavailable) { _repvueDisabled = true; return; }
-      if (d && d.data) {
-        _repvueData[companyName] = d.data;
-        renderJobs();
-      }
-    })
-    .catch(function() { /* ignore RepVue failures */ });
+function repvueSlug(name) {
+  return name.replace(/\\s*\\|.*$/, '').replace(/\\s*\\(.*?\\)\\s*/g, '').replace(/,?\\s*(Inc\\.?|LLC|Ltd\\.?|Corp\\.?|Corporation|Company|Co\\.?)$/i, '').trim().replace(/\\s+/g, '');
 }
 
 function showJobsTab(tab) {
@@ -2142,35 +2062,10 @@ function formatSalaryEstimate(est) {
 }
 
 function renderRepVueBadge(j) {
-  var rv = _repvueData[j.company];
-  if (!rv) return '';
-  var score = rv.repVueScore != null ? rv.repVueScore : '?';
-  var pct = rv.percentHittingQuota;
-  var dotClass = pct == null ? 'rv-yellow' : (pct > 50 ? 'rv-green' : (pct >= 40 ? 'rv-yellow' : 'rv-red'));
-  var quotaText = rv.quotaAttainment != null ? rv.quotaAttainment + '%' : 'N/A';
-  var pctText = pct != null ? pct + '%' : 'N/A';
-
-  var popoverHtml = '<div class="repvue-popover" id="rv-pop-' + j.id + '">' +
-    '<h4>RepVue: ' + esc(j.company) + '</h4>' +
-    '<div class="rv-row"><span class="rv-label">Overall Score</span><span class="rv-val">' + score + '/100</span></div>' +
-    '<div class="rv-row"><span class="rv-label">Quota Attainment</span><span class="rv-val">' + quotaText + '</span></div>' +
-    '<div class="rv-row"><span class="rv-label">% Hitting Quota</span><span class="rv-val">' + pctText + '</span></div>' +
-    (rv.baseSalaryRange ? '<div class="rv-row"><span class="rv-label">Base Salary</span><span class="rv-val">' + esc(rv.baseSalaryRange) + '</span></div>' : '') +
-    (rv.oteSalaryRange ? '<div class="rv-row"><span class="rv-label">OTE</span><span class="rv-val">' + esc(rv.oteSalaryRange) + '</span></div>' : '') +
-    (rv.cultureRating != null ? '<div class="rv-row"><span class="rv-label">Culture</span><span class="rv-val">' + rv.cultureRating + '/5</span></div>' : '') +
-    (rv.productRating != null ? '<div class="rv-row"><span class="rv-label">Product</span><span class="rv-val">' + rv.productRating + '/5</span></div>' : '') +
-    (rv.inboundLeadFlow ? '<div class="rv-row"><span class="rv-label">Inbound Lead Flow</span><span class="rv-val">' + esc(rv.inboundLeadFlow) + '</span></div>' : '');
-
-  if (rv.reviews && rv.reviews.length) {
-    popoverHtml += '<div class="rv-reviews"><strong>Recent Reviews:</strong>';
-    for (var i = 0; i < rv.reviews.length; i++) {
-      popoverHtml += '<div class="rv-review">' + esc(rv.reviews[i].substring(0, 200)) + '</div>';
-    }
-    popoverHtml += '</div>';
-  }
-  popoverHtml += '</div>';
-
-  return '<span class="repvue-badge" onclick="toggleRepVuePopover(' + j.id + ');event.stopPropagation()"><span class="rv-dot ' + dotClass + '"></span>RV ' + score + popoverHtml + '</span>';
+  if (!j.company) return '';
+  var slug = repvueSlug(j.company);
+  var url = 'https://www.repvue.com/companies/' + encodeURIComponent(slug);
+  return '<a class="repvue-link" href="' + esc(url) + '" target="_blank" rel="noopener" onclick="event.stopPropagation()">RV \\u2197</a>';
 }
 
 function renderJobCard(j, opts) {
@@ -2268,9 +2163,6 @@ async function loadJobs() {
     jobs.forEach(function(j) { _jobsById[j.id] = j; });
     _jobsRetries = 0;
     renderJobs();
-    // Trigger RepVue data loading for unique companies
-    var companies = {};
-    jobs.forEach(function(j) { if (j.company && !companies[j.company]) { companies[j.company] = true; loadRepVueData(j.company); } });
   } catch(e) {
     console.error('loadJobs failed:', e);
     _jobsRetries++;
