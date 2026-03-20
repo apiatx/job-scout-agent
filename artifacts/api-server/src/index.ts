@@ -105,6 +105,7 @@ async function initDb(): Promise<void> {
       id           SERIAL PRIMARY KEY,
       company_name TEXT NOT NULL,
       brief_json   JSONB NOT NULL,
+      saved        BOOLEAN NOT NULL DEFAULT false,
       created_at   TIMESTAMP DEFAULT NOW()
     );
   `);
@@ -113,6 +114,7 @@ async function initDb(): Promise<void> {
   const safeAddColumn = async (table: string, col: string, type: string) => {
     try { await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${col} ${type}`); } catch { /* ignore */ }
   };
+  await safeAddColumn('research_briefs', 'saved', 'BOOLEAN NOT NULL DEFAULT false');
   await safeAddColumn('criteria', 'work_type', "TEXT NOT NULL DEFAULT 'any'");
   await safeAddColumn('jobs', 'saved_at', 'TIMESTAMPTZ');
   await safeAddColumn('scout_runs', 'companies_scanned', 'INT NOT NULL DEFAULT 0');
@@ -695,7 +697,7 @@ app.post('/api/jobs/:id/research', async (req: Request, res: Response) => {
           `SELECT careers_url FROM companies WHERE LOWER(name) = LOWER($1) LIMIT 1`,
           [companyName]
         );
-        res.json({ brief: cached[0].brief_json, cached: true, created_at: cached[0].created_at, careers_url: coRows[0]?.careers_url || null });
+        res.json({ brief: cached[0].brief_json, cached: true, created_at: cached[0].created_at, careers_url: coRows[0]?.careers_url || null, id: cached[0].id, saved: cached[0].saved });
         return;
       }
     }
@@ -716,11 +718,43 @@ app.post('/api/jobs/:id/research', async (req: Request, res: Response) => {
       [companyName, JSON.stringify(brief)]
     );
 
-    res.json({ brief: inserted[0].brief_json, cached: false, created_at: inserted[0].created_at, careers_url: careersUrl });
+    res.json({ brief: inserted[0].brief_json, cached: false, created_at: inserted[0].created_at, careers_url: careersUrl, id: inserted[0].id, saved: false });
   } catch (e) {
     console.error('Research company error:', e);
     res.status(500).json({ error: String(e) });
   }
+});
+
+// Get all saved research briefs
+app.get('/api/research', async (_req, res: Response) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM research_briefs WHERE saved = true ORDER BY created_at DESC'
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Save a research brief permanently
+app.post('/api/research/:id/save', async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const { rows } = await pool.query(
+      'UPDATE research_briefs SET saved = true WHERE id = $1 RETURNING *',
+      [id]
+    );
+    if (rows.length === 0) { res.status(404).json({ error: 'Brief not found' }); return; }
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Unsave / delete a saved research brief
+app.delete('/api/research/:id', async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    await pool.query('DELETE FROM research_briefs WHERE id = $1', [id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 // Gmail OAuth
@@ -1509,6 +1543,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
 <nav class="sidebar">
   <div class="tab active" id="tab-jobs" onclick="showTab('jobs')">Jobs</div>
   <div class="tab sub-tab" id="tab-saved" onclick="showTab('saved')">&nbsp;&nbsp;Saved Jobs</div>
+  <div class="tab" id="tab-research" onclick="showTab('research')">Research</div>
   <div class="tab" id="tab-companies" onclick="showTab('companies')">Companies</div>
   <div class="tab" id="tab-resume" onclick="showTab('resume')">Resume</div>
   <div class="tab" id="tab-email" onclick="showTab('email')">Daily Jobs Report</div>
@@ -1528,6 +1563,12 @@ textarea:focus,input:focus{border-color:var(--gold)}
 <div class="panel" id="panel-saved">
   <div class="sec-title" id="saved-count">Loading saved jobs&hellip;</div>
   <div class="jobs-grid" id="saved-grid"></div>
+</div>
+
+<div class="panel" id="panel-research">
+  <div class="sec-title" id="research-page-count">Loading saved research&hellip;</div>
+  <div class="jobs-grid" id="research-grid"></div>
+  <div class="empty" id="research-empty" style="display:none">No saved research briefs yet &mdash; click &ldquo;Research Company&rdquo; on any job card, then save the brief.</div>
 </div>
 
 <div class="panel" id="panel-resume">
@@ -1740,6 +1781,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </div>
       <div class="research-body" id="research-body"></div>
       <div class="research-footer">
+        <button class="btn btn-gold btn-sm" id="research-save-btn" onclick="saveResearchBrief()">Save Brief</button>
         <button class="btn btn-ghost btn-sm" onclick="copyFullBrief()">Copy Full Brief</button>
         <a class="btn btn-ghost btn-sm" id="research-careers-link" href="#" target="_blank" rel="noopener">Open Careers Page</a>
       </div>
@@ -1757,7 +1799,7 @@ function lines(id) {
 }
 
 // ── tabs ─────────────────────────────────────────────────────────────────
-var TABS = ['jobs','saved','companies','resume','email','runs','settings'];
+var TABS = ['jobs','saved','research','companies','resume','email','runs','settings'];
 function showTab(name) {
   TABS.forEach(function(t) {
     document.getElementById('tab-' + t).classList.toggle('active', t === name);
@@ -1765,6 +1807,7 @@ function showTab(name) {
   });
   if (name === 'jobs')      loadJobs();
   if (name === 'saved')     loadSavedJobs();
+  if (name === 'research')  loadSavedResearch();
   if (name === 'runs')      loadRuns();
   if (name === 'companies') loadCompanies();
   if (name === 'resume')    loadResume();
@@ -2334,6 +2377,8 @@ async function saveCriteria() {
 // ── research company ────────────────────────────────────────────────────
 var _researchBrief = null;
 var _researchJobId = null;
+var _researchBriefId = null;
+var _researchBriefSaved = false;
 var _researchTimer = null;
 var _researchStart = 0;
 
@@ -2397,9 +2442,24 @@ function renderResearchTab(tab) {
   body.innerHTML = html;
 }
 
+function updateSaveBtn() {
+  var btn = document.getElementById('research-save-btn');
+  if (_researchBriefSaved) {
+    btn.textContent = 'Saved \\u2713';
+    btn.className = 'btn btn-ghost btn-sm';
+    btn.disabled = true;
+  } else {
+    btn.textContent = 'Save Brief';
+    btn.className = 'btn btn-gold btn-sm';
+    btn.disabled = false;
+  }
+}
+
 function displayResearchBrief(data) {
   var b = typeof data.brief === 'string' ? JSON.parse(data.brief) : data.brief;
   _researchBrief = b;
+  _researchBriefId = data.id || null;
+  _researchBriefSaved = !!data.saved;
   document.getElementById('research-loading').style.display = 'none';
   document.getElementById('research-error').style.display = 'none';
   document.getElementById('research-content').style.display = '';
@@ -2407,6 +2467,7 @@ function displayResearchBrief(data) {
   document.getElementById('research-oneliner').textContent = b.oneLiner || '';
   document.getElementById('research-funding').textContent = b.fundingValuation || 'N/A';
   document.getElementById('research-revenue').textContent = b.revenueGrowth || 'N/A';
+  updateSaveBtn();
 
   var genAt = b.generatedAt || data.created_at;
   var ago = '';
@@ -2530,6 +2591,88 @@ function copyFullBrief() {
   text += 'TALKING POINTS\\n' + (b.talkingPoints || []).map(function(tp, i) { return (i + 1) + '. ' + tp; }).join('\\n') + '\\n\\n';
   text += 'RECENT NEWS\\n' + (b.recentNews || []).map(function(n) { return '- ' + n; }).join('\\n');
   navigator.clipboard.writeText(text);
+}
+
+// ── save research brief ──────────────────────────────────────────────────
+async function saveResearchBrief() {
+  if (!_researchBriefId) return;
+  try {
+    var res = await fetch('/api/research/' + _researchBriefId + '/save', { method: 'POST' });
+    if (res.ok) {
+      _researchBriefSaved = true;
+      updateSaveBtn();
+    }
+  } catch(e) {}
+}
+
+// ── research page ────────────────────────────────────────────────────────
+async function loadSavedResearch() {
+  try {
+    var res = await fetch('/api/research');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var briefs = await res.json();
+    var grid = document.getElementById('research-grid');
+    var cnt = document.getElementById('research-page-count');
+    var empty = document.getElementById('research-empty');
+    if (!briefs.length) {
+      cnt.textContent = '';
+      grid.innerHTML = '';
+      empty.style.display = '';
+      return;
+    }
+    empty.style.display = 'none';
+    cnt.textContent = briefs.length + ' saved brief' + (briefs.length !== 1 ? 's' : '');
+    grid.innerHTML = briefs.map(function(r) {
+      var b = typeof r.brief_json === 'string' ? JSON.parse(r.brief_json) : r.brief_json;
+      var age = '';
+      if (r.created_at) {
+        var diffMs = Date.now() - new Date(r.created_at).getTime();
+        var mins = Math.floor(diffMs / 60000);
+        if (mins < 60) age = mins + 'm ago';
+        else { var hrs = Math.floor(mins / 60); if (hrs < 24) age = hrs + 'h ago'; else age = Math.floor(hrs / 24) + 'd ago'; }
+      }
+      return '<div class="card">' +
+        '<div class="card-head">' +
+          '<div class="job-title">' + esc(b.companyName || r.company_name) + '</div>' +
+          '<div class="job-co" style="font-size:12px;color:var(--muted);margin-top:4px">' + esc(b.oneLiner || '') + '</div>' +
+        '</div>' +
+        '<div class="card-meta">' +
+          '<span style="color:var(--gold)">' + esc(b.fundingValuation || '') + '</span>' +
+          '<span>' + esc(b.revenueGrowth || '') + '</span>' +
+          (age ? '<span class="age-badge">' + age + '</span>' : '') +
+        '</div>' +
+        '<div class="card-foot">' +
+          '<button class="btn btn-gold btn-sm" onclick="viewSavedBrief(' + r.id + ')">View Brief</button>' +
+          '<button class="btn btn-ghost btn-sm" onclick="deleteSavedBrief(' + r.id + ')">Delete</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  } catch(e) {
+    console.error('loadSavedResearch failed:', e);
+    document.getElementById('research-page-count').textContent = 'Failed to load saved research';
+  }
+}
+
+async function viewSavedBrief(briefId) {
+  try {
+    var res = await fetch('/api/research');
+    var briefs = await res.json();
+    var found = briefs.find(function(r) { return r.id === briefId; });
+    if (!found) return;
+    var modal = document.getElementById('research-modal');
+    document.getElementById('research-loading').style.display = 'none';
+    document.getElementById('research-error').style.display = 'none';
+    document.getElementById('research-content').style.display = 'none';
+    modal.classList.add('show');
+    displayResearchBrief({ brief: found.brief_json, id: found.id, saved: found.saved, created_at: found.created_at, careers_url: null });
+  } catch(e) {}
+}
+
+async function deleteSavedBrief(briefId) {
+  try {
+    await fetch('/api/research/' + briefId, { method: 'DELETE' });
+    loadSavedResearch();
+  } catch(e) {}
 }
 
 // ── init ──────────────────────────────────────────────────────────────────
