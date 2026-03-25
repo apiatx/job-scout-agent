@@ -2,7 +2,7 @@ import express, { type Request, type Response } from 'express';
 import pg from 'pg';
 import { scrapeGreenhouseJobs, scrapeLeverJobs, runJobSpyScraper } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
-import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies } from './agent.js';
+import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
 // RepVue: link-out only (no scraping — RepVue blocks automated requests)
 
@@ -145,6 +145,8 @@ async function initDb(): Promise<void> {
   await safeAddColumn('jobs', 'status', "TEXT NOT NULL DEFAULT 'new'");
   await safeAddColumn('jobs', 'ai_risk', "TEXT NOT NULL DEFAULT 'unknown'");
   await safeAddColumn('jobs', 'ai_risk_reason', 'TEXT');
+  await safeAddColumn('jobs', 'opportunity_tier', "TEXT NOT NULL DEFAULT 'unscored'");
+  await safeAddColumn('jobs', 'sub_scores', 'JSONB');
 
   // Deduplicate existing jobs — keep the most recent row per apply_url
   try {
@@ -604,6 +606,71 @@ app.delete('/api/jobs/:id/save', async (req: Request, res: Response) => {
     if (rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Opportunity Rescore — backfill sub-scores and tiers for existing jobs
+let rescoreRunning = false;
+
+app.get('/api/jobs/rescore-status', async (_req, res: Response) => {
+  try {
+    const { rows } = await pool.query(`SELECT COUNT(*) as total, SUM(CASE WHEN opportunity_tier='unscored' THEN 1 ELSE 0 END) as unscored FROM jobs`);
+    res.json({ running: rescoreRunning, total: Number(rows[0].total), unscored: Number(rows[0].unscored) });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/jobs/rescore-all', async (_req, res: Response) => {
+  if (rescoreRunning) { res.json({ started: false, message: 'Rescore already running' }); return; }
+  try {
+    const { rows: unscored } = await pool.query(`SELECT * FROM jobs WHERE opportunity_tier='unscored' ORDER BY found_at DESC`);
+    if (unscored.length === 0) { res.json({ started: false, message: 'All jobs already scored', count: 0 }); return; }
+    const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
+    if (cRows.length === 0) { res.status(400).json({ error: 'No criteria configured' }); return; }
+    const criteria = cRows[0] as any;
+    const { rows: companyRows } = await pool.query('SELECT name FROM companies');
+    const companyNames = companyRows.map((r: any) => r.name as string);
+    const criteriaText = [
+      criteria.target_roles?.length ? `Target roles: ${criteria.target_roles.join(', ')}` : '',
+      criteria.industries?.length ? `Industries: ${criteria.industries.join(', ')}` : '',
+      criteria.min_salary ? `Minimum salary: $${criteria.min_salary.toLocaleString()} base` : '',
+      criteria.locations?.length ? `Locations: ${criteria.locations.join(', ')}` : '',
+      criteria.must_have?.length ? `Must have: ${criteria.must_have.join(', ')}` : '',
+      criteria.nice_to_have?.length ? `Nice to have: ${criteria.nice_to_have.join(', ')}` : '',
+      criteria.avoid?.length ? `Avoid: ${criteria.avoid.join(', ')}` : '',
+    ].filter(Boolean).join('\n');
+    const preApprovedSection = companyNames.length > 0
+      ? `PRE-APPROVED COMPANIES:\nThe user has pre-approved these specific companies as target employers.\nPre-approved companies: ${companyNames.join(', ')}`
+      : '';
+    res.json({ started: true, count: unscored.length });
+    rescoreRunning = true;
+    // Run in background
+    (async () => {
+      console.log(`\n──── OPPORTUNITY RESCORE — ${unscored.length} jobs ─────────────`);
+      let done = 0;
+      for (let i = 0; i < unscored.length; i += 8) {
+        const batch = unscored.slice(i, i + 8);
+        await Promise.allSettled(batch.map(async (j: any) => {
+          try {
+            const result = await rescoreJobOpportunity(
+              { id: j.id, title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.apply_url, description: j.description },
+              criteriaText, preApprovedSection, companyNames
+            );
+            if (result) {
+              await pool.query(
+                `UPDATE jobs SET opportunity_tier=$1, sub_scores=$2, ai_risk=$3, ai_risk_reason=$4, why_good_fit=$5, match_score=$6 WHERE id=$7`,
+                [result.opportunityTier, JSON.stringify(result.subScores), result.aiRisk, result.aiRiskReason, result.whyGoodFit, result.matchScore, j.id]
+              );
+            } else {
+              await pool.query(`UPDATE jobs SET opportunity_tier='Probably Skip' WHERE id=$1`, [j.id]);
+            }
+            done++;
+          } catch (e) { console.error(`Rescore error for job ${j.id}:`, e); done++; }
+        }));
+        console.log(`  Rescored ${Math.min(i + 8, unscored.length)}/${unscored.length}`);
+      }
+      console.log(`──── RESCORE COMPLETE — ${done} jobs scored ─────────────────`);
+      rescoreRunning = false;
+    })();
+  } catch (e) { rescoreRunning = false; res.status(500).json({ error: String(e) }); }
 });
 
 // Scout runs
@@ -1347,10 +1414,10 @@ async function runScoutInBackground(runId: number): Promise<void> {
     for (const m of matches) {
       const source = newJobs.find(j => j.applyUrl === m.applyUrl)?.source ?? '';
       await pool.query(
-        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
          ON CONFLICT (apply_url) DO NOTHING`,
-        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null]
+        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, m.opportunityTier ?? 'unscored', JSON.stringify(m.subScores ?? null)]
       );
     }
 
@@ -1566,10 +1633,38 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .sub-tab.active{color:var(--text)!important}
 
 /* jobs inner tabs */
-.inner-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:16px}
-.inner-tab{padding:10px 20px;font-size:13px;font-weight:600;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;transition:color .12s}
+.inner-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:16px;flex-wrap:wrap}
+.inner-tab{padding:9px 16px;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;transition:color .12s;white-space:nowrap}
 .inner-tab:hover{color:var(--text)}
 .inner-tab.active{color:var(--gold);border-bottom-color:var(--gold)}
+.inner-tab.tier-target.active{color:#f5c842;border-bottom-color:#f5c842}
+.inner-tab.tier-win.active{color:#00c86e;border-bottom-color:#00c86e}
+.inner-tab.tier-stretch.active{color:#7c8dff;border-bottom-color:#7c8dff}
+.inner-tab.tier-skip.active{color:#888;border-bottom-color:#888}
+.tier-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+.tier-top-target{background:rgba(245,200,66,.15);color:#f5c842;border:1px solid rgba(245,200,66,.35)}
+.tier-fast-win{background:rgba(0,200,110,.13);color:#00c86e;border:1px solid rgba(0,200,110,.3)}
+.tier-stretch-role{background:rgba(124,141,255,.13);color:#7c8dff;border:1px solid rgba(124,141,255,.3)}
+.tier-probably-skip{background:rgba(150,150,150,.1);color:#888;border:1px solid rgba(150,150,150,.25)}
+.card.card-top-target{border-left:3px solid #f5c842}
+.card.card-fast-win{border-left:3px solid #00c86e}
+.card.card-stretch-role{border-left:3px solid #7c8dff}
+.card.card-probably-skip{border-left:3px solid #444;opacity:.85}
+.sub-scores{padding:10px 18px;border-bottom:1px solid #1e1e1e;display:none}
+.sub-scores.open{display:block}
+.sub-score-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px 16px}
+.sub-score-row{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted)}
+.sub-score-label{min-width:110px;color:#888}
+.sub-score-bar{flex:1;height:4px;background:#222;border-radius:2px;overflow:hidden}
+.sub-score-fill{height:100%;border-radius:2px;transition:width .3s}
+.sub-score-val{min-width:18px;text-align:right;color:var(--text);font-size:10px;font-weight:600}
+.sub-score-toggle{cursor:pointer;font-size:10px;color:var(--muted);padding:2px 8px;border-radius:4px;border:1px solid #2a2a2a;background:transparent;transition:border-color .15s}
+.sub-score-toggle:hover{border-color:#444;color:var(--text)}
+.rescore-banner{margin:0 0 16px;padding:12px 16px;background:rgba(245,200,66,.08);border:1px solid rgba(245,200,66,.25);border-radius:8px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+.rescore-banner.hidden{display:none}
+.rescore-msg{font-size:13px;color:#ccc}
+.rescore-msg strong{color:var(--gold)}
+.rescore-progress{font-size:11px;color:var(--muted);margin-top:2px}
 .new-badge{display:inline-block;background:var(--gold);color:#0f0f0f;font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px;margin-left:6px;text-transform:uppercase;vertical-align:middle;letter-spacing:.04em}
 .save-btn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;transition:all .15s}
 .save-btn:hover{border-color:var(--gold);color:var(--gold)}
@@ -1743,9 +1838,19 @@ textarea:focus,input:focus{border-color:var(--gold)}
 </nav>
 <div class="main-content">
 <div class="panel active" id="panel-jobs">
+  <div class="rescore-banner hidden" id="rescore-banner">
+    <div>
+      <div class="rescore-msg"><strong id="rescore-msg-main">Scoring your library...</strong></div>
+      <div class="rescore-progress" id="rescore-progress-msg"></div>
+    </div>
+    <button class="btn btn-gold btn-sm" id="rescore-btn" onclick="startRescore()">Score All Jobs</button>
+  </div>
   <div class="inner-tabs">
-    <div class="inner-tab active" id="jtab-top" onclick="showJobsTab('top')">Top Matches</div>
-    <div class="inner-tab" id="jtab-recent" onclick="showJobsTab('recent')">Recent Listings</div>
+    <div class="inner-tab tier-target active" id="jtab-target" onclick="showJobsTab('target')">&#x1F3AF; Top Targets <span id="jtab-count-target" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
+    <div class="inner-tab tier-win" id="jtab-win" onclick="showJobsTab('win')">&#x26A1; Fast Wins <span id="jtab-count-win" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
+    <div class="inner-tab tier-stretch" id="jtab-stretch" onclick="showJobsTab('stretch')">&#x1F680; Stretch <span id="jtab-count-stretch" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
+    <div class="inner-tab tier-skip" id="jtab-skip" onclick="showJobsTab('skip')">&#x1F6AB; Probably Skip <span id="jtab-count-skip" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
+    <div class="inner-tab" id="jtab-all" onclick="showJobsTab('all')">All <span id="jtab-count-all" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
   </div>
   <div class="sec-title" id="jobs-count">Loading jobs&hellip;</div>
   <div class="jobs-grid" id="jobs-grid"></div>
@@ -2027,16 +2132,134 @@ async function loadStats() {
 // ── jobs ─────────────────────────────────────────────────────────────────
 var _jobsById = {};
 var _allJobs = [];
-var _currentJobsTab = 'top';
+var _currentJobsTab = 'target';
 var _jobsRetries = 0;
 function repvueSlug(name) {
   return name.replace(/\\s*\\|.*$/, '').replace(/\\s*\\(.*?\\)\\s*/g, '').replace(/,?\\s*(Inc\\.?|LLC|Ltd\\.?|Corp\\.?|Corporation|Company|Co\\.?)$/i, '').trim().replace(/\\s+/g, '');
 }
 
+var _rescoreRunning = false;
+var _rescoreTotal = 0;
+var _rescoreUnscored = 0;
+var _rescore_pollTimer = null;
+
+async function checkRescoreStatus() {
+  try {
+    var res = await fetch('/api/jobs/rescore-status');
+    if (!res.ok) return;
+    var data = await res.json();
+    _rescoreRunning = data.running;
+    _rescoreTotal = data.total || 0;
+    _rescoreUnscored = data.unscored || 0;
+    var banner = document.getElementById('rescore-banner');
+    var btn = document.getElementById('rescore-btn');
+    var msgMain = document.getElementById('rescore-msg-main');
+    var msgProg = document.getElementById('rescore-progress-msg');
+    if (_rescoreUnscored > 0 || _rescoreRunning) {
+      banner.classList.remove('hidden');
+      if (_rescoreRunning) {
+        msgMain.textContent = 'Scoring in progress\u2026';
+        var done = _rescoreTotal - _rescoreUnscored;
+        msgProg.textContent = done + ' of ' + _rescoreTotal + ' scored \u2014 refresh to see results';
+        btn.textContent = 'Scoring\u2026';
+        btn.disabled = true;
+        if (!_rescore_pollTimer) _rescore_pollTimer = setInterval(function() { checkRescoreStatus(); loadJobs(); }, 8000);
+      } else {
+        msgMain.textContent = _rescoreUnscored + ' unscored jobs in your library';
+        msgProg.textContent = 'Click "Score All Jobs" to classify them into tiers';
+        btn.textContent = 'Score All Jobs';
+        btn.disabled = false;
+        if (_rescore_pollTimer) { clearInterval(_rescore_pollTimer); _rescore_pollTimer = null; }
+      }
+    } else {
+      banner.classList.add('hidden');
+      if (_rescore_pollTimer) { clearInterval(_rescore_pollTimer); _rescore_pollTimer = null; }
+    }
+  } catch(e) {}
+}
+
+async function startRescore() {
+  var btn = document.getElementById('rescore-btn');
+  btn.disabled = true;
+  btn.textContent = 'Starting\u2026';
+  try {
+    var res = await fetch('/api/jobs/rescore-all', { method: 'POST' });
+    var data = await res.json();
+    if (data.started) {
+      _rescoreRunning = true;
+      if (!_rescore_pollTimer) _rescore_pollTimer = setInterval(function() { checkRescoreStatus(); loadJobs(); }, 8000);
+      checkRescoreStatus();
+    } else {
+      alert(data.message || 'Could not start rescore');
+      checkRescoreStatus();
+    }
+  } catch(e) { alert('Rescore failed: ' + e.message); checkRescoreStatus(); }
+}
+
+function tierKey(j) {
+  if (!j.opportunity_tier || j.opportunity_tier === 'unscored') return 'unscored';
+  var t = j.opportunity_tier;
+  if (t === 'Top Target') return 'target';
+  if (t === 'Fast Win') return 'win';
+  if (t === 'Stretch Role') return 'stretch';
+  if (t === 'Probably Skip') return 'skip';
+  return 'unscored';
+}
+
+function tierCssClass(j) {
+  var t = tierKey(j);
+  if (t === 'target') return 'card-top-target';
+  if (t === 'win') return 'card-fast-win';
+  if (t === 'stretch') return 'card-stretch-role';
+  if (t === 'skip') return 'card-probably-skip';
+  return '';
+}
+
+function tierBadgeHtml(j) {
+  if (!j.opportunity_tier || j.opportunity_tier === 'unscored') return '';
+  var t = j.opportunity_tier;
+  var cls = t === 'Top Target' ? 'tier-top-target' : t === 'Fast Win' ? 'tier-fast-win' : t === 'Stretch Role' ? 'tier-stretch-role' : 'tier-probably-skip';
+  var icon = t === 'Top Target' ? '&#x1F3AF;' : t === 'Fast Win' ? '&#x26A1;' : t === 'Stretch Role' ? '&#x1F680;' : '&#x1F6AB;';
+  return '<span class="tier-badge ' + cls + '">' + icon + ' ' + esc(t) + '</span>';
+}
+
+function subScoreColor(v) {
+  if (v >= 8) return '#00c86e';
+  if (v >= 6) return '#f5c842';
+  if (v >= 4) return '#ff9f43';
+  return '#e55353';
+}
+
+function subScoresHtml(j) {
+  if (!j.sub_scores) return '';
+  var s = typeof j.sub_scores === 'string' ? JSON.parse(j.sub_scores) : j.sub_scores;
+  var dims = [
+    ['roleFit','Role Fit'],['companyQuality','Company'],['locationFit','Location'],
+    ['hiringUrgency','Hiring Urgency'],['tailoringRequired','Tailoring Needed'],
+    ['referralOdds','Referral Odds'],['realVsFake','Real vs Fake']
+  ];
+  var rows = '';
+  for (var i = 0; i < dims.length; i++) {
+    var key = dims[i][0]; var label = dims[i][1];
+    var v = (s[key] !== undefined && s[key] !== null) ? Number(s[key]) : 5;
+    var pct = Math.round(v * 10);
+    var col = subScoreColor(v);
+    rows += '<div class="sub-score-row"><span class="sub-score-label">' + label + '</span><div class="sub-score-bar"><div class="sub-score-fill" style="width:' + pct + '%;background:' + col + '"></div></div><span class="sub-score-val">' + v + '</span></div>';
+  }
+  return '<div class="sub-scores" id="ss-' + j.id + '"><div class="sub-score-grid">' + rows + '</div></div>';
+}
+
+function toggleSubScores(id) {
+  var el = document.getElementById('ss-' + id);
+  if (el) el.classList.toggle('open');
+}
+
 function showJobsTab(tab) {
   _currentJobsTab = tab;
-  document.getElementById('jtab-top').classList.toggle('active', tab === 'top');
-  document.getElementById('jtab-recent').classList.toggle('active', tab === 'recent');
+  ['target','win','stretch','skip','all'].forEach(function(t) {
+    var el = document.getElementById('jtab-' + t);
+    if (el) el.classList.toggle('active', t === tab);
+  });
   renderJobs();
 }
 
@@ -2108,9 +2331,17 @@ function renderJobCard(j, opts) {
     aiRiskBadge = '<span class="ai-risk-badge ai-risk-' + esc(j.ai_risk) + '" title="' + riskTitle + '">' + riskLabel + '</span>';
   }
 
-  return '<div class="card">' +
+  var tierClass = tierCssClass(j);
+  var tBadge = tierBadgeHtml(j);
+  var ssHtml = subScoresHtml(j);
+  var ssToggle = j.sub_scores ? '<button class="sub-score-toggle" onclick="toggleSubScores(' + j.id + ')">Scoring Details</button>' : '';
+
+  return '<div class="card ' + tierClass + '">' +
     '<div class="card-head">' +
-      '<div class="score-row"><span>Match Score</span><span class="score-val">' + esc(j.match_score) + ' / 100</span></div>' +
+      '<div class="score-row">' +
+        '<span style="display:flex;align-items:center;gap:8px">' + (tBadge || '<span style="color:var(--muted);font-size:11px">Unscored</span>') + '</span>' +
+        '<span class="score-val">' + esc(j.match_score) + ' / 100</span>' +
+      '</div>' +
       '<div class="bar-bg"><div class="bar-fg" style="width:' + esc(j.match_score) + '%;background:' + barColor + '"></div></div>' +
       '<div class="job-title">' + esc(j.title) + newBadge + '</div>' +
       '<div class="job-co">' + esc(j.company) + '</div>' +
@@ -2123,7 +2354,9 @@ function renderJobCard(j, opts) {
       repvueBadge +
       (j.source ? '<span class="source-badge">' + esc(j.source) + '</span>' : '') +
       (jobAge(j) ? '<span class="age-badge">' + jobAge(j) + '</span>' : '') +
+      ssToggle +
     '</div>' +
+    ssHtml +
     (j.why_good_fit ? '<div class="card-why">' + esc(j.why_good_fit) + '</div>' : '') +
     '<div class="card-foot">' +
       '<a href="' + esc(j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-gold btn-sm">View Posting \\u2192</a>' +
@@ -2134,41 +2367,55 @@ function renderJobCard(j, opts) {
   '</div>';
 }
 
+function updateTabCounts() {
+  var counts = { target:0, win:0, stretch:0, skip:0, unscored:0 };
+  _allJobs.forEach(function(j) {
+    var k = tierKey(j);
+    if (counts[k] !== undefined) counts[k]++;
+    else counts.unscored++;
+  });
+  var allCount = _allJobs.length;
+  ['target','win','stretch','skip'].forEach(function(t) {
+    var el = document.getElementById('jtab-count-' + t);
+    if (el) el.textContent = counts[t] > 0 ? '(' + counts[t] + ')' : '';
+  });
+  var allEl = document.getElementById('jtab-count-all');
+  if (allEl) allEl.textContent = allCount > 0 ? '(' + allCount + ')' : '';
+}
+
 function renderJobs() {
   var grid = document.getElementById('jobs-grid');
   var cnt  = document.getElementById('jobs-count');
   var jobs;
 
-  if (_currentJobsTab === 'top') {
-    // Top matches: new matches first (sorted by score), then rest by score
-    jobs = _allJobs.slice().sort(function(a, b) {
-      var aNew = isNew(a) ? 1 : 0;
-      var bNew = isNew(b) ? 1 : 0;
-      if (bNew !== aNew) return bNew - aNew;
-      return b.match_score - a.match_score;
-    });
-    if (!jobs.length) {
-      cnt.textContent = 'No matching jobs found yet \\u2014 run the scout to find matches';
-      grid.innerHTML = '';
-      return;
-    }
-    var newTopCount = jobs.filter(isNew).length;
-    cnt.textContent = jobs.length + ' top match' + (jobs.length !== 1 ? 'es' : '') + ' (score 50+)' + (newTopCount ? ' \\u2014 ' + newTopCount + ' new' : '');
-    grid.innerHTML = jobs.map(function(j) { return renderJobCard(j, { showNew: true }); }).join('');
+  updateTabCounts();
+
+  if (_currentJobsTab === 'all') {
+    jobs = _allJobs.slice().sort(function(a, b) { return b.match_score - a.match_score; });
+    cnt.textContent = jobs.length + ' job' + (jobs.length !== 1 ? 's' : '') + ' total';
   } else {
-    // Recent listings: sorted by found_at desc
-    jobs = _allJobs.slice().sort(function(a, b) {
-      return new Date(b.found_at).getTime() - new Date(a.found_at).getTime();
-    });
+    var tierMap = { target:'Top Target', win:'Fast Win', stretch:'Stretch Role', skip:'Probably Skip' };
+    var tierLabel = tierMap[_currentJobsTab];
+    jobs = _allJobs.filter(function(j) { return tierKey(j) === _currentJobsTab; }).sort(function(a,b) { return b.match_score - a.match_score; });
+    var emptyMsg = {
+      target: 'No Top Target roles yet \\u2014 run the scout or score your library',
+      win: 'No Fast Wins identified yet',
+      stretch: 'No Stretch Roles identified yet',
+      skip: 'No Probably Skip jobs'
+    };
     if (!jobs.length) {
-      cnt.textContent = 'No recent listings yet';
-      grid.innerHTML = '';
+      cnt.textContent = emptyMsg[_currentJobsTab] || 'No jobs in this tier';
+      grid.innerHTML = '<div style="padding:48px 24px;text-align:center;color:var(--muted);font-size:13px">' + (emptyMsg[_currentJobsTab] || 'No jobs in this tier') + '</div>';
       return;
     }
     var newCount = jobs.filter(isNew).length;
-    cnt.textContent = jobs.length + ' listing' + (jobs.length !== 1 ? 's' : '') + (newCount ? ' (' + newCount + ' new)' : '');
-    grid.innerHTML = jobs.map(function(j) { return renderJobCard(j, { showNew: true }); }).join('');
+    cnt.textContent = jobs.length + ' ' + (tierLabel || _currentJobsTab) + (jobs.length !== 1 ? ' roles' : ' role') + (newCount ? ' \\u2014 ' + newCount + ' new' : '');
   }
+  if (!jobs || !jobs.length) {
+    grid.innerHTML = '<div style="padding:48px 24px;text-align:center;color:var(--muted);font-size:13px">No jobs yet \\u2014 run the scout to find matches</div>';
+    return;
+  }
+  grid.innerHTML = jobs.map(function(j) { return renderJobCard(j, { showNew: true }); }).join('');
 }
 
 async function loadJobs() {
@@ -2185,6 +2432,7 @@ async function loadJobs() {
     jobs.forEach(function(j) { _jobsById[j.id] = j; });
     _jobsRetries = 0;
     renderJobs();
+    checkRescoreStatus();
   } catch(e) {
     console.error('loadJobs failed:', e);
     _jobsRetries++;
