@@ -17,6 +17,8 @@ export interface JobMatch {
   whyGoodFit: string;
   matchScore: number;
   isHardware: boolean;
+  aiRisk: 'LOW' | 'MEDIUM' | 'HIGH' | 'unknown';
+  aiRiskReason: string;
 }
 
 interface CriteriaForAgent {
@@ -52,11 +54,24 @@ The candidate's preferred locations are listed below in the criteria. Evaluate l
 - When in doubt about whether a location matches, lean toward rejecting the job.
 
 ROLE EVALUATION RULES:
-- Quota-carrying AE/sales roles are the target. Score 0 for: Solutions Architect, Sales Engineer, Engagement Manager, Partner Manager, Channel Manager, Customer Success Manager, Marketing, Recruiting, HR, Finance, Legal, or any non-quota-carrying role — UNLESS the description explicitly describes a direct quota-carrying sales position.
-- "Enterprise Account Executive" and "Commercial Account Executive" and "Mid-Market Account Executive" and "Corporate Account Executive" are ALL excellent matches. Commercial and mid-market AE roles at hardware, semiconductor, storage, networking, infrastructure, or industrial technology companies are HIGHLY DESIRABLE — score them 70+ if the company sells physical/hardware technology products.
-- Pure SaaS-only software roles that don't touch hardware, infrastructure, or physical technology should score lower (the candidate prefers hardware/tech-adjacent industries).
+- Quota-carrying AE/AM/Partner roles are the target. Score 0 for: Solutions Architect, Sales Engineer, Engagement Manager, Channel Manager, Customer Success Manager, Marketing, Recruiting, HR, Finance, Legal, or any clearly non-quota-carrying role — UNLESS the description explicitly describes a direct quota-carrying sales position.
+- "Enterprise Account Executive", "Commercial Account Executive", "Mid-Market Account Executive", "Corporate Account Executive" are ALL excellent matches. Enterprise is the primary goal; Commercial/Mid-Market/Corporate AE roles at hardware, semiconductor, storage, networking, or infrastructure companies are strong alternative paths in — score them 70+ if the company sells physical technology products.
+- "Partner Manager" roles are acceptable if they involve revenue/partner quota at a hardware, infrastructure, or tech company — score them 65-80 depending on quota clarity.
+- "Account Manager" roles are acceptable if they involve upsell/expansion quota at an existing account base — score them 65+ at strong hardware/tech companies.
 - "Director of Sales" or "Sales Director" roles are acceptable if they involve individual quota, not just people management.
-- Government/SLED-focused roles (Public Sector AE, SLED AE) are lower priority — score them 50-60 unless the candidate explicitly lists government as a target.
+- Pure horizontal SaaS-only roles (project management tools, basic CRM, generic collaboration/productivity software, simple analytics dashboards) should score 20-40 — these companies are highly vulnerable to being replaced by AI agents and are not a good career bet.
+
+AI DISPLACEMENT RISK — DEATH BY CLAUDE ASSESSMENT:
+For every company, assess how easily their core product could be replaced by AI agents (e.g., Claude skills):
+- LOW RISK (score bonus +0, acceptable): Physical hardware, semiconductors, networking equipment, storage arrays, servers, industrial machinery, defense hardware, power systems, photonics, robotics, sensors, test & measurement equipment, data center infrastructure. These require physical products, manufacturing, supply chains — AI cannot replace them.
+- MEDIUM RISK (score -5, acceptable): Complex vertical SaaS deeply embedded in operations (e.g., ERP, industrial control software, specialized medical/legal/engineering software, proprietary data platforms). These have moats beyond code.
+- HIGH RISK (score -20, not recommended): Horizontal SaaS tools easily replicable by AI agents — simple workflow automation, basic project management, generic email/productivity tools, basic analytics, straightforward CRM plugins, simple form builders, basic scheduling tools. If an AI agent can do what their product does in 6 months, it's HIGH RISK.
+
+SLED/GOVERNMENT ROLES — SMART ASSESSMENT:
+Government and Public Sector AE roles require nuanced evaluation:
+- HIGH VALUE SLED (score normally 70+): Companies like Palantir, Anduril, Shield AI, L3Harris, Leidos, Booz Allen Hamilton, CACI, ManTech, SAIC, Raytheon — defense tech, AI for government, mission-critical systems. These are excellent.
+- LOW VALUE SLED (score 40-55): Generic government IT VAR/resellers, standard hardware refresh vendors, basic IT support to government agencies. These are less desirable.
+- When in doubt, assess the company's reputation as a technology innovator vs a basic government IT services provider.
 
 ${companySpecificSection}
 
@@ -72,10 +87,12 @@ ${criteriaText}
 
 Respond ONLY with a JSON object (no markdown, no extra text):
 {
-  "matchScore": <0-100 integer>,
+  "matchScore": <0-100 integer — already factor in AI displacement risk penalty before returning this>,
   "whyGoodFit": "<2-3 sentences explaining fit or why it doesn't match>",
-  "isMatch": <true if score >= 60, else false>,
-  "isHardware": <true if the role is primarily hardware/infrastructure/networking/storage/semiconductor, false if software>
+  "isMatch": <true if matchScore >= 60, else false>,
+  "isHardware": <true if the company sells physical hardware/infrastructure/semiconductor products, false otherwise>,
+  "aiRisk": <"LOW" | "MEDIUM" | "HIGH" — AI displacement risk for this company's core product>,
+  "aiRiskReason": "<one concise sentence explaining why this risk level>"
 }`;
 
     const message = await anthropic.messages.create({
@@ -88,10 +105,18 @@ Respond ONLY with a JSON object (no markdown, no extra text):
     if (block.type !== 'text') return null;
 
     const text = block.text.trim().replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(text) as { matchScore: number; whyGoodFit: string; isMatch: boolean; isHardware?: boolean };
+    const parsed = JSON.parse(text) as {
+      matchScore: number;
+      whyGoodFit: string;
+      isMatch: boolean;
+      isHardware?: boolean;
+      aiRisk?: 'LOW' | 'MEDIUM' | 'HIGH';
+      aiRiskReason?: string;
+    };
     if (!parsed.isMatch) {
       if (parsed.matchScore >= 30) {
-        console.log(`  Claude rejected (score ${parsed.matchScore}): ${job.company} — "${job.title}" — ${job.location} — ${parsed.whyGoodFit?.slice(0, 100)}`);
+        const riskTag = parsed.aiRisk ? ` [AI Risk: ${parsed.aiRisk}]` : '';
+        console.log(`  Claude rejected (score ${parsed.matchScore})${riskTag}: ${job.company} — "${job.title}" — ${job.location} — ${parsed.whyGoodFit?.slice(0, 100)}`);
       }
       return null;
     }
@@ -105,6 +130,8 @@ Respond ONLY with a JSON object (no markdown, no extra text):
       whyGoodFit: parsed.whyGoodFit,
       matchScore: parsed.matchScore,
       isHardware: parsed.isHardware ?? false,
+      aiRisk: parsed.aiRisk ?? 'unknown',
+      aiRiskReason: parsed.aiRiskReason ?? '',
     };
   } catch {
     return null;

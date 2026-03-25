@@ -143,6 +143,8 @@ async function initDb(): Promise<void> {
   await safeAddColumn('jobs', 'is_hardware', 'BOOLEAN NOT NULL DEFAULT false');
   await safeAddColumn('jobs', 'created_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()');
   await safeAddColumn('jobs', 'status', "TEXT NOT NULL DEFAULT 'new'");
+  await safeAddColumn('jobs', 'ai_risk', "TEXT NOT NULL DEFAULT 'unknown'");
+  await safeAddColumn('jobs', 'ai_risk_reason', 'TEXT');
 
   // Deduplicate existing jobs — keep the most recent row per apply_url
   try {
@@ -175,7 +177,7 @@ async function initDb(): Promise<void> {
       `INSERT INTO criteria (target_roles, industries, min_salary, locations, must_have, nice_to_have, avoid)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
-        ['Enterprise Account Executive', 'Strategic Account Executive', 'Commercial Account Executive', 'Mid-Market Account Executive', 'Corporate Account Executive', 'Senior Account Executive', 'Regional Sales Manager', 'Named Account Executive', 'sales account executive', 'sales executive', 'senior sales executive', 'sr. sales executive', 'mid market account executive', 'mid-market account executive', 'account manager', 'Enterprise account manager', 'senior account manager', 'sr. account manager', 'strategic account manager'],
+        ['Enterprise Account Executive', 'Strategic Account Executive', 'Commercial Account Executive', 'Mid-Market Account Executive', 'Corporate Account Executive', 'Senior Account Executive', 'Regional Sales Manager', 'Named Account Executive', 'Partner Manager', 'sales account executive', 'sales executive', 'senior sales executive', 'sr. sales executive', 'mid market account executive', 'mid-market account executive', 'account manager', 'Enterprise account manager', 'senior account manager', 'sr. account manager', 'strategic account manager'],
         ['AI Infrastructure', 'Data Center Hardware', 'Semiconductors', 'Networking Hardware', 'Storage Hardware', 'Optical Networking', 'Edge Computing', 'Power & Cooling Infrastructure', 'Server Hardware', 'Industrial Automation', 'Oilfield Services Technology', 'Energy Technology', 'Clean Energy / Energy Storage', 'Machine Vision', 'Test and Measurement', 'Materials Science / Specialty Chemicals', 'Robotics', 'Servers', 'HPC', 'Compute'],
         130000,
         ['Remote', 'United States', 'South Carolina', 'North Carolina', 'Georgia', 'Florida', 'South East', 'South'],
@@ -1345,10 +1347,10 @@ async function runScoutInBackground(runId: number): Promise<void> {
     for (const m of matches) {
       const source = newJobs.find(j => j.applyUrl === m.applyUrl)?.source ?? '';
       await pool.query(
-        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
          ON CONFLICT (apply_url) DO NOTHING`,
-        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false]
+        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null]
       );
     }
 
@@ -1589,6 +1591,10 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .card-foot{padding:12px 18px;display:flex;gap:8px;flex-wrap:wrap}
 .source-badge{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;background:#222;color:var(--muted)}
 .age-badge{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:500;background:transparent;color:var(--muted);border:1px solid #333}
+.ai-risk-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+.ai-risk-LOW{background:rgba(0,200,110,.12);color:#00c86e;border:1px solid rgba(0,200,110,.3)}
+.ai-risk-MEDIUM{background:rgba(255,180,0,.12);color:#ffb400;border:1px solid rgba(255,180,0,.3)}
+.ai-risk-HIGH{background:rgba(255,70,70,.15);color:#ff4646;border:1px solid rgba(255,70,70,.3)}
 .salary-estimated{color:#d4a843;font-size:12px}
 .salary-estimated .est-prefix{opacity:0.7;font-size:10px}
 .salary-tooltip{position:relative;cursor:help}
@@ -2095,6 +2101,13 @@ function renderJobCard(j, opts) {
 
   var repvueBadge = renderRepVueBadge(j);
 
+  var aiRiskBadge = '';
+  if (j.ai_risk && j.ai_risk !== 'unknown') {
+    var riskLabel = j.ai_risk === 'LOW' ? '\\u2705 AI Safe' : j.ai_risk === 'MEDIUM' ? '\\u26A0\\uFE0F AI Medium' : '\\u26D4 AI Risk';
+    var riskTitle = j.ai_risk_reason ? esc(j.ai_risk_reason) : '';
+    aiRiskBadge = '<span class="ai-risk-badge ai-risk-' + esc(j.ai_risk) + '" title="' + riskTitle + '">' + riskLabel + '</span>';
+  }
+
   return '<div class="card">' +
     '<div class="card-head">' +
       '<div class="score-row"><span>Match Score</span><span class="score-val">' + esc(j.match_score) + ' / 100</span></div>' +
@@ -2106,6 +2119,7 @@ function renderJobCard(j, opts) {
     '<div class="card-meta">' +
       '<span>\\uD83D\\uDCCD ' + esc(j.location) + '</span>' +
       salaryHtml +
+      aiRiskBadge +
       repvueBadge +
       (j.source ? '<span class="source-badge">' + esc(j.source) + '</span>' : '') +
       (jobAge(j) ? '<span class="age-badge">' + jobAge(j) + '</span>' : '') +

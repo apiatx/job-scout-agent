@@ -40,6 +40,7 @@ ROLE_TITLES = [
     "Account Manager",
     "Enterprise Account Manager",
     "Senior Account Manager",
+    "Partner Manager",
     "Regional Sales Manager",
     "Territory Sales Manager",
 ]
