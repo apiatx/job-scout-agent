@@ -66,12 +66,28 @@ All routes are under `/api`:
 
 ## Frontend Pages
 
-1. **Dashboard** — Stats overview, recent matches, scout history, "Run Scout Now" button
-2. **Job Matches** — Filter/browse all jobs, update status, generate tailored docs
+1. **Dashboard** — Stats, "Run Scout Now" button, tier tabs (Top Targets / Fast Wins / Stretch / Probably Skip / All), rescore banner
+2. **Job Matches** — Tier-filtered job cards with sub-score breakdown (7 dimensions), ⚠ Territory badge, AI risk badge, salary estimates
 3. **Target Companies** — Add/remove companies with ATS type and slug
-4. **Search Criteria** — Edit all job search preferences
+4. **Search Criteria** — Edit job search preferences including "Reject remote-in-territory" toggle
 5. **Base Resume** — Paste full resume text
 6. **Gmail Integration** — OAuth connection, send digest manually
+
+## Opportunity Scoring Engine
+
+- **7 Sub-scores**: roleFit, companyQuality, locationFit, hiringUrgency, tailoringRequired, referralOdds, realVsFake (each 0-10)
+- **4 Tiers**: Top Target / Fast Win / Stretch Role / Probably Skip (computed by Claude + fallback logic)
+- **AI Risk**: LOW/MEDIUM/HIGH with score penalties (-20 HIGH, -5 MEDIUM)
+- **Rescore endpoint**: `POST /api/jobs/rescore-all` — batch-scores all unscored jobs in background (batches of 8)
+- **Sub-score storage**: `sub_scores JSONB` column on jobs table
+
+## Location Filtering
+
+- **Remote-in-territory detection**: Jobs with "Remote, Chicago" or "Remote (Austin area)" are detected as territory roles (must live near that city)
+- **`remote_strict` setting** (default: true): When on, territory jobs are only accepted if that city matches user's target locations
+- **State abbreviation mapping**: "Georgia" → "GA" and vice versa, for matching
+- **⚠ Territory badge**: Shown on job cards for remote-in-territory roles
+- **Claude-aware**: The remote preference is included in the prompt so Claude's `locationFit` score reflects it
 
 ## Gmail Setup (User-Facing)
 

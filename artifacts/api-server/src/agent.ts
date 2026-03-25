@@ -40,6 +40,7 @@ interface CriteriaForAgent {
   industries: string[];
   minSalary?: number | null;
   locations: string[];
+  remoteStrict?: boolean;
   mustHave: string[];
   niceToHave: string[];
   avoid: string[];
@@ -66,6 +67,7 @@ EVALUATION FRAMEWORK
 ROLE ELIGIBILITY (hard gates — score 0 if violated):
 - Only quota-carrying AE/AM/Partner roles qualify. Immediately reject: Solutions Architect, Sales Engineer, Engagement Manager, Channel Manager, Customer Success Manager, Marketing, Recruiting, HR, Finance, Legal — UNLESS the description explicitly states direct quota responsibility.
 - Location: If candidate lists specific US regions, reject jobs outside those areas with matchScore=0 and locationFit=0.
+- REMOTE vs REMOTE-IN-TERRITORY: "Remote" alone = fully flexible, work from anywhere. "Remote, Chicago" or "Remote (Austin area)" = must live near that city — this is a territory role. If candidate has not listed that city in their preferred locations, treat it as a location mismatch and score locationFit accordingly (2-4 if territory city is distant, 0 if strict location filtering is required).
 
 ROLE TYPE SCORING GUIDANCE:
 - Enterprise AE = primary target → score 75-95 at strong companies
@@ -331,6 +333,9 @@ export async function scoreJobsWithClaude(jobs: ScrapedJob[], criteria: Criteria
     criteria.industries.length ? `Industries: ${criteria.industries.join(', ')}` : '',
     criteria.minSalary ? `Minimum salary: $${criteria.minSalary.toLocaleString()} base` : '',
     criteria.locations.length ? `Locations: ${criteria.locations.join(', ')}` : '',
+    criteria.remoteStrict !== false
+      ? `Remote preference: Reject remote-in-territory (e.g. "Remote, Chicago") unless that city is in target locations. True remote (no city attached) is acceptable.`
+      : `Remote preference: Accept all jobs marked remote, including remote-in-territory.`,
     criteria.mustHave.length ? `Must have: ${criteria.mustHave.join(', ')}` : '',
     criteria.niceToHave.length ? `Nice to have: ${criteria.niceToHave.join(', ')}` : '',
     criteria.avoid.length ? `Avoid: ${criteria.avoid.join(', ')}` : '',

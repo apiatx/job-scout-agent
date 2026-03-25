@@ -135,6 +135,7 @@ async function initDb(): Promise<void> {
   await safeAddColumn('research_briefs', 'status', "TEXT NOT NULL DEFAULT 'ready'");
   await safeAddColumn('research_briefs', 'error', 'TEXT');
   await safeAddColumn('criteria', 'work_type', "TEXT NOT NULL DEFAULT 'any'");
+  await safeAddColumn('criteria', 'remote_strict', 'BOOLEAN NOT NULL DEFAULT true');
   await safeAddColumn('jobs', 'saved_at', 'TIMESTAMPTZ');
   await safeAddColumn('scout_runs', 'companies_scanned', 'INT NOT NULL DEFAULT 0');
   await safeAddColumn('scout_runs', 'matches_found', 'INT NOT NULL DEFAULT 0');
@@ -491,23 +492,24 @@ app.get('/api/criteria', async (_req, res: Response) => {
 
 app.put('/api/criteria', async (req: Request, res: Response) => {
   try {
-    const { target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email } = req.body;
+    const { target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email, remote_strict } = req.body;
     const { rows: existing } = await pool.query('SELECT id FROM criteria LIMIT 1');
     const params = [
       target_roles ?? [], industries ?? [], min_salary ?? null, work_type ?? 'any', locations ?? [],
       must_have ?? [], nice_to_have ?? [], avoid ?? [], your_name ?? '', your_email ?? '',
+      remote_strict !== false,
     ];
     if (existing.length === 0) {
       const { rows } = await pool.query(
-        `INSERT INTO criteria (target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`, params
+        `INSERT INTO criteria (target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email, remote_strict)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`, params
       );
       res.json(rows[0]);
     } else {
       const { rows } = await pool.query(
         `UPDATE criteria SET target_roles=$1, industries=$2, min_salary=$3, work_type=$4, locations=$5,
-         must_have=$6, nice_to_have=$7, avoid=$8, your_name=$9, your_email=$10
-         WHERE id=$11 RETURNING *`, [...params, existing[0].id]
+         must_have=$6, nice_to_have=$7, avoid=$8, your_name=$9, your_email=$10, remote_strict=$11
+         WHERE id=$12 RETURNING *`, [...params, existing[0].id]
       );
       res.json(rows[0]);
     }
@@ -633,6 +635,7 @@ app.post('/api/jobs/rescore-all', async (_req, res: Response) => {
       criteria.industries?.length ? `Industries: ${criteria.industries.join(', ')}` : '',
       criteria.min_salary ? `Minimum salary: $${criteria.min_salary.toLocaleString()} base` : '',
       criteria.locations?.length ? `Locations: ${criteria.locations.join(', ')}` : '',
+      criteria.remote_strict !== false ? `Remote preference: Reject remote-in-territory (e.g. "Remote, Chicago") unless that city is in target locations. True remote (no city attached) is acceptable.` : `Remote preference: Accept all jobs marked remote, including remote-in-territory.`,
       criteria.must_have?.length ? `Must have: ${criteria.must_have.join(', ')}` : '',
       criteria.nice_to_have?.length ? `Nice to have: ${criteria.nice_to_have.join(', ')}` : '',
       criteria.avoid?.length ? `Avoid: ${criteria.avoid.join(', ')}` : '',
@@ -1282,15 +1285,36 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
     // 1. Location hard filter — only pass jobs that match user's location preferences
     const hasLocationPrefs = criteria.locations.length > 0;
+    const remoteStrict: boolean = criteria.remote_strict !== false; // default true
     const locationAllowTerms = new Set<string>();
     let allowRemote = false;
     let allowUnitedStates = false;
+
+    // State name ↔ abbreviation mapping for bidirectional matching
+    const STATE_ABBREV: Record<string, string> = {
+      'alabama':'AL','alaska':'AK','arizona':'AZ','arkansas':'AR','california':'CA','colorado':'CO',
+      'connecticut':'CT','delaware':'DE','florida':'FL','georgia':'GA','hawaii':'HI','idaho':'ID',
+      'illinois':'IL','indiana':'IN','iowa':'IA','kansas':'KS','kentucky':'KY','louisiana':'LA',
+      'maine':'ME','maryland':'MD','massachusetts':'MA','michigan':'MI','minnesota':'MN',
+      'mississippi':'MS','missouri':'MO','montana':'MT','nebraska':'NE','nevada':'NV',
+      'new hampshire':'NH','new jersey':'NJ','new mexico':'NM','new york':'NY',
+      'north carolina':'NC','north dakota':'ND','ohio':'OH','oklahoma':'OK','oregon':'OR',
+      'pennsylvania':'PA','rhode island':'RI','south carolina':'SC','south dakota':'SD',
+      'tennessee':'TN','texas':'TX','utah':'UT','vermont':'VT','virginia':'VA',
+      'washington':'WA','west virginia':'WV','wisconsin':'WI','wyoming':'WY',
+      'district of columbia':'DC','washington dc':'DC',
+    };
+    const ABBREV_TO_STATE: Record<string, string> = Object.fromEntries(Object.entries(STATE_ABBREV).map(([k,v]) => [v.toLowerCase(), k]));
+
     if (hasLocationPrefs) {
       for (const loc of criteria.locations) {
         const lower = loc.trim().toLowerCase();
         if (lower === 'remote') { allowRemote = true; continue; }
-        if (lower === 'united states') { allowUnitedStates = true; continue; }
+        if (lower === 'united states' || lower === 'usa' || lower === 'us') { allowUnitedStates = true; continue; }
         locationAllowTerms.add(lower);
+        // Also add the abbreviation/full-name counterpart so "Georgia" matches "GA" and vice versa
+        if (STATE_ABBREV[lower]) locationAllowTerms.add(STATE_ABBREV[lower].toLowerCase());
+        if (ABBREV_TO_STATE[lower]) locationAllowTerms.add(ABBREV_TO_STATE[lower]);
       }
     }
 
@@ -1298,14 +1322,48 @@ async function runScoutInBackground(runId: number): Promise<void> {
       ? new RegExp(`\\b(${Array.from(locationAllowTerms).map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'i')
       : null;
 
+    // Detect "remote in territory": location has "remote" PLUS a specific city/state
+    // True remote: "Remote", "Remote - US", "Remote, United States", "100% Remote", "Remote Anywhere"
+    // Remote-in-territory: "Remote, Chicago, IL", "Remote (Austin)", "Dallas, TX (Remote)", "Chicago, IL - Remote"
+    const US_STATE_ABBREVS = /\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b/;
+    function isRemoteInTerritory(loc: string): boolean {
+      if (!/remote/i.test(loc)) return false;
+      // Strip out "remote" and universal terms; if meaningful location remains, it's territory-based
+      const stripped = loc
+        .replace(/remote/gi, '')
+        .replace(/united states?/gi, '')
+        .replace(/\b(usa?|100%|fully|full[- ]?time|work from home|wfh|anywhere|nationwide|national|in|the|of|for|only)\b/gi, '')
+        .replace(/[-–,\s().\/;]+/g, ' ')
+        .trim();
+      // Territory if: 3+ letter word remains (city/state name) OR a US state abbreviation remains
+      return /[a-zA-Z]{3,}/.test(stripped) || US_STATE_ABBREVS.test(stripped);
+    }
+
     function jobMatchesLocation(jobLocation: string): boolean {
       if (!hasLocationPrefs) return true; // no prefs = accept all
       const loc = jobLocation.trim();
-      // "Remote" in job listing matches if user allows remote or united states
-      if (/remote/i.test(loc) && (allowRemote || allowUnitedStates)) return true;
-      // "United States" in job listing matches if user allows united states
+      const hasRemote = /remote/i.test(loc);
+      const territory = isRemoteInTerritory(loc);
+
+      if (hasRemote && !territory) {
+        // True fully-remote job — accept if user allows remote or US-wide
+        return allowRemote || allowUnitedStates;
+      }
+
+      if (hasRemote && territory) {
+        // Remote-in-territory job (e.g. "Remote, Chicago, IL")
+        if (!remoteStrict) {
+          // Lenient mode: treat it like any remote job
+          return allowRemote || allowUnitedStates || (locationAllowPattern ? locationAllowPattern.test(loc) : false);
+        }
+        // Strict mode: ONLY the specific city/state term must match — "United States" does NOT override
+        // (e.g. "Remote, Massachusetts" rejected even if user has "United States" in their list)
+        if (locationAllowPattern && locationAllowPattern.test(loc)) return true;
+        return false; // territory city not in user's list
+      }
+
+      // Non-remote job
       if (/united states/i.test(loc) && allowUnitedStates) return true;
-      // Check against specific location terms
       if (locationAllowPattern && locationAllowPattern.test(loc)) return true;
       return false;
     }
@@ -1394,6 +1452,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
         industries: criteria.industries,
         minSalary: criteria.min_salary,
         locations: criteria.locations,
+        remoteStrict: criteria.remote_strict !== false,
         mustHave: criteria.must_have,
         niceToHave: criteria.nice_to_have,
         avoid: criteria.avoid,
@@ -1968,9 +2027,18 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </select>
     </div>
     <div class="fg full">
-      <label>Locations <span class="hint">(press Enter to add)</span></label>
-      <input type="text" id="set-loc-input" placeholder="e.g. New York, Remote, Austin TX">
+      <label>Locations <span class="hint">(press Enter to add — include "Remote" for true remote roles)</span></label>
+      <input type="text" id="set-loc-input" placeholder="e.g. Remote, Austin TX, San Francisco">
       <div class="tag-list" id="set-loc-tags"></div>
+    </div>
+    <div class="fg full" style="padding:10px 14px;background:#141414;border:1px solid var(--border);border-radius:8px;margin-top:-4px">
+      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin:0">
+        <input type="checkbox" id="set-remote-strict" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
+        <div>
+          <div style="font-size:13px;color:var(--text);font-weight:600">Reject remote-in-territory jobs</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:3px;line-height:1.5">When a job says "Remote, Chicago" or "Remote (Austin area)" it means you must live near that city — it's a territory role, not true remote. With this on, those jobs are only shown if that city is in your target locations above. Recommended: <strong style="color:var(--gold)">ON</strong></div>
+        </div>
+      </label>
     </div>
     <div class="fg full">
       <label>Target Roles <span class="hint">(press Enter to add)</span></label>
@@ -2134,6 +2202,18 @@ var _jobsById = {};
 var _allJobs = [];
 var _currentJobsTab = 'target';
 var _jobsRetries = 0;
+function isRemoteInTerritory(loc) {
+  if (!loc || !/remote/i.test(loc)) return false;
+  var stripped = loc
+    .replace(/remote/gi, '')
+    .replace(/united states?/gi, '')
+    .replace(/\\b(usa?|100%|fully|full[- ]?time|work from home|wfh|anywhere|nationwide|national|in|the|of|for|only)\\b/gi, '')
+    .replace(/[-\u2013,\\s().\\\/;]+/g, ' ')
+    .trim();
+  var US_ABBREVS = /\\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\\b/;
+  return /[a-zA-Z]{3,}/.test(stripped) || US_ABBREVS.test(stripped);
+}
+
 function repvueSlug(name) {
   return name.replace(/\\s*\\|.*$/, '').replace(/\\s*\\(.*?\\)\\s*/g, '').replace(/,?\\s*(Inc\\.?|LLC|Ltd\\.?|Corp\\.?|Corporation|Company|Co\\.?)$/i, '').trim().replace(/\\s+/g, '');
 }
@@ -2335,6 +2415,7 @@ function renderJobCard(j, opts) {
   var tBadge = tierBadgeHtml(j);
   var ssHtml = subScoresHtml(j);
   var ssToggle = j.sub_scores ? '<button class="sub-score-toggle" onclick="toggleSubScores(' + j.id + ')">Scoring Details</button>' : '';
+  var territoryBadge = isRemoteInTerritory(j.location) ? '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600;background:rgba(255,159,67,.12);color:#ff9f43;border:1px solid rgba(255,159,67,.3)" title="This job requires you to live near the listed city, not work from anywhere.">&#x26A0; Territory</span>' : '';
 
   return '<div class="card ' + tierClass + '">' +
     '<div class="card-head">' +
@@ -2351,6 +2432,7 @@ function renderJobCard(j, opts) {
       '<span>\\uD83D\\uDCCD ' + esc(j.location) + '</span>' +
       salaryHtml +
       aiRiskBadge +
+      territoryBadge +
       repvueBadge +
       (j.source ? '<span class="source-badge">' + esc(j.source) + '</span>' : '') +
       (jobAge(j) ? '<span class="age-badge">' + jobAge(j) + '</span>' : '') +
@@ -2808,6 +2890,7 @@ async function loadCriteria() {
     var c = await res.json();
     document.getElementById('set-salary').value = c.min_salary || '';
     document.getElementById('set-worktype').value = c.work_type || 'any';
+    document.getElementById('set-remote-strict').checked = c.remote_strict !== false;
     document.getElementById('set-name').value = c.your_name || '';
     document.getElementById('set-email').value = c.your_email || '';
     setTags('locations', 'set-loc-tags', c.locations);
@@ -2833,6 +2916,7 @@ async function saveCriteria() {
   var body = {
     min_salary: Number(document.getElementById('set-salary').value) || null,
     work_type: document.getElementById('set-worktype').value,
+    remote_strict: document.getElementById('set-remote-strict').checked,
     your_name: document.getElementById('set-name').value.trim(),
     your_email: document.getElementById('set-email').value.trim(),
     locations: _criteriaTagState.locations || [],
