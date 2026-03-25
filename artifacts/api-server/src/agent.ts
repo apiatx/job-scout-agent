@@ -51,6 +51,13 @@ The candidate's preferred locations are listed below in the criteria. Evaluate l
 - If the candidate has no location preferences, accept any location.
 - When in doubt about whether a location matches, lean toward rejecting the job.
 
+ROLE EVALUATION RULES:
+- Quota-carrying AE/sales roles are the target. Score 0 for: Solutions Architect, Sales Engineer, Engagement Manager, Partner Manager, Channel Manager, Customer Success Manager, Marketing, Recruiting, HR, Finance, Legal, or any non-quota-carrying role — UNLESS the description explicitly describes a direct quota-carrying sales position.
+- "Enterprise Account Executive" and "Commercial Account Executive" and "Mid-Market Account Executive" and "Corporate Account Executive" are ALL excellent matches. Commercial and mid-market AE roles at hardware, semiconductor, storage, networking, infrastructure, or industrial technology companies are HIGHLY DESIRABLE — score them 70+ if the company sells physical/hardware technology products.
+- Pure SaaS-only software roles that don't touch hardware, infrastructure, or physical technology should score lower (the candidate prefers hardware/tech-adjacent industries).
+- "Director of Sales" or "Sales Director" roles are acceptable if they involve individual quota, not just people management.
+- Government/SLED-focused roles (Public Sector AE, SLED AE) are lower priority — score them 50-60 unless the candidate explicitly lists government as a target.
+
 ${companySpecificSection}
 
 Job:
@@ -67,7 +74,7 @@ Respond ONLY with a JSON object (no markdown, no extra text):
 {
   "matchScore": <0-100 integer>,
   "whyGoodFit": "<2-3 sentences explaining fit or why it doesn't match>",
-  "isMatch": <true if score >= 50, else false>,
+  "isMatch": <true if score >= 60, else false>,
   "isHardware": <true if the role is primarily hardware/infrastructure/networking/storage/semiconductor, false if software>
 }`;
 

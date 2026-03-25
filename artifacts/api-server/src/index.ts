@@ -175,7 +175,7 @@ async function initDb(): Promise<void> {
       `INSERT INTO criteria (target_roles, industries, min_salary, locations, must_have, nice_to_have, avoid)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
-        ['Enterprise Account Executive', 'Strategic Account Executive', 'Senior Account Executive', 'Regional Sales Manager', 'Named Account Executive', 'sales account executive', 'sales executive', 'senior sales executive', 'sr. sales executive', 'mid market account executive', 'mid-market account executive', 'account manager', 'Enterprise account manager', 'senior account manager', 'sr. account manager', 'strategic account manager'],
+        ['Enterprise Account Executive', 'Strategic Account Executive', 'Commercial Account Executive', 'Mid-Market Account Executive', 'Corporate Account Executive', 'Senior Account Executive', 'Regional Sales Manager', 'Named Account Executive', 'sales account executive', 'sales executive', 'senior sales executive', 'sr. sales executive', 'mid market account executive', 'mid-market account executive', 'account manager', 'Enterprise account manager', 'senior account manager', 'sr. account manager', 'strategic account manager'],
         ['AI Infrastructure', 'Data Center Hardware', 'Semiconductors', 'Networking Hardware', 'Storage Hardware', 'Optical Networking', 'Edge Computing', 'Power & Cooling Infrastructure', 'Server Hardware', 'Industrial Automation', 'Oilfield Services Technology', 'Energy Technology', 'Clean Energy / Energy Storage', 'Machine Vision', 'Test and Measurement', 'Materials Science / Specialty Chemicals', 'Robotics', 'Servers', 'HPC', 'Compute'],
         130000,
         ['Remote', 'United States', 'South Carolina', 'North Carolina', 'Georgia', 'Florida', 'South East', 'South'],
@@ -540,8 +540,9 @@ app.delete('/api/companies/:id', async (req: Request, res: Response) => {
 app.get('/api/jobs', async (req: Request, res: Response) => {
   try {
     const minScore = Number(req.query.min_score) || 0;
+    const sort = req.query.sort === 'score' ? 'match_score DESC, found_at DESC' : 'found_at DESC, match_score DESC';
     const { rows } = await pool.query(
-      'SELECT * FROM jobs WHERE match_score >= $1 ORDER BY match_score DESC, created_at DESC',
+      `SELECT * FROM jobs WHERE match_score >= $1 ORDER BY ${sort}`,
       [minScore]
     );
 
@@ -1297,17 +1298,28 @@ async function runScoutInBackground(runId: number): Promise<void> {
     console.log(`  Remaining for Claude scoring: ${preFiltered.length}`);
     console.log(`───────────────────────────────────────────────────────────`);
 
-    if (preFiltered.length === 0) {
+    // ── Skip jobs already in the DB — only score genuinely new listings ──
+    const { rows: existingRows } = await pool.query('SELECT apply_url FROM jobs');
+    const seenUrls = new Set(existingRows.map((r: any) => r.apply_url as string));
+    const newJobs = preFiltered.filter(j => !seenUrls.has(j.applyUrl));
+    const skippedAlreadySeen = preFiltered.length - newJobs.length;
+    console.log(`\n──── NEW JOB FILTER ─────────────────────────────────────────`);
+    console.log(`  Already in DB (skipped): ${skippedAlreadySeen}`);
+    console.log(`  Genuinely new → Claude:  ${newJobs.length}`);
+    console.log(`───────────────────────────────────────────────────────────`);
+
+    if (newJobs.length === 0) {
       await pool.query(
-        "UPDATE scout_runs SET status='completed', companies_scanned=$1, jobs_found=0, matches_found=0, completed_at=NOW() WHERE id=$2",
-        [companiesScanned, runId]
+        "UPDATE scout_runs SET status='completed', companies_scanned=$1, jobs_found=$2, matches_found=0, completed_at=NOW() WHERE id=$3",
+        [companiesScanned, allJobs.length, runId]
       );
       return;
     }
 
     // Pass pre-approved company names from the database to Claude scoring
+    // Only send genuinely new jobs (URLs not already in DB) to Claude
     const matches = await scoreJobsWithClaude(
-      preFiltered.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
+      newJobs.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
       {
         targetRoles: criteria.target_roles,
         industries: criteria.industries,
@@ -1321,7 +1333,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     );
 
     console.log(`\n──── CLAUDE SCORING RESULTS ────────────────────────────────`);
-    console.log(`Claude returned ${matches.length} matches from ${preFiltered.length} candidates`);
+    console.log(`Claude returned ${matches.length} matches from ${newJobs.length} new candidates`);
     if (matches.length > 0) {
       const matchesByCompany: Record<string, number> = {};
       for (const m of matches) matchesByCompany[m.company] = (matchesByCompany[m.company] || 0) + 1;
@@ -1331,15 +1343,11 @@ async function runScoutInBackground(runId: number): Promise<void> {
     console.log(`───────────────────────────────────────────────────────────`);
 
     for (const m of matches) {
-      const source = preFiltered.find(j => j.applyUrl === m.applyUrl)?.source ?? '';
+      const source = newJobs.find(j => j.applyUrl === m.applyUrl)?.source ?? '';
       await pool.query(
         `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-         ON CONFLICT (apply_url) DO UPDATE SET
-           scout_run_id = EXCLUDED.scout_run_id,
-           match_score = EXCLUDED.match_score,
-           why_good_fit = EXCLUDED.why_good_fit,
-           created_at = NOW()`,
+         ON CONFLICT (apply_url) DO NOTHING`,
         [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false]
       );
     }
@@ -2027,16 +2035,16 @@ function showJobsTab(tab) {
 }
 
 function isNew(j) {
-  if (!j.created_at) return false;
-  var d = new Date(j.created_at);
+  if (!j.found_at) return false;
+  var d = new Date(j.found_at);
   var now = new Date();
   var diff = now.getTime() - d.getTime();
   return diff < 2 * 24 * 60 * 60 * 1000; // 2 days
 }
 
 function jobAge(j) {
-  if (!j.created_at) return '';
-  var d = new Date(j.created_at);
+  if (!j.found_at) return '';
+  var d = new Date(j.found_at);
   var now = new Date();
   var diff = now.getTime() - d.getTime();
   var mins = Math.floor(diff / 60000);
@@ -2134,9 +2142,9 @@ function renderJobs() {
     cnt.textContent = jobs.length + ' top match' + (jobs.length !== 1 ? 'es' : '') + ' (score 50+)' + (newTopCount ? ' \\u2014 ' + newTopCount + ' new' : '');
     grid.innerHTML = jobs.map(function(j) { return renderJobCard(j, { showNew: true }); }).join('');
   } else {
-    // Recent listings: sorted by created_at desc
+    // Recent listings: sorted by found_at desc
     jobs = _allJobs.slice().sort(function(a, b) {
-      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      return new Date(b.found_at).getTime() - new Date(a.found_at).getTime();
     });
     if (!jobs.length) {
       cnt.textContent = 'No recent listings yet';
