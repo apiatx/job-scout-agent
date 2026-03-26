@@ -40,7 +40,7 @@ interface CriteriaForAgent {
   industries: string[];
   minSalary?: number | null;
   locations: string[];
-  remoteStrict?: boolean;
+  allowedWorkModes?: string[];
   mustHave: string[];
   niceToHave: string[];
   avoid: string[];
@@ -237,8 +237,11 @@ export interface TierSettings {
   topTargetScore?: number;      // Min match score for Top Target (default 65)
   fastWinScore?: number;        // Min match score for Fast Win (default 55)
   stretchScore?: number;        // Min match score for Stretch Role (default 55)
-  experienceLevel?: string;     // 'junior' | 'mid' | 'senior' | 'enterprise' | 'director'
+  experienceLevels?: string[];  // Array of: 'junior' | 'mid' | 'senior' | 'enterprise' | 'director'
 }
+
+// Level hierarchy rank — higher = more senior
+const LEVEL_RANK: Record<string, number> = { junior: 0, mid: 1, senior: 2, enterprise: 3, director: 4 };
 
 const DEFAULT_STRETCH_COMPANIES = ['databricks', 'snowflake', 'workday', 'servicenow', 'veeva', 'palantir', 'salesforce'];
 const DEFAULT_VERTICAL_NICHES   = ['federal', 'government', 'sled', 'fsi', 'dod', 'defense', 'navy', 'army', 'air force', 'marines', 'public sector', 'healthcare', 'health system', 'life sciences', 'pharma', 'pharmaceutical', 'banking', 'financial services', 'insurance', 'education', 'k-12', 'higher ed', 'gsi', 'hyperscaler', 'hyperscale'];
@@ -282,6 +285,13 @@ export function computeTier(
     return new RegExp(`\\b${escaped}\\b`, 'i').test(titleLower);
   });
 
+  // === EXPERIENCE LEVEL CONFIGURATION ===
+  // Determine the highest selected level — that sets the ceiling for what's "accessible"
+  const expLevels = (settings?.experienceLevels && settings.experienceLevels.length > 0)
+    ? settings.experienceLevels
+    : ['senior'];
+  const maxRank = Math.max(...expLevels.map((l) => LEVEL_RANK[l] ?? 2)); // default to senior (2)
+
   // === ROLE TITLE ANALYSIS ===
   const isStrategic    = /\bstrategic\b/i.test(title);
   const isDirector     = /\b(director|rvp\b|vice president|vp\b)\b/i.test(title);
@@ -291,8 +301,22 @@ export function computeTier(
   const hasEnterprise  = /\benterprise\b/i.test(title);
   const isSrEnterprise = isSenior && hasEnterprise;
 
+  // Signals that a role is ABOVE the user's current experience level — adjusted by maxRank:
+  //   rank < 1 (junior):     commercial/MM/enterprise all count as above level
+  //   rank 1 (mid):          enterprise counts as above level
+  //   rank 2 (senior/default): Sr+Enterprise, Strategic, Director, Named, Principal = above
+  //   rank 3 (enterprise):   Named becomes accessible; Strategic/Director still above
+  //   rank 4 (director):     Strategic + Director become accessible; very little is above
+  const enterpriseAbove = maxRank < 1 ? hasEnterprise : false;          // junior only
+  const srEnterpriseAbove = maxRank < 2 ? isSrEnterprise : (maxRank === 2 ? isSrEnterprise : false);
+  const strategicAbove    = maxRank < 4 ? isStrategic : false;          // director can do strategic
+  const directorAbove     = maxRank < 4 ? isDirector  : false;          // director can do director roles
+  const namedAbove        = maxRank < 3 ? isNamedAE   : false;          // enterprise+ can handle named
+  const principalAbove    = isPrincipal;                                 // always above (IC track)
+
   // Signals that a role is ABOVE the user's current experience level
-  const isAboveLevel = isStrategic || isDirector || isPrincipal || isNamedAE || isSrEnterprise || hasVerticalNiche;
+  const isAboveLevel = strategicAbove || directorAbove || principalAbove || namedAbove ||
+    srEnterpriseAbove || enterpriseAbove || hasVerticalNiche;
 
   // Accessible role types — realistic laterals or one step up for AE background
   const hasCommercial         = /\bcommercial\b/i.test(title);
@@ -461,9 +485,14 @@ export async function scoreJobsWithClaude(jobs: ScrapedJob[], criteria: Criteria
     criteria.industries.length ? `Industries: ${criteria.industries.join(', ')}` : '',
     criteria.minSalary ? `Minimum salary: $${criteria.minSalary.toLocaleString()} base` : '',
     criteria.locations.length ? `Locations: ${criteria.locations.join(', ')}` : '',
-    criteria.remoteStrict !== false
-      ? `Remote preference: Reject remote-in-territory (e.g. "Remote, Chicago") unless that city is in target locations. True remote (no city attached) is acceptable.`
-      : `Remote preference: Accept all jobs marked remote, including remote-in-territory.`,
+    (() => {
+      const modes: string[] = criteria.allowedWorkModes ?? [];
+      const parts: string[] = [];
+      if (modes.includes('remote_us')) parts.push('true remote (US-wide, no city restriction)');
+      if (modes.includes('remote_in_territory')) parts.push('remote-in-territory (must live near specified city)');
+      if (modes.includes('onsite')) parts.push('on-site physical office');
+      return parts.length > 0 ? `Accepted work modes: ${parts.join(', ')}` : 'Work modes: any';
+    })(),
     criteria.mustHave.length ? `Must have: ${criteria.mustHave.join(', ')}` : '',
     criteria.niceToHave.length ? `Nice to have: ${criteria.niceToHave.join(', ')}` : '',
     criteria.avoid.length ? `Avoid: ${criteria.avoid.join(', ')}` : '',

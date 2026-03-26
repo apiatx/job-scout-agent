@@ -88,20 +88,44 @@ function buildLocationAllowPattern(locations: string[]): { pattern: RegExp | nul
   return { pattern, allowRemote, allowUnitedStates };
 }
 
-/** Returns true if this job's location is acceptable given the user's prefs */
-function checkJobLocation(jobLocation: string, locations: string[], remoteStrict: boolean): boolean {
+/** Returns true if this job's location is acceptable given the user's prefs and work modes */
+function checkJobLocation(
+  jobLocation: string,
+  locations: string[],
+  _remoteStrict: boolean,            // kept for backward compat — ignored when allowedWorkModes provided
+  allowedWorkModes?: string[],
+): boolean {
   if (!locations || locations.length === 0) return true;
   const loc = jobLocation.trim();
   const { pattern, allowRemote, allowUnitedStates } = buildLocationAllowPattern(locations);
-  const hasRemote = /remote/i.test(loc);
-  const territory = isRemoteInTerritory(loc);
+  const hasRemote  = /remote/i.test(loc);
+  const territory  = isRemoteInTerritory(loc);
 
-  if (hasRemote && !territory) return allowRemote || allowUnitedStates;   // true remote
-  if (hasRemote && territory) {
-    if (!remoteStrict) return allowRemote || allowUnitedStates || (pattern ? pattern.test(loc) : false);
-    return !!(pattern && pattern.test(loc));  // strict: must match territory
+  // New mode-based logic
+  if (allowedWorkModes && allowedWorkModes.length > 0) {
+    const modes = new Set(allowedWorkModes);
+    if (hasRemote && !territory) {
+      // True remote — check remote_us mode
+      return modes.has('remote_us');
+    }
+    if (hasRemote && territory) {
+      // Remote-in-territory — check mode AND territory city must match locations
+      if (!modes.has('remote_in_territory')) return false;
+      if (locations.length === 0) return true;
+      return !!(pattern && pattern.test(loc));
+    }
+    // Physical on-site job
+    if (!modes.has('onsite')) return false;
+    if (locations.length === 0) return true;
+    if (/^(united states|usa?)$/i.test(loc.trim())) return true;
+    return !!(pattern && pattern.test(loc));
   }
-  // Non-remote physical job
+
+  // Legacy fallback (no modes configured — use old remote_strict behavior)
+  if (hasRemote && !territory) return allowRemote || allowUnitedStates;
+  if (hasRemote && territory) {
+    return allowRemote || allowUnitedStates || !!(pattern && pattern.test(loc));
+  }
   if (/^(united states|usa?)$/i.test(loc.trim()) && allowUnitedStates) return true;
   return !!(pattern && pattern.test(loc));
 }
@@ -220,6 +244,34 @@ async function initDb(): Promise<void> {
   await safeAddColumn('criteria', 'top_target_score', 'INT NOT NULL DEFAULT 65');
   await safeAddColumn('criteria', 'fast_win_score', 'INT NOT NULL DEFAULT 55');
   await safeAddColumn('criteria', 'stretch_score', 'INT NOT NULL DEFAULT 55');
+  await safeAddColumn('criteria', 'allowed_work_modes', "TEXT[] NOT NULL DEFAULT '{}'");
+  await safeAddColumn('criteria', 'experience_levels', "TEXT[] NOT NULL DEFAULT '{}'");
+  // Migrate remote_strict → allowed_work_modes for existing rows
+  await pool.query(`
+    UPDATE criteria
+    SET allowed_work_modes = CASE
+      WHEN remote_strict = true  THEN ARRAY['remote_us']
+      ELSE ARRAY['remote_us','remote_in_territory','onsite']
+    END
+    WHERE allowed_work_modes = '{}'
+  `).catch(() => {});
+  // Migrate experience_level (single) → experience_levels (array) for existing rows
+  await pool.query(`
+    UPDATE criteria
+    SET experience_levels = ARRAY[experience_level]
+    WHERE experience_levels = '{}' AND experience_level IS NOT NULL AND experience_level <> ''
+  `).catch(() => {});
+  // Default experience_levels for rows that still have none
+  await pool.query(`
+    UPDATE criteria SET experience_levels = ARRAY['senior'] WHERE experience_levels = '{}'
+  `).catch(() => {});
+  // Simplify target_roles to base 3 roles (remove seniority — Experience Level handles that now)
+  await pool.query(`
+    UPDATE criteria
+    SET target_roles = ARRAY['Account Executive','Account Manager','Sales Executive']
+    WHERE target_roles @> ARRAY['Enterprise Account Executive']
+      AND NOT (target_roles = ARRAY['Account Executive','Account Manager','Sales Executive'])
+  `).catch(() => {});
   await safeAddColumn('jobs', 'saved_at', 'TIMESTAMPTZ');
   await safeAddColumn('scout_runs', 'companies_scanned', 'INT NOT NULL DEFAULT 0');
   await safeAddColumn('scout_runs', 'matches_found', 'INT NOT NULL DEFAULT 0');
@@ -264,7 +316,7 @@ async function initDb(): Promise<void> {
       `INSERT INTO criteria (target_roles, industries, min_salary, locations, must_have, nice_to_have, avoid)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
-        ['Enterprise Account Executive', 'Strategic Account Executive', 'Commercial Account Executive', 'Mid-Market Account Executive', 'Corporate Account Executive', 'Senior Account Executive', 'Regional Sales Manager', 'Named Account Executive', 'Partner Manager', 'sales account executive', 'sales executive', 'senior sales executive', 'sr. sales executive', 'mid market account executive', 'mid-market account executive', 'account manager', 'Enterprise account manager', 'senior account manager', 'sr. account manager', 'strategic account manager'],
+        ['Account Executive', 'Account Manager', 'Sales Executive'],
         ['AI Infrastructure', 'Data Center Hardware', 'Semiconductors', 'Networking Hardware', 'Storage Hardware', 'Optical Networking', 'Edge Computing', 'Power & Cooling Infrastructure', 'Server Hardware', 'Industrial Automation', 'Oilfield Services Technology', 'Energy Technology', 'Clean Energy / Energy Storage', 'Machine Vision', 'Test and Measurement', 'Materials Science / Specialty Chemicals', 'Robotics', 'Servers', 'HPC', 'Compute'],
         130000,
         ['Remote', 'United States', 'South Carolina', 'North Carolina', 'Georgia', 'Florida', 'South East', 'South'],
@@ -580,6 +632,7 @@ app.put('/api/criteria', async (req: Request, res: Response) => {
       target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid,
       your_name, your_email, remote_strict,
       experience_level, stretch_companies, vertical_niches, top_target_score, fast_win_score, stretch_score,
+      allowed_work_modes, experience_levels,
     } = req.body;
     const { rows: existing } = await pool.query('SELECT id FROM criteria LIMIT 1');
     const params = [
@@ -592,19 +645,22 @@ app.put('/api/criteria', async (req: Request, res: Response) => {
       top_target_score ?? 65,
       fast_win_score ?? 55,
       stretch_score ?? 55,
+      allowed_work_modes ?? ['remote_us'],
+      experience_levels && experience_levels.length > 0 ? experience_levels : ['senior'],
     ];
     if (existing.length === 0) {
       const { rows } = await pool.query(
-        `INSERT INTO criteria (target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email, remote_strict, experience_level, stretch_companies, vertical_niches, top_target_score, fast_win_score, stretch_score)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`, params
+        `INSERT INTO criteria (target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email, remote_strict, experience_level, stretch_companies, vertical_niches, top_target_score, fast_win_score, stretch_score, allowed_work_modes, experience_levels)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`, params
       );
       res.json(rows[0]);
     } else {
       const { rows } = await pool.query(
         `UPDATE criteria SET target_roles=$1, industries=$2, min_salary=$3, work_type=$4, locations=$5,
          must_have=$6, nice_to_have=$7, avoid=$8, your_name=$9, your_email=$10, remote_strict=$11,
-         experience_level=$12, stretch_companies=$13, vertical_niches=$14, top_target_score=$15, fast_win_score=$16, stretch_score=$17
-         WHERE id=$18 RETURNING *`, [...params, existing[0].id]
+         experience_level=$12, stretch_companies=$13, vertical_niches=$14, top_target_score=$15, fast_win_score=$16, stretch_score=$17,
+         allowed_work_modes=$18, experience_levels=$19
+         WHERE id=$20 RETURNING *`, [...params, existing[0].id]
       );
       res.json(rows[0]);
     }
@@ -730,7 +786,14 @@ app.post('/api/jobs/rescore-all', async (_req, res: Response) => {
       criteria.industries?.length ? `Industries: ${criteria.industries.join(', ')}` : '',
       criteria.min_salary ? `Minimum salary: $${criteria.min_salary.toLocaleString()} base` : '',
       criteria.locations?.length ? `Locations: ${criteria.locations.join(', ')}` : '',
-      criteria.remote_strict !== false ? `Remote preference: Reject remote-in-territory (e.g. "Remote, Chicago") unless that city is in target locations. True remote (no city attached) is acceptable.` : `Remote preference: Accept all jobs marked remote, including remote-in-territory.`,
+      (() => {
+        const modes: string[] = criteria.allowed_work_modes ?? [];
+        const parts: string[] = [];
+        if (modes.includes('remote_us')) parts.push('true remote (US-wide, no city restriction)');
+        if (modes.includes('remote_in_territory')) parts.push('remote-in-territory (must live near specified city)');
+        if (modes.includes('onsite')) parts.push('on-site physical office');
+        return parts.length > 0 ? `Accepted work modes: ${parts.join(', ')}` : 'Work modes: any';
+      })(),
       criteria.must_have?.length ? `Must have: ${criteria.must_have.join(', ')}` : '',
       criteria.nice_to_have?.length ? `Nice to have: ${criteria.nice_to_have.join(', ')}` : '',
       criteria.avoid?.length ? `Avoid: ${criteria.avoid.join(', ')}` : '',
@@ -780,14 +843,14 @@ async function reclassifyJobsLocally(): Promise<number> {
   const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
   const criteria = cRows[0] ?? {};
   const userLocations: string[] = criteria.locations ?? [];
-  const remoteStrict: boolean = criteria.remote_strict !== false;
+  const allowedWorkModes: string[] = criteria.allowed_work_modes ?? [];
   const tierSettings: TierSettings = {
     stretchCompanies: criteria.stretch_companies ?? [],
     verticalNiches: criteria.vertical_niches ?? [],
     topTargetScore: criteria.top_target_score ?? 65,
     fastWinScore: criteria.fast_win_score ?? 55,
     stretchScore: criteria.stretch_score ?? 55,
-    experienceLevel: criteria.experience_level ?? 'senior',
+    experienceLevels: criteria.experience_levels ?? ['senior'],
   };
 
   // Fetch all scored jobs (with or without sub_scores)
@@ -800,7 +863,7 @@ async function reclassifyJobsLocally(): Promise<number> {
   for (const j of rows) {
     try {
       const loc = (j.location ?? '').trim();
-      const locationOk = userLocations.length === 0 || checkJobLocation(loc, userLocations, remoteStrict);
+      const locationOk = userLocations.length === 0 || checkJobLocation(loc, userLocations, false, allowedWorkModes);
 
       let tier: OpportunityTier;
 
@@ -1335,6 +1398,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
       remote_strict: boolean; experience_level: string;
       stretch_companies: string[]; vertical_niches: string[];
       top_target_score: number; fast_win_score: number; stretch_score: number;
+      allowed_work_modes: string[]; experience_levels: string[];
     };
     const tierSettings: TierSettings = {
       stretchCompanies: criteria.stretch_companies ?? [],
@@ -1342,7 +1406,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
       topTargetScore: criteria.top_target_score ?? 65,
       fastWinScore: criteria.fast_win_score ?? 55,
       stretchScore: criteria.stretch_score ?? 55,
-      experienceLevel: criteria.experience_level ?? 'senior',
+      experienceLevels: criteria.experience_levels ?? ['senior'],
     };
 
     const { rows: companies } = await pool.query('SELECT * FROM companies');
@@ -1457,11 +1521,11 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
     // 1. Location hard filter — only pass jobs that match user's location preferences
     const hasLocationPrefs = criteria.locations.length > 0;
-    const remoteStrict: boolean = criteria.remote_strict !== false; // default true
+    const allowedWorkModes: string[] = criteria.allowed_work_modes ?? [];
 
     function jobMatchesLocation(jobLocation: string): boolean {
-      if (!hasLocationPrefs) return true;
-      return checkJobLocation(jobLocation, criteria.locations, remoteStrict);
+      if (!hasLocationPrefs && allowedWorkModes.length === 0) return true;
+      return checkJobLocation(jobLocation, criteria.locations, false, allowedWorkModes);
     }
 
     // 2. Avoid keywords hard filter — exclude jobs whose title or description contains avoid keywords
@@ -1548,7 +1612,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
         industries: criteria.industries,
         minSalary: criteria.min_salary,
         locations: criteria.locations,
-        remoteStrict: criteria.remote_strict !== false,
+        allowedWorkModes: criteria.allowed_work_modes ?? [],
         mustHave: criteria.must_have,
         niceToHave: criteria.nice_to_have,
         avoid: criteria.avoid,
@@ -1572,7 +1636,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
       let finalTier: string;
 
       // Apply location check + deterministic tier logic using our computeTier
-      const locationOk = checkJobLocation(loc, criteria.locations, remoteStrict);
+      const locationOk = checkJobLocation(loc, criteria.locations, false, allowedWorkModes);
       if (!locationOk) {
         finalTier = 'Probably Skip';
       } else if (m.subScores && m.matchScore) {
@@ -2132,32 +2196,40 @@ textarea:focus,input:focus{border-color:var(--gold)}
       <label>Minimum Base Pay</label>
       <div class="input-prefix"><span>$</span><input type="number" id="set-salary" placeholder="150000" step="5000"></div>
     </div>
-    <div class="fg">
-      <label>Work Type</label>
-      <select id="set-worktype">
-        <option value="any">Any</option>
-        <option value="remote">Remote</option>
-        <option value="office">Office / On-site</option>
-        <option value="hybrid">Hybrid</option>
-      </select>
+    <div class="fg full" style="padding:14px 16px;background:#141414;border:1px solid var(--border);border-radius:8px">
+      <label style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px;display:block">Work Modes <span class="hint">(select all that apply)</span></label>
+      <div style="display:flex;gap:20px;flex-wrap:wrap">
+        <label style="display:flex;align-items:flex-start;gap:9px;cursor:pointer">
+          <input type="checkbox" id="mode-remote-us" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--text)">Remote-US</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">Work from anywhere in the US — no city attached</div>
+          </div>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:9px;cursor:pointer">
+          <input type="checkbox" id="mode-territory" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--text)">Remote-in-territory</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">Remote but must live near a specific city (enter territory cities in Locations below)</div>
+          </div>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:9px;cursor:pointer">
+          <input type="checkbox" id="mode-onsite" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--text)">On-site</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">Physical office jobs — only shown if city matches your locations</div>
+          </div>
+        </label>
+      </div>
     </div>
     <div class="fg full">
-      <label>Locations <span class="hint">(press Enter to add — include "Remote" for true remote roles)</span></label>
-      <input type="text" id="set-loc-input" placeholder="e.g. Remote, Austin TX, San Francisco">
+      <label>Locations <span class="hint">(press Enter to add)</span></label>
+      <input type="text" id="set-loc-input" placeholder="e.g. Atlanta GA, Charlotte NC, Nashville TN">
       <div class="tag-list" id="set-loc-tags"></div>
-    </div>
-    <div class="fg full" style="padding:10px 14px;background:#141414;border:1px solid var(--border);border-radius:8px;margin-top:-4px">
-      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin:0">
-        <input type="checkbox" id="set-remote-strict" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
-        <div>
-          <div style="font-size:13px;color:var(--text);font-weight:600">Reject remote-in-territory jobs</div>
-          <div style="font-size:11px;color:var(--muted);margin-top:3px;line-height:1.5">When a job says "Remote, Chicago" or "Remote (Austin area)" it means you must live near that city — it's a territory role, not true remote. With this on, those jobs are only shown if that city is in your target locations above. Recommended: <strong style="color:var(--gold)">ON</strong></div>
-        </div>
-      </label>
     </div>
     <div class="fg full">
       <label>Target Roles <span class="hint">(press Enter to add)</span></label>
-      <input type="text" id="set-roles-input" placeholder="e.g. Enterprise Account Executive">
+      <input type="text" id="set-roles-input" placeholder="e.g. Account Executive, Account Manager">
       <div class="tag-list" id="set-roles-tags"></div>
     </div>
     <div class="fg full">
@@ -2194,15 +2266,46 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.6">These settings control how jobs are classified into tiers. Adjust thresholds and lists to tune what shows up as Top Target vs Fast Win vs Stretch.</div>
 
   <div class="settings-grid">
-    <div class="fg">
-      <label>Experience Level <span class="hint">(determines what's "above level")</span></label>
-      <select id="set-exp-level">
-        <option value="junior">Junior — entry-level AE, SMB focus</option>
-        <option value="mid">Mid — Commercial / MM AE</option>
-        <option value="senior">Senior — Enterprise / Regional AE (default)</option>
-        <option value="enterprise">Enterprise — large enterprise, majors</option>
-        <option value="director">Director — RVP, VP, Director-level</option>
-      </select>
+    <div class="fg full" style="padding:14px 16px;background:#141414;border:1px solid var(--border);border-radius:8px">
+      <label style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px;display:block">Experience Level <span class="hint">(check all levels you want to target — affects what counts as "above level")</span></label>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Jobs at levels above your highest checked level will be classified as Stretch. Select multiple to broaden your search.</div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:140px">
+          <input type="checkbox" id="exp-junior" class="exp-level-cb" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--text)">Junior</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:1px">Entry-level AE, SMB</div>
+          </div>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:140px">
+          <input type="checkbox" id="exp-mid" class="exp-level-cb" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--text)">Mid</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:1px">Commercial / Mid-Market AE</div>
+          </div>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:140px">
+          <input type="checkbox" id="exp-senior" class="exp-level-cb" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--text)">Senior</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:1px">Enterprise / Regional AE</div>
+          </div>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:140px">
+          <input type="checkbox" id="exp-enterprise" class="exp-level-cb" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--text)">Enterprise</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:1px">Major / Named Accounts</div>
+          </div>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:140px">
+          <input type="checkbox" id="exp-director" class="exp-level-cb" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--text)">Director</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:1px">RVP, VP, Director-level</div>
+          </div>
+        </label>
+      </div>
     </div>
     <div class="fg" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;align-items:end">
       <div>
@@ -3054,12 +3157,20 @@ async function loadCriteria() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     var c = await res.json();
     document.getElementById('set-salary').value = c.min_salary || '';
-    document.getElementById('set-worktype').value = c.work_type || 'any';
-    document.getElementById('set-remote-strict').checked = c.remote_strict !== false;
     document.getElementById('set-name').value = c.your_name || '';
     document.getElementById('set-email').value = c.your_email || '';
-    // Experience level & tier scoring
-    document.getElementById('set-exp-level').value = c.experience_level || 'senior';
+    // Work mode checkboxes
+    var modes = c.allowed_work_modes || ['remote_us'];
+    document.getElementById('mode-remote-us').checked = modes.includes('remote_us');
+    document.getElementById('mode-territory').checked = modes.includes('remote_in_territory');
+    document.getElementById('mode-onsite').checked = modes.includes('onsite');
+    // Experience level checkboxes (multi-select)
+    var expLevels = c.experience_levels || ['senior'];
+    ['junior','mid','senior','enterprise','director'].forEach(function(lvl) {
+      var el = document.getElementById('exp-' + lvl);
+      if (el) el.checked = expLevels.includes(lvl);
+    });
+    // Tier scoring sliders
     var topScore = c.top_target_score || 65;
     var fastScore = c.fast_win_score || 55;
     var stretchScore = c.stretch_score || 55;
@@ -3097,13 +3208,24 @@ async function loadCriteria() {
   }
 }
 async function saveCriteria() {
+  // Collect work modes from checkboxes
+  var workModes = [];
+  if (document.getElementById('mode-remote-us').checked) workModes.push('remote_us');
+  if (document.getElementById('mode-territory').checked) workModes.push('remote_in_territory');
+  if (document.getElementById('mode-onsite').checked) workModes.push('onsite');
+  // Collect experience levels from checkboxes
+  var expLevels = [];
+  ['junior','mid','senior','enterprise','director'].forEach(function(lvl) {
+    var el = document.getElementById('exp-' + lvl);
+    if (el && el.checked) expLevels.push(lvl);
+  });
+  if (expLevels.length === 0) expLevels = ['senior'];
   var body = {
     min_salary: Number(document.getElementById('set-salary').value) || null,
-    work_type: document.getElementById('set-worktype').value,
-    remote_strict: document.getElementById('set-remote-strict').checked,
+    allowed_work_modes: workModes,
+    experience_levels: expLevels,
     your_name: document.getElementById('set-name').value.trim(),
     your_email: document.getElementById('set-email').value.trim(),
-    experience_level: document.getElementById('set-exp-level').value,
     top_target_score: Number(document.getElementById('set-top-score').value) || 65,
     fast_win_score: Number(document.getElementById('set-fast-score').value) || 55,
     stretch_score: Number(document.getElementById('set-stretch-score').value) || 55,
