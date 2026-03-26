@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-JobSpy scraper — searches LinkedIn and Indeed for enterprise sales roles
-across hardware, infrastructure, AI, and industrial technology sectors.
+JobSpy scraper — searches Indeed for enterprise sales roles.
 
-Generates a full matrix of role titles x sector keywords (16 x 24 = 384 searches).
-Runs in batches of 5 with 2-second delays to avoid rate limiting.
-Deduplicates all results by job URL before output.
+Runs targeted role-title searches on Indeed to find jobs not covered by
+the direct Greenhouse/Lever/Workday scrapers.
 
 Usage: python3 jobspy_scraper.py
 Output: JSON array of job objects to stdout
@@ -26,101 +24,58 @@ except ImportError:
 
 import pandas as pd
 
-# ── Role titles ──────────────────────────────────────────────────────────────
-ROLE_TITLES = [
-    "Account Executive",
+# ── Role title searches (broad terms that catch the widest net) ───────────────
+ROLE_SEARCHES = [
     "Enterprise Account Executive",
     "Commercial Account Executive",
     "Mid-Market Account Executive",
     "Corporate Account Executive",
-    "Senior Account Executive",
-    "Named Account Executive",
+    "Regional Account Executive",
     "Major Account Executive",
-    "Strategic Account Executive",
-    "Account Manager",
-    "Enterprise Account Manager",
-    "Senior Account Manager",
     "Partner Manager",
     "Regional Sales Manager",
     "Territory Sales Manager",
+    "Senior Account Executive",
+    "Account Executive hardware",
+    "Account Executive infrastructure",
+    "Account Executive semiconductor",
+    "Account Executive networking",
+    "Account Manager enterprise technology",
 ]
 
-# ── Sector keywords ─────────────────────────────────────────────────────────
-SECTOR_KEYWORDS = [
-    "semiconductor",
-    "data center",
-    "networking",
-    "storage",
-    "artificial intelligence",
-    "optical",
-    "automation",
-    "energy",
-    "test and measurement",
-    "GPU",
-    "servers",
-    "infrastructure",
-    "edge computing",
-    "robotics",
-    "hardware",
-    "IoT",
-    "cloud infrastructure",
-    "industrial",
-    "photonics",
-    "compute",
-    "wireless",
-    "fiber",
-    "power systems",
-    "sensors",
-]
-
-# ── Generate full search matrix ─────────────────────────────────────────────
-SEARCHES = []
-for role in ROLE_TITLES:
-    for sector in SECTOR_KEYWORDS:
-        SEARCHES.append({
-            "site_name": ["linkedin", "indeed"],
-            "search_term": f"{role} {sector}",
-            "location": "United States",
-            "results_wanted": 10,
-            "is_remote": True,
-        })
-
-print(f"JobSpy: generated {len(SEARCHES)} searches ({len(ROLE_TITLES)} roles x {len(SECTOR_KEYWORDS)} sectors)", file=sys.stderr)
+print(f"JobSpy: {len(ROLE_SEARCHES)} targeted Indeed searches", file=sys.stderr)
 
 
-def run_search(search_params: dict) -> pd.DataFrame:
-    """Run a single JobSpy search, returning results as a DataFrame."""
-    term = search_params["search_term"]
+def run_search(term: str) -> "pd.DataFrame":
     try:
-        df = scrape_jobs(**search_params)
+        df = scrape_jobs(
+            site_name=["indeed"],
+            search_term=term,
+            location="United States",
+            results_wanted=15,
+            is_remote=True,
+            hours_old=168,  # last 7 days
+        )
         if len(df) > 0:
-            print(f"  ✓ \"{term}\" → {len(df)} results", file=sys.stderr)
+            print(f'  ✓ "{term}" → {len(df)} results', file=sys.stderr)
+        else:
+            print(f'  - "{term}" → 0 results', file=sys.stderr)
         return df
     except Exception as e:
-        print(f"  ✗ \"{term}\" → error: {e}", file=sys.stderr)
+        print(f'  ✗ "{term}" → error: {e}', file=sys.stderr)
         return pd.DataFrame()
 
 
 def main():
     all_frames = []
-    batch_size = 5
 
-    total_batches = (len(SEARCHES) + batch_size - 1) // batch_size
-    for batch_idx in range(total_batches):
-        start = batch_idx * batch_size
-        end = min(start + batch_size, len(SEARCHES))
-        batch = SEARCHES[start:end]
-
-        print(f"\n── Batch {batch_idx + 1}/{total_batches} (searches {start + 1}-{end}/{len(SEARCHES)}) ──", file=sys.stderr)
-
-        for search in batch:
-            df = run_search(search)
-            if not df.empty:
-                all_frames.append(df)
-
-        # Delay between batches (not after the last one)
-        if batch_idx < total_batches - 1:
-            time.sleep(2)
+    for i, term in enumerate(ROLE_SEARCHES):
+        df = run_search(term)
+        if not df.empty:
+            all_frames.append(df)
+        # Short delay to avoid rate limiting — not needed after last search
+        if i < len(ROLE_SEARCHES) - 1:
+            time.sleep(1.5)
 
     if not all_frames:
         print("JobSpy: no results from any search", file=sys.stderr)
@@ -131,15 +86,12 @@ def main():
     combined = pd.concat(all_frames, ignore_index=True)
     print(f"\nJobSpy: {len(combined)} total results before dedup", file=sys.stderr)
 
-    # Deduplicate by job_url
     if "job_url" in combined.columns:
         combined = combined.drop_duplicates(subset=["job_url"], keep="first")
     print(f"JobSpy: {len(combined)} unique results after dedup", file=sys.stderr)
 
-    # Convert to our JSON format
     jobs = []
     for _, row in combined.iterrows():
-        # Build location string
         location_parts = []
         if pd.notna(row.get("location")):
             location_parts.append(str(row["location"]))
@@ -148,7 +100,6 @@ def main():
                 location_parts.insert(0, "Remote")
         location = ", ".join(location_parts) if location_parts else "Unknown"
 
-        # Build salary string
         salary = None
         min_amount = row.get("min_amount")
         max_amount = row.get("max_amount")
@@ -165,12 +116,11 @@ def main():
             "location": location,
             "applyUrl": str(row.get("job_url", "")),
             "description": str(row.get("description", ""))[:2000] if pd.notna(row.get("description")) else None,
-            "source": str(row.get("site", "jobspy")),
+            "source": "indeed",
         }
         if salary:
             job["salary"] = salary
 
-        # Skip entries with no URL
         if not job["applyUrl"] or job["applyUrl"] == "nan":
             continue
 

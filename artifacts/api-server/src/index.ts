@@ -1,9 +1,9 @@
 import express, { type Request, type Response } from 'express';
 import pg from 'pg';
-import { scrapeGreenhouseJobs, scrapeLeverJobs, runJobSpyScraper } from './scraper.js';
+import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, runJobSpyScraper } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
 import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier } from './agent.js';
-import type { SubScores, OpportunityTier } from './agent.js';
+import type { SubScores, OpportunityTier, TierSettings } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
 // RepVue: link-out only (no scraping — RepVue blocks automated requests)
 
@@ -214,6 +214,12 @@ async function initDb(): Promise<void> {
   await safeAddColumn('research_briefs', 'error', 'TEXT');
   await safeAddColumn('criteria', 'work_type', "TEXT NOT NULL DEFAULT 'any'");
   await safeAddColumn('criteria', 'remote_strict', 'BOOLEAN NOT NULL DEFAULT true');
+  await safeAddColumn('criteria', 'experience_level', "TEXT NOT NULL DEFAULT 'senior'");
+  await safeAddColumn('criteria', 'stretch_companies', "TEXT[] NOT NULL DEFAULT '{}'");
+  await safeAddColumn('criteria', 'vertical_niches', "TEXT[] NOT NULL DEFAULT '{}'");
+  await safeAddColumn('criteria', 'top_target_score', 'INT NOT NULL DEFAULT 65');
+  await safeAddColumn('criteria', 'fast_win_score', 'INT NOT NULL DEFAULT 55');
+  await safeAddColumn('criteria', 'stretch_score', 'INT NOT NULL DEFAULT 55');
   await safeAddColumn('jobs', 'saved_at', 'TIMESTAMPTZ');
   await safeAddColumn('scout_runs', 'companies_scanned', 'INT NOT NULL DEFAULT 0');
   await safeAddColumn('scout_runs', 'matches_found', 'INT NOT NULL DEFAULT 0');
@@ -570,24 +576,35 @@ app.get('/api/criteria', async (_req, res: Response) => {
 
 app.put('/api/criteria', async (req: Request, res: Response) => {
   try {
-    const { target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email, remote_strict } = req.body;
+    const {
+      target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid,
+      your_name, your_email, remote_strict,
+      experience_level, stretch_companies, vertical_niches, top_target_score, fast_win_score, stretch_score,
+    } = req.body;
     const { rows: existing } = await pool.query('SELECT id FROM criteria LIMIT 1');
     const params = [
       target_roles ?? [], industries ?? [], min_salary ?? null, work_type ?? 'any', locations ?? [],
       must_have ?? [], nice_to_have ?? [], avoid ?? [], your_name ?? '', your_email ?? '',
       remote_strict !== false,
+      experience_level ?? 'senior',
+      stretch_companies ?? [],
+      vertical_niches ?? [],
+      top_target_score ?? 65,
+      fast_win_score ?? 55,
+      stretch_score ?? 55,
     ];
     if (existing.length === 0) {
       const { rows } = await pool.query(
-        `INSERT INTO criteria (target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email, remote_strict)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`, params
+        `INSERT INTO criteria (target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email, remote_strict, experience_level, stretch_companies, vertical_niches, top_target_score, fast_win_score, stretch_score)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`, params
       );
       res.json(rows[0]);
     } else {
       const { rows } = await pool.query(
         `UPDATE criteria SET target_roles=$1, industries=$2, min_salary=$3, work_type=$4, locations=$5,
-         must_have=$6, nice_to_have=$7, avoid=$8, your_name=$9, your_email=$10, remote_strict=$11
-         WHERE id=$12 RETURNING *`, [...params, existing[0].id]
+         must_have=$6, nice_to_have=$7, avoid=$8, your_name=$9, your_email=$10, remote_strict=$11,
+         experience_level=$12, stretch_companies=$13, vertical_niches=$14, top_target_score=$15, fast_win_score=$16, stretch_score=$17
+         WHERE id=$18 RETURNING *`, [...params, existing[0].id]
       );
       res.json(rows[0]);
     }
@@ -764,6 +781,14 @@ async function reclassifyJobsLocally(): Promise<number> {
   const criteria = cRows[0] ?? {};
   const userLocations: string[] = criteria.locations ?? [];
   const remoteStrict: boolean = criteria.remote_strict !== false;
+  const tierSettings: TierSettings = {
+    stretchCompanies: criteria.stretch_companies ?? [],
+    verticalNiches: criteria.vertical_niches ?? [],
+    topTargetScore: criteria.top_target_score ?? 65,
+    fastWinScore: criteria.fast_win_score ?? 55,
+    stretchScore: criteria.stretch_score ?? 55,
+    experienceLevel: criteria.experience_level ?? 'senior',
+  };
 
   // Fetch all scored jobs (with or without sub_scores)
   const { rows } = await pool.query(`
@@ -785,7 +810,7 @@ async function reclassifyJobsLocally(): Promise<number> {
       } else if (j.sub_scores) {
         // Full reclassify using stored sub_scores
         const s: SubScores = typeof j.sub_scores === 'string' ? JSON.parse(j.sub_scores) : j.sub_scores;
-        tier = computeTier(j.match_score, j.ai_risk ?? 'unknown', s, j.title, j.company, loc);
+        tier = computeTier(j.match_score, j.ai_risk ?? 'unknown', s, j.title, j.company, loc, tierSettings);
       } else {
         // No sub_scores: keep existing tier if location passed (don't demote good remote jobs)
         tier = j.opportunity_tier as OpportunityTier;
@@ -1307,6 +1332,17 @@ async function runScoutInBackground(runId: number): Promise<void> {
     const criteria = cRows[0] as {
       target_roles: string[]; industries: string[]; min_salary: number | null;
       locations: string[]; must_have: string[]; nice_to_have: string[]; avoid: string[];
+      remote_strict: boolean; experience_level: string;
+      stretch_companies: string[]; vertical_niches: string[];
+      top_target_score: number; fast_win_score: number; stretch_score: number;
+    };
+    const tierSettings: TierSettings = {
+      stretchCompanies: criteria.stretch_companies ?? [],
+      verticalNiches: criteria.vertical_niches ?? [],
+      topTargetScore: criteria.top_target_score ?? 65,
+      fastWinScore: criteria.fast_win_score ?? 55,
+      stretchScore: criteria.stretch_score ?? 55,
+      experienceLevel: criteria.experience_level ?? 'senior',
     };
 
     const { rows: companies } = await pool.query('SELECT * FROM companies');
@@ -1322,7 +1358,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     let companiesScanned = 0;
     const perCompanyStats: { name: string; type: string; jobs: number; error?: string }[] = [];
 
-    // ── Stage 2a: Scrape Greenhouse and Lever (direct API scrapers that work) ──
+    // ── Stage 2a: Scrape Greenhouse, Lever, and Workday companies ──
     for (const c of companies) {
       const co = c as { name: string; ats_type: string; ats_slug: string | null; careers_url: string | null };
       try {
@@ -1331,15 +1367,19 @@ async function runScoutInBackground(runId: number): Promise<void> {
           const jobs = await scrapeGreenhouseJobs(co.ats_slug, co.name);
           jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Greenhouse' })));
+          perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
         } else if (co.ats_type === 'lever' && co.ats_slug) {
           const jobs = await scrapeLeverJobs(co.ats_slug, co.name);
           jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Lever' })));
-        }
-        // Skip workday and plain — replaced by JobSpy below
-        if (co.ats_type === 'greenhouse' || co.ats_type === 'lever') {
+          perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
+        } else if (co.ats_type === 'workday' && co.ats_slug && co.careers_url) {
+          const jobs = await scrapeWorkdayJobs(co.name, co.careers_url, co.ats_slug);
+          jobCount = jobs.length;
+          allJobs.push(...jobs.map(j => ({ ...j, source: 'Workday' })));
           perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
         }
+        // "plain" companies: covered by JobSpy broad search below
         companiesScanned++;
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e);
@@ -1536,7 +1576,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
       if (!locationOk) {
         finalTier = 'Probably Skip';
       } else if (m.subScores && m.matchScore) {
-        finalTier = computeTier(m.matchScore, m.aiRisk ?? 'unknown', m.subScores, m.title, m.company, loc);
+        finalTier = computeTier(m.matchScore, m.aiRisk ?? 'unknown', m.subScores, m.title, m.company, loc, tierSettings);
       } else {
         finalTier = m.opportunityTier ?? 'unscored';
       }
@@ -2149,6 +2189,56 @@ textarea:focus,input:focus{border-color:var(--gold)}
       <input type="email" id="set-email" placeholder="you@example.com">
     </div>
   </div>
+
+  <div class="sec-title" style="margin:24px 0 16px">Tier Scoring Engine</div>
+  <div style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.6">These settings control how jobs are classified into tiers. Adjust thresholds and lists to tune what shows up as Top Target vs Fast Win vs Stretch.</div>
+
+  <div class="settings-grid">
+    <div class="fg">
+      <label>Experience Level <span class="hint">(determines what's "above level")</span></label>
+      <select id="set-exp-level">
+        <option value="junior">Junior — entry-level AE, SMB focus</option>
+        <option value="mid">Mid — Commercial / MM AE</option>
+        <option value="senior">Senior — Enterprise / Regional AE (default)</option>
+        <option value="enterprise">Enterprise — large enterprise, majors</option>
+        <option value="director">Director — RVP, VP, Director-level</option>
+      </select>
+    </div>
+    <div class="fg" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;align-items:end">
+      <div>
+        <label style="font-size:11px;color:var(--muted)">Top Target Score</label>
+        <div style="display:flex;align-items:center;gap:6px">
+          <input type="range" id="set-top-score" min="50" max="90" step="5" style="flex:1;accent-color:var(--gold)" oninput="document.getElementById('set-top-score-val').textContent=this.value">
+          <span id="set-top-score-val" style="font-size:13px;font-weight:700;color:var(--gold);min-width:24px">65</span>
+        </div>
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--muted)">Fast Win Score</label>
+        <div style="display:flex;align-items:center;gap:6px">
+          <input type="range" id="set-fast-score" min="40" max="80" step="5" style="flex:1;accent-color:#4ade80" oninput="document.getElementById('set-fast-score-val').textContent=this.value">
+          <span id="set-fast-score-val" style="font-size:13px;font-weight:700;color:#4ade80;min-width:24px">55</span>
+        </div>
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--muted)">Stretch Score</label>
+        <div style="display:flex;align-items:center;gap:6px">
+          <input type="range" id="set-stretch-score" min="40" max="80" step="5" style="flex:1;accent-color:#a78bfa" oninput="document.getElementById('set-stretch-score-val').textContent=this.value">
+          <span id="set-stretch-score-val" style="font-size:13px;font-weight:700;color:#a78bfa;min-width:24px">55</span>
+        </div>
+      </div>
+    </div>
+    <div class="fg full">
+      <label>Stretch Companies <span class="hint">(hyper-competitive logos — always classified as Stretch even for accessible roles)</span></label>
+      <input type="text" id="set-stretch-co-input" placeholder="e.g. Databricks, Salesforce, Snowflake">
+      <div class="tag-list" id="set-stretch-co-tags"></div>
+    </div>
+    <div class="fg full">
+      <label>Vertical Niche Signals <span class="hint">(title keywords that push a role above your level — Federal, SLED, Healthcare, etc.)</span></label>
+      <input type="text" id="set-niches-input" placeholder="e.g. federal, SLED, healthcare, FSI">
+      <div class="tag-list" id="set-niches-tags"></div>
+    </div>
+  </div>
+
   <div class="save-row">
     <button class="btn btn-gold" onclick="saveCriteria()">Save Settings</button>
     <span class="ok-msg" id="settings-msg" style="display:none">Saved!</span>
@@ -2968,12 +3058,29 @@ async function loadCriteria() {
     document.getElementById('set-remote-strict').checked = c.remote_strict !== false;
     document.getElementById('set-name').value = c.your_name || '';
     document.getElementById('set-email').value = c.your_email || '';
+    // Experience level & tier scoring
+    document.getElementById('set-exp-level').value = c.experience_level || 'senior';
+    var topScore = c.top_target_score || 65;
+    var fastScore = c.fast_win_score || 55;
+    var stretchScore = c.stretch_score || 55;
+    document.getElementById('set-top-score').value = topScore;
+    document.getElementById('set-top-score-val').textContent = topScore;
+    document.getElementById('set-fast-score').value = fastScore;
+    document.getElementById('set-fast-score-val').textContent = fastScore;
+    document.getElementById('set-stretch-score').value = stretchScore;
+    document.getElementById('set-stretch-score-val').textContent = stretchScore;
     setTags('locations', 'set-loc-tags', c.locations);
     setTags('roles', 'set-roles-tags', c.target_roles);
     setTags('industries', 'set-ind-tags', c.industries);
     setTags('must_have', 'set-must-tags', c.must_have);
     setTags('nice_to_have', 'set-nice-tags', c.nice_to_have);
     setTags('avoid', 'set-avoid-tags', c.avoid);
+    // Default stretch companies if none saved
+    var defaultStretchCos = ['Databricks','Snowflake','Workday','ServiceNow','Veeva','Palantir','Salesforce'];
+    setTags('stretch_companies', 'set-stretch-co-tags', (c.stretch_companies && c.stretch_companies.length > 0) ? c.stretch_companies : defaultStretchCos);
+    // Default vertical niches if none saved
+    var defaultNiches = ['federal','government','SLED','FSI','DOD','defense','public sector','healthcare','pharma','banking','financial services'];
+    setTags('vertical_niches', 'set-niches-tags', (c.vertical_niches && c.vertical_niches.length > 0) ? c.vertical_niches : defaultNiches);
     if (!_criteriaInitialized) {
       initTagInput('set-loc-input', 'set-loc-tags', 'locations');
       initTagInput('set-roles-input', 'set-roles-tags', 'roles');
@@ -2981,6 +3088,8 @@ async function loadCriteria() {
       initTagInput('set-must-input', 'set-must-tags', 'must_have');
       initTagInput('set-nice-input', 'set-nice-tags', 'nice_to_have');
       initTagInput('set-avoid-input', 'set-avoid-tags', 'avoid');
+      initTagInput('set-stretch-co-input', 'set-stretch-co-tags', 'stretch_companies');
+      initTagInput('set-niches-input', 'set-niches-tags', 'vertical_niches');
       _criteriaInitialized = true;
     }
   } catch(e) {
@@ -2994,12 +3103,18 @@ async function saveCriteria() {
     remote_strict: document.getElementById('set-remote-strict').checked,
     your_name: document.getElementById('set-name').value.trim(),
     your_email: document.getElementById('set-email').value.trim(),
+    experience_level: document.getElementById('set-exp-level').value,
+    top_target_score: Number(document.getElementById('set-top-score').value) || 65,
+    fast_win_score: Number(document.getElementById('set-fast-score').value) || 55,
+    stretch_score: Number(document.getElementById('set-stretch-score').value) || 55,
     locations: _criteriaTagState.locations || [],
     target_roles: _criteriaTagState.roles || [],
     industries: _criteriaTagState.industries || [],
     must_have: _criteriaTagState.must_have || [],
     nice_to_have: _criteriaTagState.nice_to_have || [],
-    avoid: _criteriaTagState.avoid || []
+    avoid: _criteriaTagState.avoid || [],
+    stretch_companies: _criteriaTagState.stretch_companies || [],
+    vertical_niches: _criteriaTagState.vertical_niches || []
   };
   try {
     var res = await fetch('/api/criteria', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });

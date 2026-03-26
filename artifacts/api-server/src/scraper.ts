@@ -88,6 +88,84 @@ export async function scrapeLeverJobs(slug: string, companyName: string): Promis
   }
 }
 
+// ── Workday scraper — calls the Workday REST API ──────────────────────────────
+interface WorkdayJob {
+  title: string;
+  externalPath: string;
+  locationsText?: string;
+  postedOn?: string;
+}
+interface WorkdayResponse {
+  total: number;
+  jobPostings: WorkdayJob[];
+}
+
+const WORKDAY_SEARCH_TERMS = [
+  'account executive',
+  'account manager',
+  'sales manager',
+  'regional sales',
+  'territory sales',
+  'partner manager',
+  'sales executive',
+  'client executive',
+  'client manager',
+];
+
+export async function scrapeWorkdayJobs(
+  companyName: string,
+  subdomain: string,   // e.g. "nvidia.wd5.myworkdayjobs.com"
+  jobBoardSlug: string // e.g. "NVIDIAExternalCareerSite"
+): Promise<ScrapedJob[]> {
+  // Derive the company path segment from the subdomain (first part before .wd)
+  const companyPath = subdomain.split('.')[0];
+  const baseUrl = `https://${subdomain}/wday/cxs/${companyPath}/${jobBoardSlug}/jobs`;
+
+  const allJobs: Map<string, ScrapedJob> = new Map();
+
+  for (const term of WORKDAY_SEARCH_TERMS) {
+    try {
+      const response = await fetch(baseUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ appliedFacets: {}, limit: 20, offset: 0, searchText: term }),
+        signal: AbortSignal.timeout(12000),
+      });
+
+      if (!response.ok) {
+        if (response.status === 404 || response.status === 403 || response.status === 422) break;
+        continue;
+      }
+
+      const data = (await response.json()) as WorkdayResponse;
+      const postings = data.jobPostings ?? [];
+
+      for (const job of postings) {
+        if (!job.externalPath) continue;
+        const applyUrl = `https://${subdomain}${job.externalPath}`;
+        if (!allJobs.has(applyUrl)) {
+          allJobs.set(applyUrl, {
+            title: job.title,
+            company: companyName,
+            location: job.locationsText ?? 'Unknown',
+            applyUrl,
+          });
+        }
+      }
+    } catch {
+      // Timeout or network error — skip this search term
+    }
+    // Small delay between search terms to be respectful
+    await new Promise((r) => setTimeout(r, 300));
+  }
+
+  const jobs = Array.from(allJobs.values());
+  if (jobs.length > 0) {
+    console.log(`Workday (${companyName}): found ${jobs.length} unique jobs across ${WORKDAY_SEARCH_TERMS.length} searches`);
+  }
+  return jobs;
+}
+
 // JobSpy scraper — calls Python script that searches LinkedIn, Indeed, and Glassdoor
 export async function runJobSpyScraper(): Promise<ScrapedJob[]> {
   const scriptDir = dirname(fileURLToPath(import.meta.url));
