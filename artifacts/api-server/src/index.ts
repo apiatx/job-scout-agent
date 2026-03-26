@@ -2,7 +2,8 @@ import express, { type Request, type Response } from 'express';
 import pg from 'pg';
 import { scrapeGreenhouseJobs, scrapeLeverJobs, runJobSpyScraper } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
-import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity } from './agent.js';
+import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier } from './agent.js';
+import type { SubScores, OpportunityTier } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
 // RepVue: link-out only (no scraping — RepVue blocks automated requests)
 
@@ -27,6 +28,73 @@ app.get('/api/healthz', (_req, res) => { res.status(200).json({ status: 'ok' });
 const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID || '1007930505834-cpp1veqs8alu56k810qd2mru61keej3j.apps.googleusercontent.com';
 const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET || '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';
 const GMAIL_REDIRECT_URI = process.env.GMAIL_REDIRECT_URI || 'https://c12ad21f-8216-45ab-b03f-5e735925225d-00-34c2t5oabpvff.riker.replit.dev/api/gmail/callback';
+
+// ── Location utilities (module-level, shared by scout run + reclassify) ──────
+const STATE_ABBREV: Record<string, string> = {
+  'alabama':'AL','alaska':'AK','arizona':'AZ','arkansas':'AR','california':'CA','colorado':'CO',
+  'connecticut':'CT','delaware':'DE','florida':'FL','georgia':'GA','hawaii':'HI','idaho':'ID',
+  'illinois':'IL','indiana':'IN','iowa':'IA','kansas':'KS','kentucky':'KY','louisiana':'LA',
+  'maine':'ME','maryland':'MD','massachusetts':'MA','michigan':'MI','minnesota':'MN',
+  'mississippi':'MS','missouri':'MO','montana':'MT','nebraska':'NE','nevada':'NV',
+  'new hampshire':'NH','new jersey':'NJ','new mexico':'NM','new york':'NY',
+  'north carolina':'NC','north dakota':'ND','ohio':'OH','oklahoma':'OK','oregon':'OR',
+  'pennsylvania':'PA','rhode island':'RI','south carolina':'SC','south dakota':'SD',
+  'tennessee':'TN','texas':'TX','utah':'UT','vermont':'VT','virginia':'VA',
+  'washington':'WA','west virginia':'WV','wisconsin':'WI','wyoming':'WY',
+  'district of columbia':'DC','washington dc':'DC',
+};
+const ABBREV_TO_STATE: Record<string, string> = Object.fromEntries(
+  Object.entries(STATE_ABBREV).map(([k, v]) => [v.toLowerCase(), k])
+);
+const US_STATE_ABBREVS = /\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b/;
+
+function isRemoteInTerritory(loc: string): boolean {
+  if (!/remote/i.test(loc)) return false;
+  const stripped = loc
+    .replace(/remote/gi, '')
+    .replace(/united states?/gi, '')
+    .replace(/\b(usa?|100%|fully|full[- ]?time|work from home|wfh|anywhere|nationwide|national|the|of|for|only)\b/gi, '')
+    .replace(/[-–,\s().\/;]+/g, ' ')
+    .trim();
+  return /[a-zA-Z]{3,}/.test(stripped) || US_STATE_ABBREVS.test(stripped);
+}
+
+/** Build a regex that matches any of the user's allowed location terms */
+function buildLocationAllowPattern(locations: string[]): { pattern: RegExp | null; allowRemote: boolean; allowUnitedStates: boolean } {
+  const terms = new Set<string>();
+  let allowRemote = false;
+  let allowUnitedStates = false;
+  for (const loc of locations) {
+    const lower = loc.trim().toLowerCase();
+    if (lower === 'remote') { allowRemote = true; continue; }
+    if (lower === 'united states' || lower === 'usa' || lower === 'us') { allowUnitedStates = true; continue; }
+    terms.add(lower);
+    if (STATE_ABBREV[lower]) terms.add(STATE_ABBREV[lower].toLowerCase());
+    if (ABBREV_TO_STATE[lower]) terms.add(ABBREV_TO_STATE[lower]);
+  }
+  const pattern = terms.size > 0
+    ? new RegExp(`\\b(${Array.from(terms).map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'i')
+    : null;
+  return { pattern, allowRemote, allowUnitedStates };
+}
+
+/** Returns true if this job's location is acceptable given the user's prefs */
+function checkJobLocation(jobLocation: string, locations: string[], remoteStrict: boolean): boolean {
+  if (!locations || locations.length === 0) return true;
+  const loc = jobLocation.trim();
+  const { pattern, allowRemote, allowUnitedStates } = buildLocationAllowPattern(locations);
+  const hasRemote = /remote/i.test(loc);
+  const territory = isRemoteInTerritory(loc);
+
+  if (hasRemote && !territory) return allowRemote || allowUnitedStates;   // true remote
+  if (hasRemote && territory) {
+    if (!remoteStrict) return allowRemote || allowUnitedStates || (pattern ? pattern.test(loc) : false);
+    return !!(pattern && pattern.test(loc));  // strict: must match territory
+  }
+  // Non-remote physical job
+  if (/^(united states|usa?)$/i.test(loc.trim()) && allowUnitedStates) return true;
+  return !!(pattern && pattern.test(loc));
+}
 
 // ── Database init ─────────────────────────────────────────────────────────
 async function initDb(): Promise<void> {
@@ -658,9 +726,12 @@ app.post('/api/jobs/rescore-all', async (_req, res: Response) => {
               criteriaText, preApprovedSection, companyNames
             );
             if (result) {
+              const jobIsRemote = /remote/i.test(j.location);
+              const rescoredTier = (!jobIsRemote && result.opportunityTier !== 'Probably Skip')
+                ? 'Probably Skip' : result.opportunityTier;
               await pool.query(
                 `UPDATE jobs SET opportunity_tier=$1, sub_scores=$2, ai_risk=$3, ai_risk_reason=$4, why_good_fit=$5, match_score=$6 WHERE id=$7`,
-                [result.opportunityTier, JSON.stringify(result.subScores), result.aiRisk, result.aiRiskReason, result.whyGoodFit, result.matchScore, j.id]
+                [rescoredTier, JSON.stringify(result.subScores), result.aiRisk, result.aiRiskReason, result.whyGoodFit, result.matchScore, j.id]
               );
             } else {
               await pool.query(`UPDATE jobs SET opportunity_tier='Probably Skip' WHERE id=$1`, [j.id]);
@@ -674,6 +745,57 @@ app.post('/api/jobs/rescore-all', async (_req, res: Response) => {
       rescoreRunning = false;
     })();
   } catch (e) { rescoreRunning = false; res.status(500).json({ error: String(e) }); }
+});
+
+// ── Local reclassify — re-applies computeTier to all jobs using stored sub_scores ──
+// No Claude calls, instant, safe to run on every startup.
+async function reclassifyJobsLocally(): Promise<number> {
+  const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
+  const criteria = cRows[0] ?? {};
+  const userLocations: string[] = criteria.locations ?? [];
+  const remoteStrict: boolean = criteria.remote_strict !== false;
+
+  // Fetch all scored jobs (with or without sub_scores)
+  const { rows } = await pool.query(`
+    SELECT id, title, company, location, match_score, ai_risk, sub_scores, opportunity_tier
+    FROM jobs
+    WHERE match_score IS NOT NULL
+  `);
+  let updated = 0;
+  for (const j of rows) {
+    try {
+      const loc = (j.location ?? '').trim();
+      const locationOk = userLocations.length === 0 || checkJobLocation(loc, userLocations, remoteStrict);
+
+      let tier: OpportunityTier;
+
+      if (!locationOk) {
+        // Hard location block — always Probably Skip regardless of other factors
+        tier = 'Probably Skip';
+      } else if (j.sub_scores) {
+        // Full reclassify using stored sub_scores
+        const s: SubScores = typeof j.sub_scores === 'string' ? JSON.parse(j.sub_scores) : j.sub_scores;
+        tier = computeTier(j.match_score, j.ai_risk ?? 'unknown', s, j.title, j.company, loc);
+      } else {
+        // No sub_scores: keep existing tier if location passed (don't demote good remote jobs)
+        tier = j.opportunity_tier as OpportunityTier;
+      }
+
+      if (tier !== j.opportunity_tier) {
+        await pool.query(`UPDATE jobs SET opportunity_tier=$1 WHERE id=$2`, [tier, j.id]);
+        updated++;
+      }
+    } catch { /* skip malformed rows */ }
+  }
+  return updated;
+}
+
+app.post('/api/jobs/reclassify-local', async (_req, res: Response) => {
+  try {
+    const count = await reclassifyJobsLocally();
+    console.log(`Local reclassify complete: ${count} jobs updated`);
+    res.json({ updated: count });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 // Scout runs
@@ -1286,86 +1408,10 @@ async function runScoutInBackground(runId: number): Promise<void> {
     // 1. Location hard filter — only pass jobs that match user's location preferences
     const hasLocationPrefs = criteria.locations.length > 0;
     const remoteStrict: boolean = criteria.remote_strict !== false; // default true
-    const locationAllowTerms = new Set<string>();
-    let allowRemote = false;
-    let allowUnitedStates = false;
-
-    // State name ↔ abbreviation mapping for bidirectional matching
-    const STATE_ABBREV: Record<string, string> = {
-      'alabama':'AL','alaska':'AK','arizona':'AZ','arkansas':'AR','california':'CA','colorado':'CO',
-      'connecticut':'CT','delaware':'DE','florida':'FL','georgia':'GA','hawaii':'HI','idaho':'ID',
-      'illinois':'IL','indiana':'IN','iowa':'IA','kansas':'KS','kentucky':'KY','louisiana':'LA',
-      'maine':'ME','maryland':'MD','massachusetts':'MA','michigan':'MI','minnesota':'MN',
-      'mississippi':'MS','missouri':'MO','montana':'MT','nebraska':'NE','nevada':'NV',
-      'new hampshire':'NH','new jersey':'NJ','new mexico':'NM','new york':'NY',
-      'north carolina':'NC','north dakota':'ND','ohio':'OH','oklahoma':'OK','oregon':'OR',
-      'pennsylvania':'PA','rhode island':'RI','south carolina':'SC','south dakota':'SD',
-      'tennessee':'TN','texas':'TX','utah':'UT','vermont':'VT','virginia':'VA',
-      'washington':'WA','west virginia':'WV','wisconsin':'WI','wyoming':'WY',
-      'district of columbia':'DC','washington dc':'DC',
-    };
-    const ABBREV_TO_STATE: Record<string, string> = Object.fromEntries(Object.entries(STATE_ABBREV).map(([k,v]) => [v.toLowerCase(), k]));
-
-    if (hasLocationPrefs) {
-      for (const loc of criteria.locations) {
-        const lower = loc.trim().toLowerCase();
-        if (lower === 'remote') { allowRemote = true; continue; }
-        if (lower === 'united states' || lower === 'usa' || lower === 'us') { allowUnitedStates = true; continue; }
-        locationAllowTerms.add(lower);
-        // Also add the abbreviation/full-name counterpart so "Georgia" matches "GA" and vice versa
-        if (STATE_ABBREV[lower]) locationAllowTerms.add(STATE_ABBREV[lower].toLowerCase());
-        if (ABBREV_TO_STATE[lower]) locationAllowTerms.add(ABBREV_TO_STATE[lower]);
-      }
-    }
-
-    const locationAllowPattern = locationAllowTerms.size > 0
-      ? new RegExp(`\\b(${Array.from(locationAllowTerms).map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'i')
-      : null;
-
-    // Detect "remote in territory": location has "remote" PLUS a specific city/state
-    // True remote: "Remote", "Remote - US", "Remote, United States", "100% Remote", "Remote Anywhere"
-    // Remote-in-territory: "Remote, Chicago, IL", "Remote (Austin)", "Dallas, TX (Remote)", "Chicago, IL - Remote"
-    const US_STATE_ABBREVS = /\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b/;
-    function isRemoteInTerritory(loc: string): boolean {
-      if (!/remote/i.test(loc)) return false;
-      // Strip out "remote" and universal terms; if meaningful location remains, it's territory-based
-      const stripped = loc
-        .replace(/remote/gi, '')
-        .replace(/united states?/gi, '')
-        .replace(/\b(usa?|100%|fully|full[- ]?time|work from home|wfh|anywhere|nationwide|national|in|the|of|for|only)\b/gi, '')
-        .replace(/[-–,\s().\/;]+/g, ' ')
-        .trim();
-      // Territory if: 3+ letter word remains (city/state name) OR a US state abbreviation remains
-      return /[a-zA-Z]{3,}/.test(stripped) || US_STATE_ABBREVS.test(stripped);
-    }
 
     function jobMatchesLocation(jobLocation: string): boolean {
-      if (!hasLocationPrefs) return true; // no prefs = accept all
-      const loc = jobLocation.trim();
-      const hasRemote = /remote/i.test(loc);
-      const territory = isRemoteInTerritory(loc);
-
-      if (hasRemote && !territory) {
-        // True fully-remote job — accept if user allows remote or US-wide
-        return allowRemote || allowUnitedStates;
-      }
-
-      if (hasRemote && territory) {
-        // Remote-in-territory job (e.g. "Remote, Chicago, IL")
-        if (!remoteStrict) {
-          // Lenient mode: treat it like any remote job
-          return allowRemote || allowUnitedStates || (locationAllowPattern ? locationAllowPattern.test(loc) : false);
-        }
-        // Strict mode: ONLY the specific city/state term must match — "United States" does NOT override
-        // (e.g. "Remote, Massachusetts" rejected even if user has "United States" in their list)
-        if (locationAllowPattern && locationAllowPattern.test(loc)) return true;
-        return false; // territory city not in user's list
-      }
-
-      // Non-remote job
-      if (/united states/i.test(loc) && allowUnitedStates) return true;
-      if (locationAllowPattern && locationAllowPattern.test(loc)) return true;
-      return false;
+      if (!hasLocationPrefs) return true;
+      return checkJobLocation(jobLocation, criteria.locations, remoteStrict);
     }
 
     // 2. Avoid keywords hard filter — exclude jobs whose title or description contains avoid keywords
@@ -1472,11 +1518,18 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
     for (const m of matches) {
       const source = newJobs.find(j => j.applyUrl === m.applyUrl)?.source ?? '';
+      // Non-remote override: physical office jobs are never Top Target or Fast Win
+      const jobIsRemote = /remote/i.test(m.location);
+      let finalTier: string = m.opportunityTier ?? 'unscored';
+      if (!jobIsRemote && finalTier !== 'Probably Skip' && finalTier !== 'unscored') {
+        finalTier = 'Probably Skip';
+        console.log(`  [Non-remote override → Probably Skip]: "${m.title}" @ ${m.company} (${m.location})`);
+      }
       await pool.query(
         `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
          ON CONFLICT (apply_url) DO NOTHING`,
-        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, m.opportunityTier ?? 'unscored', JSON.stringify(m.subScores ?? null)]
+        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null)]
       );
     }
 
@@ -1603,7 +1656,13 @@ app.use((_req: Request, res: Response) => {
 // ── Start server ──────────────────────────────────────────────────────────
 
 initDb()
-  .then(() => {
+  .then(async () => {
+    // Auto-reclassify all existing jobs using current tier logic (free, no Claude)
+    try {
+      const n = await reclassifyJobsLocally();
+      if (n > 0) console.log(`Startup reclassify: updated ${n} job tiers to match current logic`);
+    } catch (e) { console.warn('Startup reclassify skipped:', e); }
+
     const server = app.listen(PORT, () => {
       console.log(`Job Scout Agent listening on port ${PORT}`);
     });
@@ -2207,7 +2266,7 @@ function isRemoteInTerritory(loc) {
   var stripped = loc
     .replace(/remote/gi, '')
     .replace(/united states?/gi, '')
-    .replace(/\\b(usa?|100%|fully|full[- ]?time|work from home|wfh|anywhere|nationwide|national|in|the|of|for|only)\\b/gi, '')
+    .replace(/\\b(usa?|100%|fully|full[- ]?time|work from home|wfh|anywhere|nationwide|national|the|of|for|only)\\b/gi, '')
     .replace(/[-\u2013,\\s().\\\/;]+/g, ' ')
     .trim();
   var US_ABBREVS = /\\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\\b/;

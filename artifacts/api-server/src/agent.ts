@@ -230,7 +230,7 @@ OPPORTUNITY TIER DECISION RULES — assign based on ROLE TYPE + COMPANY INDUSTRY
   }
 }
 
-function computeTier(matchScore: number, aiRisk: string, s: SubScores, title = '', company = '', location = ''): OpportunityTier {
+export function computeTier(matchScore: number, aiRisk: string, s: SubScores, title = '', company = '', location = ''): OpportunityTier {
   const isRemote = /remote/i.test(location);
 
   // Hard skips
@@ -449,7 +449,7 @@ export async function researchCompanyWithClaude(companyName: string): Promise<Re
 }`;
 
   const message = await anthropic.messages.create({
-    model: 'claude-sonnet-4-5-20250929',
+    model: 'claude-haiku-4-5',
     max_tokens: 8000,
     system: 'You are a research assistant. After using web search to gather information, you MUST respond with ONLY a valid JSON object. No conversational text, no explanations, no markdown — just the raw JSON object starting with { and ending with }.',
     tools: [{ type: 'web_search_20250305', name: 'web_search' }] as unknown as Anthropic.Messages.Tool[],
@@ -527,7 +527,7 @@ Respond ONLY with a JSON object (no markdown, no extra text):
 }`;
 
   const message = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-haiku-4-5',
     max_tokens: 8096,
     system: systemPrompt,
     messages: [{ role: 'user', content: prompt }],
