@@ -48,6 +48,13 @@ const ABBREV_TO_STATE: Record<string, string> = Object.fromEntries(
 );
 const US_STATE_ABBREVS = /\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b/;
 
+// International 2-letter country codes that must be treated as territory (not fully-remote)
+const INTL_COUNTRY_CODES = /\b(uk|gb|eu|de|fr|es|it|au|nz|sg|hk|jp|kr|cn|nl|be|ch|se|no|dk|ie|pt|pl|cz|at|gr|ro|hu|fi|sk|bg|hr|si|lt|lv|ee|cy|lu|mt)\b/i;
+
+// Single directional words that are too vague for location pattern matching
+// (User has "South"/"South East" to describe *themselves*, not as a job location keyword)
+const VAGUE_DIRECTIONALS = new Set(['south', 'north', 'east', 'west', 'southern', 'northern', 'eastern', 'western']);
+
 function isRemoteInTerritory(loc: string): boolean {
   if (!/remote/i.test(loc)) return false;
   const stripped = loc
@@ -56,7 +63,8 @@ function isRemoteInTerritory(loc: string): boolean {
     .replace(/\b(usa?|100%|fully|full[- ]?time|work from home|wfh|anywhere|nationwide|national|the|of|for|only)\b/gi, '')
     .replace(/[-–,\s().\/;]+/g, ' ')
     .trim();
-  return /[a-zA-Z]{3,}/.test(stripped) || US_STATE_ABBREVS.test(stripped);
+  // Territory if a 3+ letter word remains, or a US state abbrev, or a 2-letter intl country code
+  return /[a-zA-Z]{3,}/.test(stripped) || US_STATE_ABBREVS.test(stripped) || INTL_COUNTRY_CODES.test(stripped);
 }
 
 /** Build a regex that matches any of the user's allowed location terms */
@@ -68,6 +76,8 @@ function buildLocationAllowPattern(locations: string[]): { pattern: RegExp | nul
     const lower = loc.trim().toLowerCase();
     if (lower === 'remote') { allowRemote = true; continue; }
     if (lower === 'united states' || lower === 'usa' || lower === 'us') { allowUnitedStates = true; continue; }
+    // Skip single directional words — too vague and cause false positives on city names like "South Salt Lake"
+    if (VAGUE_DIRECTIONALS.has(lower)) continue;
     terms.add(lower);
     if (STATE_ABBREV[lower]) terms.add(STATE_ABBREV[lower].toLowerCase());
     if (ABBREV_TO_STATE[lower]) terms.add(ABBREV_TO_STATE[lower]);
@@ -1518,13 +1528,19 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
     for (const m of matches) {
       const source = newJobs.find(j => j.applyUrl === m.applyUrl)?.source ?? '';
-      // Non-remote override: physical office jobs are never Top Target or Fast Win
-      const jobIsRemote = /remote/i.test(m.location);
-      let finalTier: string = m.opportunityTier ?? 'unscored';
-      if (!jobIsRemote && finalTier !== 'Probably Skip' && finalTier !== 'unscored') {
+      const loc = (m.location ?? '').trim();
+      let finalTier: string;
+
+      // Apply location check + deterministic tier logic using our computeTier
+      const locationOk = checkJobLocation(loc, criteria.locations, remoteStrict);
+      if (!locationOk) {
         finalTier = 'Probably Skip';
-        console.log(`  [Non-remote override → Probably Skip]: "${m.title}" @ ${m.company} (${m.location})`);
+      } else if (m.subScores && m.matchScore) {
+        finalTier = computeTier(m.matchScore, m.aiRisk ?? 'unknown', m.subScores, m.title, m.company, loc);
+      } else {
+        finalTier = m.opportunityTier ?? 'unscored';
       }
+
       await pool.query(
         `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
