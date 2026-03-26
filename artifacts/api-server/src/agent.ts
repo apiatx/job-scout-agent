@@ -126,11 +126,28 @@ Return this exact JSON structure:
   "tierReasoning": "<one sentence explaining why this tier was assigned>"
 }
 
-OPPORTUNITY TIER DECISION RULES:
-- "Top Target": matchScore>=75 AND companyQuality>=7 AND realVsFake>=7 AND aiRisk!="HIGH" AND roleFit>=7. These deserve your best customized application.
-- "Fast Win": matchScore>=65 AND tailoringRequired>=7 AND realVsFake>=6 AND hiringUrgency>=6. Lower bar but high chance of quick response with minimal effort.
-- "Stretch Role": matchScore 55-74 AND companyQuality>=8 AND roleFit>=5. Worth a swing — strong company even if slightly above current level or slightly off target role.
-- "Probably Skip": matchScore<60 OR realVsFake<5 OR (aiRisk="HIGH" AND matchScore<70) OR companyQuality<3. Time better spent elsewhere.`;
+OPPORTUNITY TIER DECISION RULES — assign based on ROLE TYPE + COMPANY INDUSTRY + LOCATION, not just score:
+
+"Top Target":
+  WHO: Commercial AE, Mid-Market AE, Corporate AE, Account Executive (general enterprise, NO "Strategic/Senior/Sr./Principal" prefix), Account Manager — at a TARGET INDUSTRY company (hardware, cloud infrastructure, networking, storage, semiconductors, AI infrastructure, data center, industrial tech, defense tech). Also includes general Enterprise AE roles (not specialized) at hardware/infra companies.
+  LOCATION: Job must be remote OR remote-in-territory matching candidate's target locations.
+  SCORE: matchScore≥65, aiRisk≠HIGH, realVsFake≥6.
+  INTENT: Sweet-spot roles at the right companies — realistic wins AND great career moves.
+
+"Fast Win":
+  WHO: Commercial AE, Mid-Market AE, Corporate AE, SMB AE, Inside Sales AE, or Account Manager at ANY solid tech company (not required to be target industry). These roles have lower competition — you're not competing against 500 applicants.
+  LOCATION: Job must be remote OR remote-in-territory matching candidate's target locations.
+  SCORE: matchScore≥55, aiRisk≠HIGH, realVsFake≥5.
+  INTENT: Realistic wins you can move on quickly. Apply fast, less tailoring, good shot at getting through.
+
+"Stretch Role":
+  WHO: Any of these signals make it a Stretch — (1) title includes "Strategic", "Senior/Sr.", "Principal", "Named Accounts", "Major Accounts", "Global", "Platinum", "Elite", "Premier"; OR (2) role requires specialized vertical expertise: Financial Services, Banking, Healthcare, Life Sciences, DoD, Government, SLED, Education; OR (3) general Enterprise AE at a hyper-competitive prestige company (Databricks, Snowflake, Salesforce, Workday, ServiceNow, Veeva, Palantir, Stripe, etc.) — great jobs but fierce competition.
+  LOCATION: Job must be remote OR remote-in-territory matching candidate's target locations.
+  SCORE: matchScore≥55.
+  INTENT: Aspirational — worth applying but expect tougher competition and longer cycle.
+
+"Probably Skip":
+  ANY of: Job is NOT remote and NOT in candidate's target territory (location mismatch → ALWAYS Probably Skip even if company is great); aiRisk=HIGH; realVsFake<5 (ghost/evergreen posting); matchScore<50; wrong role type (SDR, BDR, Solutions Architect, SE, CSM, Customer Success, Marketing, HR, Finance, Legal, Engineering); non-quota-carrying role. Time is better spent elsewhere.`;
 
     const message = await anthropic.messages.create({
       model: 'claude-haiku-4-5',
@@ -184,7 +201,7 @@ OPPORTUNITY TIER DECISION RULES:
     const validTiers: OpportunityTier[] = ['Top Target', 'Fast Win', 'Stretch Role', 'Probably Skip'];
     const tier: OpportunityTier = validTiers.includes(parsed.opportunityTier as OpportunityTier)
       ? (parsed.opportunityTier as OpportunityTier)
-      : computeTier(parsed.matchScore, parsed.aiRisk ?? 'unknown', subScores);
+      : computeTier(parsed.matchScore, parsed.aiRisk ?? 'unknown', subScores, job.title, job.company, job.location);
 
     console.log(`  ✓ Match (${parsed.matchScore}) [${tier}] [AI:${parsed.aiRisk ?? '?'}]: ${job.company} — "${job.title}"`);
 
@@ -207,12 +224,41 @@ OPPORTUNITY TIER DECISION RULES:
   }
 }
 
-function computeTier(matchScore: number, aiRisk: string, s: SubScores): OpportunityTier {
-  if (matchScore >= 75 && s.companyQuality >= 7 && s.realVsFake >= 7 && aiRisk !== 'HIGH' && s.roleFit >= 7) return 'Top Target';
-  if (matchScore >= 65 && s.tailoringRequired >= 7 && s.realVsFake >= 6 && s.hiringUrgency >= 6) return 'Fast Win';
-  if (matchScore >= 55 && s.companyQuality >= 8 && s.roleFit >= 5) return 'Stretch Role';
-  if (matchScore < 60 || s.realVsFake < 5 || (aiRisk === 'HIGH' && matchScore < 70) || s.companyQuality < 3) return 'Probably Skip';
-  return 'Stretch Role';
+function computeTier(matchScore: number, aiRisk: string, s: SubScores, title = '', company = '', location = ''): OpportunityTier {
+  const isRemote = /remote/i.test(location);
+
+  // Hard skips
+  if (!isRemote && s.locationFit < 4) return 'Probably Skip';
+  if (aiRisk === 'HIGH') return 'Probably Skip';
+  if (s.realVsFake < 5) return 'Probably Skip';
+  if (matchScore < 50) return 'Probably Skip';
+
+  // Stretch signals — title-based
+  const hasStretchTitle = /\b(strategic|senior|sr\.|principal|named accounts?|major accounts?|global|platinum|elite|premier)\b/i.test(title);
+  const hasVerticalNiche = /\b(financial services?|banking|healthcare|life sciences?|dod|government|sled|education|federal)\b/i.test(title);
+  const isHyperCompetitive = /\b(databricks|snowflake|workday|servicenow|veeva|stripe|palantir|salesforce)\b/i.test(company);
+
+  if ((hasStretchTitle || hasVerticalNiche || isHyperCompetitive) && matchScore >= 55) return 'Stretch Role';
+
+  // Fast Win signals — commercial/MM/corporate/SMB titles
+  const isFastWinRole = /\b(commercial|mid.?market|midmarket|corporate|smb|small.?business|inside sales)\b/i.test(title);
+
+  // Target industry company (hardware/infra/networking/storage/semiconductors)
+  const isTargetIndustry = s.companyQuality >= 7 && s.roleFit >= 6; // proxy: high company quality + good role fit = target-industry match
+
+  // Top Target: right role + right company + remote + good score
+  if (matchScore >= 65 && isRemote && isTargetIndustry && aiRisk !== 'HIGH' && s.realVsFake >= 6) return 'Top Target';
+
+  // Fast Win: accessible role type + remote + decent score
+  if (isFastWinRole && matchScore >= 55 && isRemote && s.realVsFake >= 5) return 'Fast Win';
+
+  // Fallback Fast Win for solid scores
+  if (matchScore >= 65 && isRemote && s.realVsFake >= 6 && aiRisk !== 'HIGH') return 'Fast Win';
+
+  // Stretch if decent score but not hitting Top Target criteria
+  if (matchScore >= 55 && isRemote && s.realVsFake >= 5) return 'Stretch Role';
+
+  return 'Probably Skip';
 }
 
 export async function rescoreJobOpportunity(
