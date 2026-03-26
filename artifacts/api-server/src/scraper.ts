@@ -1,4 +1,4 @@
-import { execFile } from 'child_process';
+import { spawn } from 'child_process';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -166,69 +166,101 @@ export async function scrapeWorkdayJobs(
   return jobs;
 }
 
-// JobSpy scraper — calls Python script that searches LinkedIn, Indeed, and Glassdoor
-export async function runJobSpyScraper(): Promise<ScrapedJob[]> {
+// JobSpy scraper — calls Python script that searches Indeed, Glassdoor, and ZipRecruiter concurrently
+// Criteria (target_roles, locations) are passed via stdin so searches match the user's saved settings.
+export async function runJobSpyScraper(criteria?: {
+  target_roles?: string[];
+  locations?: string[];
+}): Promise<ScrapedJob[]> {
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const scriptPath = resolve(scriptDir, 'jobspy_scraper.py');
 
+  const criteriaJson = JSON.stringify({
+    target_roles: criteria?.target_roles ?? [],
+    locations: criteria?.locations ?? [],
+  });
+
   console.log(`\n──── JOBSPY SEARCH ────────────────────────────────────────`);
-  console.log(`Running JobSpy Python scraper (LinkedIn + Indeed + Glassdoor)...`);
+  console.log(`Running JobSpy scraper (Indeed + Glassdoor + ZipRecruiter, concurrent)...`);
+  console.log(`  Roles: ${(criteria?.target_roles ?? []).join(', ') || '(defaults)'}`);
+  console.log(`  Location: ${(criteria?.locations ?? [])[0] || 'United States'}`);
 
   return new Promise((resolvePromise) => {
-    const proc = execFile(
-      'python3',
-      [scriptPath],
-      { maxBuffer: 50 * 1024 * 1024, timeout: 600_000 },
-      (error, stdout, stderr) => {
-        // Log stderr (progress messages) line by line
-        if (stderr) {
-          for (const line of stderr.split('\n')) {
-            if (line.trim()) console.log(`  ${line}`);
-          }
-        }
+    const proc = spawn('python3', [scriptPath], {
+      timeout: 600_000,
+    });
 
-        if (error) {
-          console.log(`JobSpy: script error — ${error.message}`);
-          resolvePromise([]);
-          return;
-        }
+    // Pass criteria to the Python script via stdin
+    proc.stdin.write(criteriaJson);
+    proc.stdin.end();
 
-        try {
-          const jobs = JSON.parse(stdout) as Array<{
-            title: string;
-            company: string;
-            location: string;
-            salary?: string;
-            applyUrl: string;
-            description?: string;
-            source: string;
-          }>;
-          console.log(`JobSpy: received ${jobs.length} jobs from Python script`);
-          console.log(`───────────────────────────────────────────────────────────`);
-          return resolvePromise(
-            jobs.map((j) => ({
-              title: j.title,
-              company: j.company,
-              location: j.location,
-              salary: j.salary,
-              applyUrl: j.applyUrl,
-              description: j.description,
-            }))
-          );
-        } catch (parseErr) {
-          console.log(`JobSpy: failed to parse output — ${parseErr}`);
-          console.log(`JobSpy: raw stdout (first 500 chars): ${stdout?.slice(0, 500)}`);
-          resolvePromise([]);
-        }
-      }
-    );
+    let stdout = '';
+    let stderr = '';
 
-    // Forward stderr in real time
-    proc.stderr?.on('data', (chunk: Buffer) => {
+    proc.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+
+    proc.stderr.on('data', (chunk: Buffer) => {
       const lines = chunk.toString().split('\n');
       for (const line of lines) {
-        if (line.trim()) console.log(`  [JobSpy] ${line}`);
+        if (line.trim()) {
+          console.log(`  [JobSpy] ${line}`);
+          stderr += line + '\n';
+        }
       }
+    });
+
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        console.log(`JobSpy: script exited with code ${code}`);
+        resolvePromise([]);
+        return;
+      }
+
+      // Find the JSON array line in stdout (last non-empty line)
+      const lines = stdout.trim().split('\n');
+      const jsonLine = lines.reverse().find((l) => l.trim().startsWith('['));
+
+      if (!jsonLine) {
+        console.log(`JobSpy: no JSON output found`);
+        console.log(`JobSpy: stdout preview: ${stdout.slice(0, 300)}`);
+        resolvePromise([]);
+        return;
+      }
+
+      try {
+        const jobs = JSON.parse(jsonLine) as Array<{
+          title: string;
+          company: string;
+          location: string;
+          salary?: string;
+          applyUrl: string;
+          description?: string;
+          source: string;
+        }>;
+        console.log(`JobSpy: received ${jobs.length} unique jobs`);
+        console.log(`───────────────────────────────────────────────────────────`);
+        resolvePromise(
+          jobs.map((j) => ({
+            title: j.title,
+            company: j.company,
+            location: j.location,
+            salary: j.salary,
+            applyUrl: j.applyUrl,
+            description: j.description,
+          }))
+        );
+      } catch (parseErr) {
+        console.log(`JobSpy: failed to parse JSON — ${parseErr}`);
+        console.log(`JobSpy: raw output (first 500 chars): ${stdout?.slice(0, 500)}`);
+        resolvePromise([]);
+      }
+    });
+
+    proc.on('error', (err) => {
+      console.log(`JobSpy: process error — ${err.message}`);
+      resolvePromise([]);
     });
   });
 }

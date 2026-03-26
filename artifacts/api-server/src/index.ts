@@ -1453,9 +1453,12 @@ async function runScoutInBackground(runId: number): Promise<void> {
       }
     }
 
-    // ── Stage 2b: JobSpy — scrape LinkedIn, Indeed, Glassdoor via Python ──
+    // ── Stage 2b: JobSpy — scrape Indeed, Glassdoor, ZipRecruiter via Python (concurrent) ──
     try {
-      const jobSpyResults = await runJobSpyScraper();
+      const jobSpyResults = await runJobSpyScraper({
+        target_roles: criteria.target_roles ?? [],
+        locations: criteria.locations ?? [],
+      });
       console.log(`JobSpy returned ${jobSpyResults.length} jobs — adding all to pipeline`);
       allJobs.push(...jobSpyResults.map(j => ({ ...j, source: 'JobSpy' })));
     } catch (e) {
