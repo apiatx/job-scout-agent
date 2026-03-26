@@ -129,22 +129,28 @@ Return this exact JSON structure:
 OPPORTUNITY TIER DECISION RULES — assign based on ROLE TYPE + COMPANY INDUSTRY + LOCATION, not just score:
 
 "Top Target":
-  WHO: Commercial AE, Mid-Market AE, Corporate AE, Account Executive (general enterprise, NO "Strategic/Senior/Sr./Principal" prefix), Account Manager — at a TARGET INDUSTRY company (hardware, cloud infrastructure, networking, storage, semiconductors, AI infrastructure, data center, industrial tech, defense tech). Also includes general Enterprise AE roles (not specialized) at hardware/infra companies.
+  WHO: Commercial AE, Mid-Market AE, Corporate AE, Account Executive (general enterprise with NO additional stretch qualifier), Account Manager, Named Account Executive, Major Account Executive — at a TARGET INDUSTRY company (hardware, cloud infrastructure, networking, storage, semiconductors, AI infrastructure, data center, industrial tech, defense tech). "Sr. Account Executive" (generic, no Enterprise in title) also belongs here at target-industry companies.
   LOCATION: Job must be remote OR remote-in-territory matching candidate's target locations.
   SCORE: matchScore≥65, aiRisk≠HIGH, realVsFake≥6.
   INTENT: Sweet-spot roles at the right companies — realistic wins AND great career moves.
 
 "Fast Win":
-  WHO: Commercial AE, Mid-Market AE, Corporate AE, SMB AE, Inside Sales AE, or Account Manager at ANY solid tech company (not required to be target industry). These roles have lower competition — you're not competing against 500 applicants.
+  WHO: Commercial AE, Mid-Market AE, Corporate AE, SMB AE, Inside Sales AE, Account Manager, Named AE, or Sr. Account Executive at ANY solid tech company (not required to be target industry). These roles have lower competition — you're not competing against 500 applicants.
   LOCATION: Job must be remote OR remote-in-territory matching candidate's target locations.
   SCORE: matchScore≥55, aiRisk≠HIGH, realVsFake≥5.
   INTENT: Realistic wins you can move on quickly. Apply fast, less tailoring, good shot at getting through.
 
 "Stretch Role":
-  WHO: Any of these signals make it a Stretch — (1) title includes "Strategic", "Senior/Sr.", "Principal", "Named Accounts", "Major Accounts", "Global", "Platinum", "Elite", "Premier"; OR (2) role requires specialized vertical expertise: Financial Services, Banking, Healthcare, Life Sciences, DoD, Government, SLED, Education; OR (3) general Enterprise AE at a hyper-competitive prestige company (Databricks, Snowflake, Salesforce, Workday, ServiceNow, Veeva, Palantir, Stripe, etc.) — great jobs but fierce competition.
-  LOCATION: Job must be remote OR remote-in-territory matching candidate's target locations.
+  WHO: The COMBINATION of words in the title matters — do not flag individual words alone:
+  - "Strategic" anywhere → always Stretch (it signals a senior, competitive enterprise motion regardless of other words)
+  - "Sr." or "Senior" + "Enterprise" in the same title → Stretch (e.g. "Sr. Enterprise AE", "Senior Enterprise Account Executive")
+  - "Sr." or "Senior" + a specific competitive niche → Stretch (e.g. "Sr. Account Executive - AI HPC", "Senior AE, Financial Services")
+  - "Principal" level → Stretch (above standard Enterprise AE in seniority)
+  - Vertical niche specialty anywhere in title → Stretch regardless of level: Financial Services, Banking, Healthcare, Life Sciences, DoD, Government, SLED, Federal, Education
+  - Any Enterprise AE role at a hyper-competitive prestige company → Stretch: Databricks, Snowflake, Salesforce, Workday, ServiceNow, Veeva, Palantir, Stripe — even if title is "Enterprise AE"
+  NOT Stretch by themselves: "Sr. Account Executive" (generic no enterprise/niche), "Named Account Executive", "Major Account Executive", "Enterprise AE" at non-hyper-competitive company — these are Top Target or Fast Win.
   SCORE: matchScore≥55.
-  INTENT: Aspirational — worth applying but expect tougher competition and longer cycle.
+  INTENT: Aspirational — real opportunities but tougher competition, longer cycle, higher bar.
 
 "Probably Skip":
   ANY of: Job is NOT remote and NOT in candidate's target territory (location mismatch → ALWAYS Probably Skip even if company is great); aiRisk=HIGH; realVsFake<5 (ghost/evergreen posting); matchScore<50; wrong role type (SDR, BDR, Solutions Architect, SE, CSM, Customer Success, Marketing, HR, Finance, Legal, Engineering); non-quota-carrying role. Time is better spent elsewhere.`;
@@ -233,12 +239,21 @@ function computeTier(matchScore: number, aiRisk: string, s: SubScores, title = '
   if (s.realVsFake < 5) return 'Probably Skip';
   if (matchScore < 50) return 'Probably Skip';
 
-  // Stretch signals — title-based
-  const hasStretchTitle = /\b(strategic|senior|sr\.|principal|named accounts?|major accounts?|global|platinum|elite|premier)\b/i.test(title);
-  const hasVerticalNiche = /\b(financial services?|banking|healthcare|life sciences?|dod|government|sled|education|federal)\b/i.test(title);
-  const isHyperCompetitive = /\b(databricks|snowflake|workday|servicenow|veeva|stripe|palantir|salesforce)\b/i.test(company);
+  // Stretch signals — combinations matter, not individual words
+  const isStrategic = /\bstrategic\b/i.test(title);
+  const isPrincipal = /\bprincipal\b/i.test(title);
+  const isSeniorLevel = /\b(senior|sr\.)/i.test(title);
+  const hasEnterprise = /\benterprise\b/i.test(title);
+  const hasVerticalNiche = /\b(financial services?|banking|healthcare|life sciences?|dod|government|sled|federal|education|ai[\s-]*hpc|hpc)\b/i.test(title);
+  const isHyperCompetitive = /\b(databricks|snowflake|workday|servicenow|veeva|palantir|salesforce)\b/i.test(company);
 
-  if ((hasStretchTitle || hasVerticalNiche || isHyperCompetitive) && matchScore >= 55) return 'Stretch Role';
+  // Sr/Senior by itself is NOT stretch — only stretch when combined with Enterprise or a niche
+  const isSrEnterprise = isSeniorLevel && hasEnterprise;
+  const isSrWithNiche = isSeniorLevel && hasVerticalNiche;
+
+  const isStretch = isStrategic || isPrincipal || isSrEnterprise || isSrWithNiche || hasVerticalNiche || isHyperCompetitive;
+
+  if (isStretch && matchScore >= 55) return 'Stretch Role';
 
   // Fast Win signals — commercial/MM/corporate/SMB titles
   const isFastWinRole = /\b(commercial|mid.?market|midmarket|corporate|smb|small.?business|inside sales)\b/i.test(title);
