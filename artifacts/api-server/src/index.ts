@@ -265,12 +265,14 @@ async function initDb(): Promise<void> {
   await pool.query(`
     UPDATE criteria SET experience_levels = ARRAY['senior'] WHERE experience_levels = '{}'
   `).catch(() => {});
-  // Simplify target_roles to base 3 roles (remove seniority — Experience Level handles that now)
+  // Migrate old 5-level experience values → new 4-level (enterprise/director → strategic)
   await pool.query(`
     UPDATE criteria
-    SET target_roles = ARRAY['Account Executive','Account Manager','Sales Executive']
-    WHERE target_roles @> ARRAY['Enterprise Account Executive']
-      AND NOT (target_roles = ARRAY['Account Executive','Account Manager','Sales Executive'])
+    SET experience_levels = ARRAY(
+      SELECT DISTINCT CASE WHEN lvl IN ('enterprise','director') THEN 'strategic' ELSE lvl END
+      FROM unnest(experience_levels) AS lvl
+    )
+    WHERE experience_levels && ARRAY['enterprise','director']
   `).catch(() => {});
   await safeAddColumn('jobs', 'saved_at', 'TIMESTAMPTZ');
   await safeAddColumn('scout_runs', 'companies_scanned', 'INT NOT NULL DEFAULT 0');
@@ -2270,39 +2272,32 @@ textarea:focus,input:focus{border-color:var(--gold)}
       <label style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px;display:block">Experience Level <span class="hint">(check all levels you want to target — affects what counts as "above level")</span></label>
       <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Jobs at levels above your highest checked level will be classified as Stretch. Select multiple to broaden your search.</div>
       <div style="display:flex;gap:16px;flex-wrap:wrap">
-        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:140px">
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:160px">
           <input type="checkbox" id="exp-junior" class="exp-level-cb" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
           <div>
             <div style="font-size:13px;font-weight:600;color:var(--text)">Junior</div>
-            <div style="font-size:11px;color:var(--muted);margin-top:1px">Entry-level AE, SMB</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:1px">SMB, commercial at a mid-tier company</div>
           </div>
         </label>
-        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:140px">
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:160px">
           <input type="checkbox" id="exp-mid" class="exp-level-cb" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
           <div>
             <div style="font-size:13px;font-weight:600;color:var(--text)">Mid</div>
-            <div style="font-size:11px;color:var(--muted);margin-top:1px">Commercial / Mid-Market AE</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:1px">Commercial at good-fit company, Corporate, MM</div>
           </div>
         </label>
-        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:140px">
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:160px">
           <input type="checkbox" id="exp-senior" class="exp-level-cb" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
           <div>
             <div style="font-size:13px;font-weight:600;color:var(--text)">Senior</div>
-            <div style="font-size:11px;color:var(--muted);margin-top:1px">Enterprise / Regional AE</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:1px">Sr./Senior, Named, Enterprise</div>
           </div>
         </label>
-        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:140px">
-          <input type="checkbox" id="exp-enterprise" class="exp-level-cb" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:160px">
+          <input type="checkbox" id="exp-strategic" class="exp-level-cb" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
           <div>
-            <div style="font-size:13px;font-weight:600;color:var(--text)">Enterprise</div>
-            <div style="font-size:11px;color:var(--muted);margin-top:1px">Major / Named Accounts</div>
-          </div>
-        </label>
-        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:140px">
-          <input type="checkbox" id="exp-director" class="exp-level-cb" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
-          <div>
-            <div style="font-size:13px;font-weight:600;color:var(--text)">Director</div>
-            <div style="font-size:11px;color:var(--muted);margin-top:1px">RVP, VP, Director-level</div>
+            <div style="font-size:13px;font-weight:600;color:var(--text)">Strategic</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:1px">Strategic, Sr. Enterprise, Account Director</div>
           </div>
         </label>
       </div>
@@ -3164,9 +3159,9 @@ async function loadCriteria() {
     document.getElementById('mode-remote-us').checked = modes.includes('remote_us');
     document.getElementById('mode-territory').checked = modes.includes('remote_in_territory');
     document.getElementById('mode-onsite').checked = modes.includes('onsite');
-    // Experience level checkboxes (multi-select)
+    // Experience level checkboxes (multi-select) — 4-tier model
     var expLevels = c.experience_levels || ['senior'];
-    ['junior','mid','senior','enterprise','director'].forEach(function(lvl) {
+    ['junior','mid','senior','strategic'].forEach(function(lvl) {
       var el = document.getElementById('exp-' + lvl);
       if (el) el.checked = expLevels.includes(lvl);
     });
@@ -3213,9 +3208,9 @@ async function saveCriteria() {
   if (document.getElementById('mode-remote-us').checked) workModes.push('remote_us');
   if (document.getElementById('mode-territory').checked) workModes.push('remote_in_territory');
   if (document.getElementById('mode-onsite').checked) workModes.push('onsite');
-  // Collect experience levels from checkboxes
+  // Collect experience levels from checkboxes — 4-tier model
   var expLevels = [];
-  ['junior','mid','senior','enterprise','director'].forEach(function(lvl) {
+  ['junior','mid','senior','strategic'].forEach(function(lvl) {
     var el = document.getElementById('exp-' + lvl);
     if (el && el.checked) expLevels.push(lvl);
   });
@@ -3611,6 +3606,7 @@ async function deleteSavedBrief(briefId) {
 loadJobs();
 loadStats();
 loadGmailStatus();
+loadCriteria();  // always load settings from DB on page load so they survive refresh/redeploy
 </script>
 </body>
 </html>`;

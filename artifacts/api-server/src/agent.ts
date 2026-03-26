@@ -237,11 +237,16 @@ export interface TierSettings {
   topTargetScore?: number;      // Min match score for Top Target (default 65)
   fastWinScore?: number;        // Min match score for Fast Win (default 55)
   stretchScore?: number;        // Min match score for Stretch Role (default 55)
-  experienceLevels?: string[];  // Array of: 'junior' | 'mid' | 'senior' | 'enterprise' | 'director'
+  experienceLevels?: string[];  // Array of: 'junior' | 'mid' | 'senior' | 'strategic'
 }
 
-// Level hierarchy rank — higher = more senior
-const LEVEL_RANK: Record<string, number> = { junior: 0, mid: 1, senior: 2, enterprise: 3, director: 4 };
+// Level hierarchy rank — 4 tiers matching the user's experience model
+// junior=0: SMB / commercial at mid-tier company
+// mid=1:    commercial at good-fit company, Corporate, MM
+// senior=2: Sr./Senior, Named, Enterprise
+// strategic=3: Strategic, Sr.Enterprise, Strategic Enterprise, Account Director
+const LEVEL_RANK: Record<string, number> = { junior: 0, mid: 1, senior: 2, strategic: 3 };
+
 
 const DEFAULT_STRETCH_COMPANIES = ['databricks', 'snowflake', 'workday', 'servicenow', 'veeva', 'palantir', 'salesforce'];
 const DEFAULT_VERTICAL_NICHES   = ['federal', 'government', 'sled', 'fsi', 'dod', 'defense', 'navy', 'army', 'air force', 'marines', 'public sector', 'healthcare', 'health system', 'life sciences', 'pharma', 'pharmaceutical', 'banking', 'financial services', 'insurance', 'education', 'k-12', 'higher ed', 'gsi', 'hyperscaler', 'hyperscale'];
@@ -301,22 +306,21 @@ export function computeTier(
   const hasEnterprise  = /\benterprise\b/i.test(title);
   const isSrEnterprise = isSenior && hasEnterprise;
 
-  // Signals that a role is ABOVE the user's current experience level — adjusted by maxRank:
-  //   rank < 1 (junior):     commercial/MM/enterprise all count as above level
-  //   rank 1 (mid):          enterprise counts as above level
-  //   rank 2 (senior/default): Sr+Enterprise, Strategic, Director, Named, Principal = above
-  //   rank 3 (enterprise):   Named becomes accessible; Strategic/Director still above
-  //   rank 4 (director):     Strategic + Director become accessible; very little is above
-  const enterpriseAbove = maxRank < 1 ? hasEnterprise : false;          // junior only
-  const srEnterpriseAbove = maxRank < 2 ? isSrEnterprise : (maxRank === 2 ? isSrEnterprise : false);
-  const strategicAbove    = maxRank < 4 ? isStrategic : false;          // director can do strategic
-  const directorAbove     = maxRank < 4 ? isDirector  : false;          // director can do director roles
-  const namedAbove        = maxRank < 3 ? isNamedAE   : false;          // enterprise+ can handle named
-  const principalAbove    = isPrincipal;                                 // always above (IC track)
+  // Signals that a role is ABOVE the user's current experience level — 4-tier model:
+  //   junior (0):   SMB / commercial at mid-tier; Enterprise, Named, Sr.Enterprise, Strategic, Director all above
+  //   mid (1):      Commercial-good, Corporate, MM accessible; Enterprise, Named, Sr.Enterprise, Strategic, Director above
+  //   senior (2):   Sr./Senior, Named, Enterprise accessible; Sr.Enterprise, Strategic, Director above
+  //   strategic (3): Strategic, Sr.Enterprise, Account Director accessible; very little above
+  const namedAbove        = maxRank < 2 ? isNamedAE    : false; // Named: above for junior/mid; accessible at senior+
+  const enterpriseAbove   = maxRank < 2 ? hasEnterprise : false; // Enterprise: above for junior/mid; accessible at senior+
+  const srEnterpriseAbove = maxRank < 3 ? isSrEnterprise : false; // Sr.Enterprise: above below strategic; accessible at strategic
+  const strategicAbove    = maxRank < 3 ? isStrategic  : false; // Strategic: above below strategic level; accessible at strategic
+  const directorAbove     = maxRank < 3 ? isDirector   : false; // Acct Director / RVP: above below strategic; accessible at strategic
+  const principalAbove    = isPrincipal;                          // always above (IC track, not AE path)
 
   // Signals that a role is ABOVE the user's current experience level
-  const isAboveLevel = strategicAbove || directorAbove || principalAbove || namedAbove ||
-    srEnterpriseAbove || enterpriseAbove || hasVerticalNiche;
+  const isAboveLevel = namedAbove || enterpriseAbove || srEnterpriseAbove ||
+    strategicAbove || directorAbove || principalAbove || hasVerticalNiche;
 
   // Accessible role types — realistic laterals or one step up for AE background
   const hasCommercial         = /\bcommercial\b/i.test(title);
