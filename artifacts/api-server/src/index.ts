@@ -847,7 +847,6 @@ async function reclassifyJobsLocally(): Promise<number> {
   const userLocations: string[] = criteria.locations ?? [];
   const allowedWorkModes: string[] = criteria.allowed_work_modes ?? [];
   const tierSettings: TierSettings = {
-    stretchCompanies: criteria.stretch_companies ?? [],
     verticalNiches: criteria.vertical_niches ?? [],
     topTargetScore: criteria.top_target_score ?? 65,
     fastWinScore: criteria.fast_win_score ?? 55,
@@ -1403,7 +1402,6 @@ async function runScoutInBackground(runId: number): Promise<void> {
       allowed_work_modes: string[]; experience_levels: string[];
     };
     const tierSettings: TierSettings = {
-      stretchCompanies: criteria.stretch_companies ?? [],
       verticalNiches: criteria.vertical_niches ?? [],
       topTargetScore: criteria.top_target_score ?? 65,
       fastWinScore: criteria.fast_win_score ?? 55,
@@ -2281,33 +2279,33 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="fg full" style="padding:14px 16px;background:#141414;border:1px solid var(--border);border-radius:8px">
       <label style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px;display:block">Experience Level <span class="hint">(check all levels you want to target — affects what counts as "above level")</span></label>
       <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Jobs at levels above your highest checked level will be classified as Stretch. Select multiple to broaden your search.</div>
-      <div style="display:flex;gap:16px;flex-wrap:wrap">
-        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:160px">
-          <input type="checkbox" id="exp-junior" class="exp-level-cb" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
+      <div style="display:flex;flex-direction:column;gap:10px;margin-top:4px">
+        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
+          <input type="checkbox" id="exp-junior" class="exp-level-cb" style="margin-top:3px;accent-color:var(--gold);flex-shrink:0">
           <div>
             <div style="font-size:13px;font-weight:600;color:var(--text)">Junior</div>
-            <div style="font-size:11px;color:var(--muted);margin-top:1px">SMB, commercial at a mid-tier company</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">SMB, commercial at a mid-tier company</div>
           </div>
         </label>
-        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:160px">
-          <input type="checkbox" id="exp-mid" class="exp-level-cb" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
+        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
+          <input type="checkbox" id="exp-mid" class="exp-level-cb" style="margin-top:3px;accent-color:var(--gold);flex-shrink:0">
           <div>
             <div style="font-size:13px;font-weight:600;color:var(--text)">Mid</div>
-            <div style="font-size:11px;color:var(--muted);margin-top:1px">Commercial at good-fit company, Corporate, MM</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">Commercial at good-fit company, Corporate, MM</div>
           </div>
         </label>
-        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:160px">
-          <input type="checkbox" id="exp-senior" class="exp-level-cb" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
+        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
+          <input type="checkbox" id="exp-senior" class="exp-level-cb" style="margin-top:3px;accent-color:var(--gold);flex-shrink:0">
           <div>
             <div style="font-size:13px;font-weight:600;color:var(--text)">Senior</div>
-            <div style="font-size:11px;color:var(--muted);margin-top:1px">Sr./Senior, Named, Enterprise</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">Sr./Senior, Named, Enterprise</div>
           </div>
         </label>
-        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;min-width:160px">
-          <input type="checkbox" id="exp-strategic" class="exp-level-cb" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
+        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
+          <input type="checkbox" id="exp-strategic" class="exp-level-cb" style="margin-top:3px;accent-color:var(--gold);flex-shrink:0">
           <div>
             <div style="font-size:13px;font-weight:600;color:var(--text)">Strategic</div>
-            <div style="font-size:11px;color:var(--muted);margin-top:1px">Strategic, Sr. Enterprise, Account Director</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">Strategic, Sr. Enterprise, Account Director, Major, Majors</div>
           </div>
         </label>
       </div>
@@ -2334,11 +2332,6 @@ textarea:focus,input:focus{border-color:var(--gold)}
           <span id="set-stretch-score-val" style="font-size:13px;font-weight:700;color:#a78bfa;min-width:24px">55</span>
         </div>
       </div>
-    </div>
-    <div class="fg full">
-      <label>Stretch Companies <span class="hint">(hyper-competitive logos — always classified as Stretch even for accessible roles)</span></label>
-      <input type="text" id="set-stretch-co-input" placeholder="e.g. Databricks, Salesforce, Snowflake">
-      <div class="tag-list" id="set-stretch-co-tags"></div>
     </div>
     <div class="fg full">
       <label>Vertical Niche Signals <span class="hint">(title keywords that push a role above your level — Federal, SLED, Healthcare, etc.)</span></label>
@@ -3198,9 +3191,6 @@ async function loadCriteria() {
     setTags('must_have', 'set-must-tags', c.must_have);
     setTags('nice_to_have', 'set-nice-tags', c.nice_to_have);
     setTags('avoid', 'set-avoid-tags', c.avoid);
-    // Default stretch companies if none saved
-    var defaultStretchCos = ['Databricks','Snowflake','Workday','ServiceNow','Veeva','Palantir','Salesforce'];
-    setTags('stretch_companies', 'set-stretch-co-tags', (c.stretch_companies && c.stretch_companies.length > 0) ? c.stretch_companies : defaultStretchCos);
     // Default vertical niches if none saved
     var defaultNiches = ['federal','government','SLED','FSI','DOD','defense','public sector','healthcare','pharma','banking','financial services'];
     setTags('vertical_niches', 'set-niches-tags', (c.vertical_niches && c.vertical_niches.length > 0) ? c.vertical_niches : defaultNiches);
@@ -3211,7 +3201,6 @@ async function loadCriteria() {
       initTagInput('set-must-input', 'set-must-tags', 'must_have');
       initTagInput('set-nice-input', 'set-nice-tags', 'nice_to_have');
       initTagInput('set-avoid-input', 'set-avoid-tags', 'avoid');
-      initTagInput('set-stretch-co-input', 'set-stretch-co-tags', 'stretch_companies');
       initTagInput('set-niches-input', 'set-niches-tags', 'vertical_niches');
       _criteriaInitialized = true;
     }
@@ -3247,7 +3236,6 @@ async function saveCriteria() {
     must_have: _criteriaTagState.must_have || [],
     nice_to_have: _criteriaTagState.nice_to_have || [],
     avoid: _criteriaTagState.avoid || [],
-    stretch_companies: _criteriaTagState.stretch_companies || [],
     vertical_niches: _criteriaTagState.vertical_niches || []
   };
   try {

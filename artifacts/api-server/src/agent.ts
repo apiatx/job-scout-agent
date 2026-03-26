@@ -232,7 +232,6 @@ OPPORTUNITY TIER DECISION RULES — assign based on ROLE TYPE + COMPANY INDUSTRY
 
 // Settings that control tier classification — all user-configurable
 export interface TierSettings {
-  stretchCompanies?: string[];  // Company names that are always Stretch (case-insensitive)
   verticalNiches?: string[];    // Title keywords that signal above-level niche specialization
   topTargetScore?: number;      // Min match score for Top Target (default 65)
   fastWinScore?: number;        // Min match score for Fast Win (default 55)
@@ -248,7 +247,6 @@ export interface TierSettings {
 const LEVEL_RANK: Record<string, number> = { junior: 0, mid: 1, senior: 2, strategic: 3 };
 
 
-const DEFAULT_STRETCH_COMPANIES = ['databricks', 'snowflake', 'workday', 'servicenow', 'veeva', 'palantir', 'salesforce'];
 const DEFAULT_VERTICAL_NICHES   = ['federal', 'government', 'sled', 'fsi', 'dod', 'defense', 'navy', 'army', 'air force', 'marines', 'public sector', 'healthcare', 'health system', 'life sciences', 'pharma', 'pharmaceutical', 'banking', 'financial services', 'insurance', 'education', 'k-12', 'higher ed', 'gsi', 'hyperscaler', 'hyperscale'];
 
 export function computeTier(
@@ -273,13 +271,6 @@ export function computeTier(
   const fastWinScore   = settings?.fastWinScore   ?? 55;
   const stretchScore   = settings?.stretchScore   ?? 55;
 
-  // === HYPER-COMPETITIVE COMPANY CHECK (user-configurable) ===
-  const stretchCompanyList = (settings?.stretchCompanies && settings.stretchCompanies.length > 0)
-    ? settings.stretchCompanies.map((c) => c.toLowerCase().trim())
-    : DEFAULT_STRETCH_COMPANIES;
-  const companyLower = company.toLowerCase();
-  const isHyperCompetitive = stretchCompanyList.some((sc) => companyLower.includes(sc));
-
   // === VERTICAL NICHE CHECK (user-configurable) ===
   const nicheList = (settings?.verticalNiches && settings.verticalNiches.length > 0)
     ? settings.verticalNiches.map((n) => n.toLowerCase().trim())
@@ -298,7 +289,8 @@ export function computeTier(
   const maxRank = Math.max(...expLevels.map((l) => LEVEL_RANK[l] ?? 2)); // default to senior (2)
 
   // === ROLE TITLE ANALYSIS ===
-  const isStrategic    = /\bstrategic\b/i.test(title);
+  // Strategic-level titles include "Major" / "Majors" accounts roles in addition to Strategic/Sr.Enterprise/Account Director
+  const isStrategic    = /\b(strategic|major|majors)\b/i.test(title);
   const isDirector     = /\b(director|rvp\b|vice president|vp\b)\b/i.test(title);
   const isPrincipal    = /\bprincipal\b/i.test(title);
   const isNamedAE      = /\bnamed\b/i.test(title);
@@ -328,20 +320,19 @@ export function computeTier(
   const hasCorporate          = /\bcorporate\b/i.test(title);
   const hasRegional           = /\b(regional|territory)\b/i.test(title);
   const hasPartner            = /\bpartner\b/i.test(title);
-  const isMajorAE             = /\bmajor\b/i.test(title) && /\b(account|sales)\b/i.test(title);
   const hasStandardEnterprise = hasEnterprise && !isAboveLevel;
   const isSeniorOnlyAE        = isSenior && !hasEnterprise;
 
   const isGenericAE = !isAboveLevel &&
-    /\b(account executive|account manager|sales executive|sales manager|sales representative|specialist seller|select major|client executive)\b/i.test(title);
+    /\b(account executive|account manager|sales executive|sales manager|sales representative|specialist seller|client executive)\b/i.test(title);
 
   const isAccessibleRole = hasStandardEnterprise || hasCommercial || hasMidMarket || hasCorporate ||
-    hasRegional || hasPartner || isMajorAE || isSeniorOnlyAE || isGenericAE;
+    hasRegional || hasPartner || isSeniorOnlyAE || isGenericAE;
 
   // === TIER ASSIGNMENT ===
 
-  // STRETCH: Above the user's experience level OR hyper-competitive company to land
-  if ((isAboveLevel || isHyperCompetitive) && matchScore >= stretchScore && s.realVsFake >= 5) {
+  // STRETCH: Above the user's experience level (Major/Strategic/Sr.Enterprise/Director counted above unless user is Strategic level)
+  if (isAboveLevel && matchScore >= stretchScore && s.realVsFake >= 5) {
     return 'Stretch Role';
   }
 
@@ -355,7 +346,7 @@ export function computeTier(
   }
 
   // FAST WIN: More accessible role type with a decent score (lower company quality bar)
-  if ((hasCommercial || hasMidMarket || hasCorporate || isMajorAE) &&
+  if ((hasCommercial || hasMidMarket || hasCorporate) &&
       matchScore >= fastWinScore && s.realVsFake >= 5 && aiRisk !== 'HIGH') {
     return 'Fast Win';
   }
