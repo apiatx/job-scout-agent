@@ -1,6 +1,6 @@
 import express, { type Request, type Response } from 'express';
 import pg from 'pg';
-import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, runJobSpyScraper } from './scraper.js';
+import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, runJobSpyScraper, proxyConfigured } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
 import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier } from './agent.js';
 import type { SubScores, OpportunityTier, TierSettings } from './agent.js';
@@ -23,6 +23,33 @@ app.use(express.json({ limit: '2mb' }));
 // ── Health check — MUST be the very first route for Replit ────────────────
 app.get('/health', (_req, res) => { res.status(200).json({ status: 'ok' }); });
 app.get('/api/healthz', (_req, res) => { res.status(200).json({ status: 'ok' }); });
+
+// Proxy status — shows whether JOBSPY_PROXY is configured WITHOUT exposing credentials.
+// Primary source: JOBSPY_PROXY Replit Secret.
+// Fallback source: proxy_url field in Settings (stored in DB).
+app.get('/api/proxy-status', async (_req, res: Response) => {
+  try {
+    // Check Settings fallback (Replit Secret is checked directly inside proxyConfigured)
+    const { rows } = await pool.query('SELECT proxy_url FROM criteria LIMIT 1');
+    const settingsProxy = (rows[0]?.proxy_url ?? '').trim();
+
+    const { configured, source } = proxyConfigured(settingsProxy);
+
+    const warning = configured
+      ? null
+      : 'JOBSPY_PROXY not set — Glassdoor and ZipRecruiter are disabled. Add it in Replit Secrets (key: JOBSPY_PROXY) or in Settings → Proxy URL.';
+
+    res.json({
+      configured,
+      source,                               // "env" | "settings" | null
+      sources_unlocked: configured
+        ? ['LinkedIn', 'Indeed', 'Glassdoor', 'ZipRecruiter']
+        : ['LinkedIn', 'Indeed'],
+      // NOTE: proxy URL itself is intentionally NOT returned — credentials must not be exposed
+      warning,
+    });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
 
 // ── Gmail OAuth config ───────────────────────────────────────────────────
 const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID || '1007930505834-cpp1veqs8alu56k810qd2mru61keej3j.apps.googleusercontent.com';
