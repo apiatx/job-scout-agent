@@ -1762,10 +1762,20 @@ function esc(s: unknown): string {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function serveHTML(_req: Request, res: Response): void {
+async function serveHTML(_req: Request, res: Response): Promise<void> {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
-  res.end(HTML);
+  // Inject saved criteria so settings render instantly (no async flash)
+  let criteriaJson = 'null';
+  try {
+    const { rows } = await pool.query('SELECT * FROM criteria LIMIT 1');
+    if (rows[0]) criteriaJson = JSON.stringify(rows[0]);
+  } catch (_) {}
+  const pageHtml = HTML.replace(
+    '// ── init ──────────────────────────────────────────────────────────────────',
+    `window.__initialCriteria__ = ${criteriaJson};\n// ── init ────────────────────────────────────────────────────────────────────`
+  );
+  res.end(pageHtml);
 }
 
 app.get('/', serveHTML);
@@ -3148,9 +3158,16 @@ function setTags(stateKey, tagsId, arr) {
 var _criteriaInitialized = false;
 async function loadCriteria() {
   try {
-    var res = await fetch('/api/criteria');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    var c = await res.json();
+    var c;
+    // On first call: use server-injected data (already in the page, no round-trip, no flash)
+    // On subsequent calls: re-fetch from API to pick up any changes
+    if (!_criteriaInitialized && window.__initialCriteria__) {
+      c = window.__initialCriteria__;
+    } else {
+      var res = await fetch('/api/criteria');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      c = await res.json();
+    }
     document.getElementById('set-salary').value = c.min_salary || '';
     document.getElementById('set-name').value = c.your_name || '';
     document.getElementById('set-email').value = c.your_email || '';
