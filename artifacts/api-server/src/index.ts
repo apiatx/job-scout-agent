@@ -278,6 +278,7 @@ async function initDb(): Promise<void> {
   await safeAddColumn('scout_runs', 'companies_scanned', 'INT NOT NULL DEFAULT 0');
   await safeAddColumn('scout_runs', 'matches_found', 'INT NOT NULL DEFAULT 0');
   await safeAddColumn('jobs', 'source', "TEXT NOT NULL DEFAULT ''");
+  await safeAddColumn('criteria', 'proxy_url', "TEXT NOT NULL DEFAULT ''");
   await safeAddColumn('jobs', 'description', 'TEXT');
   await safeAddColumn('jobs', 'is_hardware', 'BOOLEAN NOT NULL DEFAULT false');
   await safeAddColumn('jobs', 'created_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()');
@@ -634,7 +635,7 @@ app.put('/api/criteria', async (req: Request, res: Response) => {
       target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid,
       your_name, your_email, remote_strict,
       experience_level, stretch_companies, vertical_niches, top_target_score, fast_win_score, stretch_score,
-      allowed_work_modes, experience_levels,
+      allowed_work_modes, experience_levels, proxy_url,
     } = req.body;
     const { rows: existing } = await pool.query('SELECT id FROM criteria LIMIT 1');
     const params = [
@@ -649,11 +650,12 @@ app.put('/api/criteria', async (req: Request, res: Response) => {
       stretch_score ?? 55,
       allowed_work_modes ?? ['remote_us'],
       experience_levels && experience_levels.length > 0 ? experience_levels : ['senior'],
+      proxy_url ?? '',
     ];
     if (existing.length === 0) {
       const { rows } = await pool.query(
-        `INSERT INTO criteria (target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email, remote_strict, experience_level, stretch_companies, vertical_niches, top_target_score, fast_win_score, stretch_score, allowed_work_modes, experience_levels)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`, params
+        `INSERT INTO criteria (target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email, remote_strict, experience_level, stretch_companies, vertical_niches, top_target_score, fast_win_score, stretch_score, allowed_work_modes, experience_levels, proxy_url)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING *`, params
       );
       res.json(rows[0]);
     } else {
@@ -661,8 +663,8 @@ app.put('/api/criteria', async (req: Request, res: Response) => {
         `UPDATE criteria SET target_roles=$1, industries=$2, min_salary=$3, work_type=$4, locations=$5,
          must_have=$6, nice_to_have=$7, avoid=$8, your_name=$9, your_email=$10, remote_strict=$11,
          experience_level=$12, stretch_companies=$13, vertical_niches=$14, top_target_score=$15, fast_win_score=$16, stretch_score=$17,
-         allowed_work_modes=$18, experience_levels=$19
-         WHERE id=$20 RETURNING *`, [...params, existing[0].id]
+         allowed_work_modes=$18, experience_levels=$19, proxy_url=$20
+         WHERE id=$21 RETURNING *`, [...params, existing[0].id]
       );
       res.json(rows[0]);
     }
@@ -1453,33 +1455,48 @@ async function runScoutInBackground(runId: number): Promise<void> {
       }
     }
 
-    // ── Stage 2b: JobSpy — scrape Indeed, Glassdoor, ZipRecruiter via Python (concurrent) ──
+    // ── Stage 2b: JobSpy — LinkedIn + Indeed + (Glassdoor/ZipRecruiter via proxy) ──
     try {
       const jobSpyResults = await runJobSpyScraper({
         target_roles: criteria.target_roles ?? [],
         locations: criteria.locations ?? [],
+        proxy_url: criteria.proxy_url ?? '',
       });
       console.log(`JobSpy returned ${jobSpyResults.length} jobs — adding all to pipeline`);
-      allJobs.push(...jobSpyResults.map(j => ({ ...j, source: 'JobSpy' })));
+      // Use the per-job source tag from the scraper (linkedin / indeed / glassdoor / ziprecruiter)
+      // Capitalise for display; fall back to 'JobSpy' if unrecognised
+      allJobs.push(...jobSpyResults.map(j => {
+        const src = (j.source ?? '').toLowerCase();
+        const displaySrc = src === 'linkedin' ? 'LinkedIn'
+          : src === 'indeed' ? 'Indeed'
+          : src === 'glassdoor' ? 'Glassdoor'
+          : src === 'ziprecruiter' ? 'ZipRecruiter'
+          : 'JobSpy';
+        return { ...j, source: displaySrc, _fromJobSpy: true };
+      }));
     } catch (e) {
       console.error(`JobSpy scraper error:`, e);
     }
 
-    // ── Stage 2c: Filter out unsafe companies from JobSpy results ──
+    // ── Stage 2c: Filter out unsafe companies from all JobSpy-sourced results ──
     const companyNames = companies.map((c: any) => c.name as string);
-    const jobSpyJobs = allJobs.filter(j => j.source === 'JobSpy');
-    const nonJobSpyJobs = allJobs.filter(j => j.source !== 'JobSpy');
+    const jobSpyJobs = allJobs.filter(j => (j as any)._fromJobSpy);
+    const nonJobSpyJobs = allJobs.filter(j => !(j as any)._fromJobSpy);
     if (jobSpyJobs.length > 0) {
       const safeJobSpyJobs = await filterUnsafeCompanies(
         jobSpyJobs.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
         companyNames
       );
       const filteredOut = jobSpyJobs.length - safeJobSpyJobs.length;
-      console.log(`Company safety filter: ${jobSpyJobs.length} JobSpy jobs → ${safeJobSpyJobs.length} passed (${filteredOut} filtered out)`);
-      // Rebuild allJobs with filtered JobSpy results
+      // Count per source for logging
+      const srcCounts = jobSpyJobs.reduce((acc: Record<string, number>, j) => { acc[j.source] = (acc[j.source] ?? 0) + 1; return acc; }, {});
+      console.log(`Company safety filter: ${jobSpyJobs.length} jobs (${JSON.stringify(srcCounts)}) → ${safeJobSpyJobs.length} passed (${filteredOut} filtered out)`);
+      // Rebuild allJobs — preserve the per-source tag from above
       allJobs.length = 0;
       allJobs.push(...nonJobSpyJobs);
-      allJobs.push(...safeJobSpyJobs.map(j => ({ ...j, source: 'JobSpy' })));
+      // Re-attach the correct source to each safe job using its applyUrl as key
+      const sourceByUrl = new Map(jobSpyJobs.map(j => [j.applyUrl, j.source]));
+      allJobs.push(...safeJobSpyJobs.map(j => ({ ...j, source: sourceByUrl.get(j.applyUrl) ?? 'JobSpy' })));
     }
 
     console.log(`\n──── SCRAPE RESULTS ────────────────────────────────────────`);
@@ -1936,6 +1953,13 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .card-why{padding:12px 18px;border-bottom:1px solid #1e1e1e;font-size:12px;color:#999;line-height:1.6}
 .card-foot{padding:12px 18px;display:flex;gap:8px;flex-wrap:wrap}
 .source-badge{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;background:#222;color:var(--muted)}
+.source-badge[data-src="LinkedIn"]{background:#0a66c2;color:#fff}
+.source-badge[data-src="Indeed"]{background:#003a9b;color:#fff}
+.source-badge[data-src="Glassdoor"]{background:#0caa41;color:#fff}
+.source-badge[data-src="ZipRecruiter"]{background:#2164f3;color:#fff}
+.source-badge[data-src="Greenhouse"]{background:#1a6b3a;color:#fff}
+.source-badge[data-src="Lever"]{background:#5c48e4;color:#fff}
+.source-badge[data-src="Workday"]{background:#f05a28;color:#fff}
 .age-badge{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10px;font-weight:500;background:transparent;color:var(--muted);border:1px solid #333}
 .ai-risk-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
 .ai-risk-LOW{background:rgba(0,200,110,.12);color:#00c86e;border:1px solid rgba(0,200,110,.3)}
@@ -2272,6 +2296,15 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="fg">
       <label>Your Email</label>
       <input type="email" id="set-email" placeholder="you@example.com">
+    </div>
+    <div class="fg full">
+      <label>Proxy URL <span class="hint" style="color:#f59e0b">— Required to unlock Glassdoor &amp; ZipRecruiter (both Cloudflare-blocked without a proxy)</span></label>
+      <input type="text" id="set-proxy-url" placeholder="http://user:pass@host:port  (residential or datacenter proxy)">
+      <div style="font-size:11px;color:var(--muted);margin-top:5px;line-height:1.5">
+        Without a proxy: <strong style="color:#4ade80">LinkedIn</strong> + <strong style="color:#60a5fa">Indeed</strong> (~1,200+ jobs/run) &nbsp;|&nbsp;
+        With a proxy: + <strong style="color:#34d399">Glassdoor</strong> + <strong style="color:#818cf8">ZipRecruiter</strong> (~1,600+ jobs/run).<br>
+        Comma-separate multiple proxies for rotation: <code style="background:#111;padding:1px 4px;border-radius:3px">http://u:p@h1:p1,http://u:p@h2:p2</code>
+      </div>
     </div>
   </div>
 
@@ -2703,7 +2736,7 @@ function renderJobCard(j, opts) {
       aiRiskBadge +
       territoryBadge +
       repvueBadge +
-      (j.source ? '<span class="source-badge">' + esc(j.source) + '</span>' : '') +
+      (j.source ? '<span class="source-badge" data-src="' + esc(j.source) + '">' + esc(j.source) + '</span>' : '') +
       (jobAge(j) ? '<span class="age-badge">' + jobAge(j) + '</span>' : '') +
       ssToggle +
     '</div>' +
@@ -3167,6 +3200,7 @@ async function loadCriteria() {
     document.getElementById('set-salary').value = c.min_salary || '';
     document.getElementById('set-name').value = c.your_name || '';
     document.getElementById('set-email').value = c.your_email || '';
+    document.getElementById('set-proxy-url').value = c.proxy_url || '';
     // Work mode checkboxes
     var modes = c.allowed_work_modes || ['remote_us'];
     document.getElementById('mode-remote-us').checked = modes.includes('remote_us');
@@ -3239,7 +3273,8 @@ async function saveCriteria() {
     must_have: _criteriaTagState.must_have || [],
     nice_to_have: _criteriaTagState.nice_to_have || [],
     avoid: _criteriaTagState.avoid || [],
-    vertical_niches: _criteriaTagState.vertical_niches || []
+    vertical_niches: _criteriaTagState.vertical_niches || [],
+    proxy_url: (document.getElementById('set-proxy-url').value || '').trim()
   };
   try {
     var res = await fetch('/api/criteria', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });

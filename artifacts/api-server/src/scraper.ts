@@ -166,11 +166,12 @@ export async function scrapeWorkdayJobs(
   return jobs;
 }
 
-// JobSpy scraper — calls Python script that searches Indeed, Glassdoor, and ZipRecruiter concurrently
-// Criteria (target_roles, locations) are passed via stdin so searches match the user's saved settings.
+// JobSpy scraper — calls Python script: LinkedIn + Indeed + (Glassdoor/ZipRecruiter via proxy)
+// Criteria (target_roles, locations, proxy_url) are passed via stdin so searches match user settings.
 export async function runJobSpyScraper(criteria?: {
   target_roles?: string[];
   locations?: string[];
+  proxy_url?: string;
 }): Promise<ScrapedJob[]> {
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const scriptPath = resolve(scriptDir, 'jobspy_scraper.py');
@@ -180,14 +181,23 @@ export async function runJobSpyScraper(criteria?: {
     locations: criteria?.locations ?? [],
   });
 
+  const proxyUrl = criteria?.proxy_url?.trim() ?? '';
+  const proxySources = proxyUrl ? 'LinkedIn + Indeed + Glassdoor + ZipRecruiter' : 'LinkedIn + Indeed';
+
   console.log(`\n──── JOBSPY SEARCH ────────────────────────────────────────`);
-  console.log(`Running JobSpy scraper (Indeed + Glassdoor + ZipRecruiter, concurrent)...`);
+  console.log(`Running JobSpy scraper (${proxySources}, concurrent)...`);
   console.log(`  Roles: ${(criteria?.target_roles ?? []).join(', ') || '(defaults)'}`);
-  console.log(`  Location: ${(criteria?.locations ?? [])[0] || 'United States'}`);
+  console.log(`  Locations: ${(criteria?.locations ?? []).join(', ') || 'United States (national)'}`);
+  if (proxyUrl) console.log(`  Proxy: configured (Glassdoor + ZipRecruiter enabled)`);
+
+  // Build env — pass proxy URL if configured so Python script can enable Glassdoor/ZipRecruiter
+  const childEnv: Record<string, string> = { ...process.env as Record<string, string> };
+  if (proxyUrl) childEnv['JOBSPY_PROXIES'] = proxyUrl;
 
   return new Promise((resolvePromise) => {
     const proc = spawn('python3', [scriptPath], {
       timeout: 600_000,
+      env: childEnv,
     });
 
     // Pass criteria to the Python script via stdin
