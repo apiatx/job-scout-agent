@@ -1515,6 +1515,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
       stretch_companies: string[]; vertical_niches: string[];
       top_target_score: number; fast_win_score: number; stretch_score: number;
       allowed_work_modes: string[]; experience_levels: string[];
+      proxy_url: string;
     };
     const tierSettings: TierSettings = {
       verticalNiches: criteria.vertical_niches ?? [],

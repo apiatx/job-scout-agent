@@ -12,11 +12,9 @@ paths = ["/"]
 [services.development]
 run = "PORT=8080 npm run dev"
 
-[services.production.run]
-args = ["node", "--import", "tsx", "artifacts/api-server/src/index.ts"]
-
-[services.production.run.env]
-PORT = "8080"
+[services.production]
+build = "pnpm --filter @workspace/api-server run build"
+run = "PORT=8080 pnpm --filter @workspace/api-server run start"
 
 [services.production.health.startup]
 path = "/api/healthz"
