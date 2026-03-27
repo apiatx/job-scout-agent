@@ -679,12 +679,13 @@ app.put('/api/criteria', async (req: Request, res: Response) => {
       experience_levels && experience_levels.length > 0 ? experience_levels : ['senior'],
       proxy_url ?? '',
     ];
+    let savedRow: Record<string, unknown>;
     if (existing.length === 0) {
       const { rows } = await pool.query(
         `INSERT INTO criteria (target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email, remote_strict, experience_level, stretch_companies, vertical_niches, top_target_score, fast_win_score, stretch_score, allowed_work_modes, experience_levels, proxy_url)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING *`, params
       );
-      res.json(rows[0]);
+      savedRow = rows[0];
     } else {
       const { rows } = await pool.query(
         `UPDATE criteria SET target_roles=$1, industries=$2, min_salary=$3, work_type=$4, locations=$5,
@@ -693,8 +694,13 @@ app.put('/api/criteria', async (req: Request, res: Response) => {
          allowed_work_modes=$18, experience_levels=$19, proxy_url=$20
          WHERE id=$21 RETURNING *`, [...params, existing[0].id]
       );
-      res.json(rows[0]);
+      savedRow = rows[0];
     }
+    res.json(savedRow);
+    // Re-classify existing jobs using the new settings (no Claude — uses stored sub_scores)
+    reclassifyJobsLocally()
+      .then(n => { if (n > 0) console.log(`Settings saved → reclassified ${n} job(s) using new criteria`); })
+      .catch(e => console.warn('Post-save reclassify error:', e));
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -812,25 +818,31 @@ app.post('/api/jobs/rescore-all', async (_req, res: Response) => {
     const criteria = cRows[0] as any;
     const { rows: companyRows } = await pool.query('SELECT name FROM companies');
     const companyNames = companyRows.map((r: any) => r.name as string);
+    const rescorerTierSettings: TierSettings = {
+      verticalNiches: criteria.vertical_niches ?? [],
+      topTargetScore: criteria.top_target_score ?? 65,
+      fastWinScore: criteria.fast_win_score ?? 55,
+      stretchScore: criteria.stretch_score ?? 55,
+      experienceLevels: criteria.experience_levels ?? ['senior'],
+    };
     const criteriaText = [
       criteria.target_roles?.length ? `Target roles: ${criteria.target_roles.join(', ')}` : '',
-      criteria.industries?.length ? `Industries: ${criteria.industries.join(', ')}` : '',
-      criteria.min_salary ? `Minimum salary: $${criteria.min_salary.toLocaleString()} base` : '',
-      criteria.locations?.length ? `Locations: ${criteria.locations.join(', ')}` : '',
+      criteria.industries?.length ? `Target industries: ${criteria.industries.join(', ')}` : '',
+      criteria.locations?.length ? `Preferred locations: ${criteria.locations.join(', ')}` : '',
       (() => {
         const modes: string[] = criteria.allowed_work_modes ?? [];
         const parts: string[] = [];
         if (modes.includes('remote_us')) parts.push('true remote (US-wide, no city restriction)');
         if (modes.includes('remote_in_territory')) parts.push('remote-in-territory (must live near specified city)');
         if (modes.includes('onsite')) parts.push('on-site physical office');
-        return parts.length > 0 ? `Accepted work modes: ${parts.join(', ')}` : 'Work modes: any';
+        return parts.length > 0 ? `Accepted work modes: ${parts.join(', ')}` : '';
       })(),
       criteria.must_have?.length ? `Must have: ${criteria.must_have.join(', ')}` : '',
       criteria.nice_to_have?.length ? `Nice to have: ${criteria.nice_to_have.join(', ')}` : '',
-      criteria.avoid?.length ? `Avoid: ${criteria.avoid.join(', ')}` : '',
+      criteria.avoid?.length ? `Avoid (automatic disqualifier): ${criteria.avoid.join(', ')}` : '',
     ].filter(Boolean).join('\n');
     const preApprovedSection = companyNames.length > 0
-      ? `PRE-APPROVED COMPANIES:\nThe user has pre-approved these specific companies as target employers.\nPre-approved companies: ${companyNames.join(', ')}`
+      ? `PRE-APPROVED COMPANIES:\nThe user has manually vetted and approved these employers as targets.\nPre-approved companies: ${companyNames.join(', ')}`
       : '';
     res.json({ started: true, count: unscored.length });
     rescoreRunning = true;
@@ -844,15 +856,12 @@ app.post('/api/jobs/rescore-all', async (_req, res: Response) => {
           try {
             const result = await rescoreJobOpportunity(
               { id: j.id, title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.apply_url, description: j.description },
-              criteriaText, preApprovedSection, companyNames
+              criteriaText, preApprovedSection, companyNames, rescorerTierSettings, criteria.min_salary ?? null
             );
             if (result) {
-              const jobIsRemote = /remote/i.test(j.location);
-              const rescoredTier = (!jobIsRemote && result.opportunityTier !== 'Probably Skip')
-                ? 'Probably Skip' : result.opportunityTier;
               await pool.query(
                 `UPDATE jobs SET opportunity_tier=$1, sub_scores=$2, ai_risk=$3, ai_risk_reason=$4, why_good_fit=$5, match_score=$6 WHERE id=$7`,
-                [rescoredTier, JSON.stringify(result.subScores), result.aiRisk, result.aiRiskReason, result.whyGoodFit, result.matchScore, j.id]
+                [result.opportunityTier, JSON.stringify(result.subScores), result.aiRisk, result.aiRiskReason, result.whyGoodFit, result.matchScore, j.id]
               );
             } else {
               await pool.query(`UPDATE jobs SET opportunity_tier='Probably Skip' WHERE id=$1`, [j.id]);
@@ -868,13 +877,15 @@ app.post('/api/jobs/rescore-all', async (_req, res: Response) => {
   } catch (e) { rescoreRunning = false; res.status(500).json({ error: String(e) }); }
 });
 
-// ── Local reclassify — re-applies computeTier to all jobs using stored sub_scores ──
-// No Claude calls, instant, safe to run on every startup.
+// ── Local reclassify — re-applies title filter + computeTier to all jobs ──
+// No Claude calls, instant, safe to run on every startup or after settings change.
 async function reclassifyJobsLocally(): Promise<number> {
   const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
   const criteria = cRows[0] ?? {};
   const userLocations: string[] = criteria.locations ?? [];
   const allowedWorkModes: string[] = criteria.allowed_work_modes ?? [];
+  const targetRoles: string[] = criteria.target_roles ?? [];
+  const avoidKeywords: string[] = (criteria.avoid ?? []).filter((k: string) => k.trim().length > 0);
   const tierSettings: TierSettings = {
     verticalNiches: criteria.vertical_niches ?? [],
     topTargetScore: criteria.top_target_score ?? 65,
@@ -883,29 +894,54 @@ async function reclassifyJobsLocally(): Promise<number> {
     experienceLevels: criteria.experience_levels ?? ['senior'],
   };
 
-  // Fetch all scored jobs (with or without sub_scores)
+  // Build title filter from current settings
+  const titleFilter = buildTitleFilter(targetRoles);
+  const avoidPatterns = avoidKeywords.map((k: string) =>
+    new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+  );
+
+  const minSalary: number | null = criteria.min_salary ?? null;
+
+  // Fetch all jobs (scored or not)
   const { rows } = await pool.query(`
-    SELECT id, title, company, location, match_score, ai_risk, sub_scores, opportunity_tier
+    SELECT id, title, company, location, salary, match_score, ai_risk, sub_scores, opportunity_tier
     FROM jobs
-    WHERE match_score IS NOT NULL
   `);
+
+  // Helper: check if a stored salary string is KNOWN to be below minimum
+  function salaryKnownBelow(salaryStr: string | null | undefined): boolean {
+    if (!minSalary || !salaryStr) return false;
+    const nums = salaryStr.match(/[\d,]+/g);
+    if (!nums) return false;
+    const highest = Math.max(...nums.map((n: string) => parseInt(n.replace(/,/g, ''), 10)));
+    if (isNaN(highest) || highest === 0 || highest < 1000) return false; // skip hourly-looking
+    return highest < minSalary;
+  }
+
   let updated = 0;
   for (const j of rows) {
     try {
       const loc = (j.location ?? '').trim();
-      const locationOk = userLocations.length === 0 || checkJobLocation(loc, userLocations, false, allowedWorkModes);
-
       let tier: OpportunityTier;
 
-      if (!locationOk) {
-        // Hard location block — always Probably Skip regardless of other factors
+      // Hard filter 1: title must match target roles filter
+      const titleMatches = !titleFilter || titleFilter.test(j.title ?? '');
+
+      // Hard filter 2: avoid keywords
+      const hasAvoid = avoidPatterns.some(p => p.test(j.title ?? ''));
+
+      // Hard filter 3: location
+      const locationOk = userLocations.length === 0 || checkJobLocation(loc, userLocations, false, allowedWorkModes);
+
+      // Hard filter 4: salary (only when salary is EXPLICITLY listed AND known below min)
+      const belowSalary = salaryKnownBelow(j.salary);
+
+      if (!titleMatches || hasAvoid || !locationOk || belowSalary) {
         tier = 'Probably Skip';
-      } else if (j.sub_scores) {
-        // Full reclassify using stored sub_scores
+      } else if (j.sub_scores && j.match_score !== null) {
         const s: SubScores = typeof j.sub_scores === 'string' ? JSON.parse(j.sub_scores) : j.sub_scores;
         tier = computeTier(j.match_score, j.ai_risk ?? 'unknown', s, j.title, j.company, loc, tierSettings);
       } else {
-        // No sub_scores: keep existing tier if location passed (don't demote good remote jobs)
         tier = j.opportunity_tier as OpportunityTier;
       }
 
@@ -1391,28 +1427,78 @@ function buildDigestHtml(jobs: any[]): string {
 
 // ── Scout background worker ───────────────────────────────────────────────
 
+// Words that appear as modifiers/prefixes in role phrases but don't identify the role type.
+// We strip these from the start of a target role phrase to get the "core" identifying phrase.
+const ROLE_MODIFIER_WORDS = new Set([
+  'sr', 'sr.', 'senior', 'jr', 'jr.', 'junior', 'lead', 'principal', 'staff',
+  'enterprise', 'named', 'commercial', 'corporate', 'mid-market', 'midmarket',
+  'mid', 'market', 'regional', 'territory', 'national', 'global', 'strategic',
+  'major', 'majors', 'key', 'inside', 'field', 'federal', 'digital', 'cloud',
+  'partner', 'channel', 'upmarket', 'growth', 'smb', 'large', 'new', 'business',
+  'technical', 'solution', 'solutions', 'healthcare', 'of', 'the', 'and', 'a', 'an',
+  'quota', 'carrying', 'quota-carrying',
+]);
+
+// Abbreviation expansions — when a user types a short form, match the full form
+const ABBREV_EXPANSIONS: Record<string, string[]> = {
+  'ae':  ['Account\\s+Executive'],
+  'am':  ['Account\\s+Manager'],
+  'sdr': ['Sales\\s+Development\\s+Representative', 'Business\\s+Development\\s+Representative'],
+  'bdr': ['Business\\s+Development\\s+Representative', 'Sales\\s+Development\\s+Representative'],
+  'bdm': ['Business\\s+Development\\s+Manager'],
+  'csm': ['Customer\\s+Success\\s+Manager'],
+  'se':  ['Sales\\s+Executive'],
+  'rvp': ['(?:Regional|Area)\\s+Vice\\s+President'],
+  'vp':  ['Vice\\s+President'],
+};
+
 function buildTitleFilter(targetRoles: string[]): RegExp | null {
   if (!targetRoles || targetRoles.length === 0) return null;
-  // Build a regex that matches any of the target role keywords in the title.
-  // Match full multi-word phrases AND individual significant keywords (3+ chars).
-  const patterns = targetRoles.map(role => {
-    const words = role.trim().split(/\s+/).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-    return words.join('\\s+');
-  });
-  // Also extract individual keywords (3+ chars, skip common filler words) for broader matching
-  const fillerWords = new Set(['the', 'and', 'for', 'senior', 'junior', 'lead', 'staff', 'principal', 'vice', 'president', 'head']);
-  const keywords = new Set<string>();
+
+  const corePatterns: string[] = [];
+
   for (const role of targetRoles) {
-    for (const word of role.trim().split(/\s+/)) {
-      const w = word.toLowerCase();
-      if (w.length >= 3 && !fillerWords.has(w)) {
-        keywords.add(word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-      }
+    const normalized = role.trim().toLowerCase();
+
+    // Check if this is a known abbreviation
+    if (ABBREV_EXPANSIONS[normalized]) {
+      corePatterns.push(...ABBREV_EXPANSIONS[normalized]);
+      continue;
     }
+
+    // Strip leading modifier words to get the core identifying phrase
+    const words = role.trim().split(/\s+/);
+    let start = 0;
+    while (start < words.length - 1 && ROLE_MODIFIER_WORDS.has(words[start].toLowerCase().replace(/\.$/, ''))) {
+      start++;
+    }
+    const coreWords = words.slice(start);
+
+    if (coreWords.length === 0) {
+      // Fallback: use full phrase
+      const escaped = role.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      corePatterns.push(escaped.replace(/\s+/g, '\\s+'));
+    } else {
+      // Match the core phrase (which may appear anywhere in the title, with any modifiers before it)
+      const escaped = coreWords.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+');
+      corePatterns.push(escaped);
+    }
+
+    // Reverse: if core phrase is a known full form, also add the abbreviation
+    const coreNorm = coreWords.join(' ').toLowerCase();
+    if (coreNorm === 'account executive') corePatterns.push('\\bAE\\b');
+    else if (coreNorm === 'account manager') corePatterns.push('\\bAM\\b');
+    else if (coreNorm === 'sales development representative') corePatterns.push('\\bSDR\\b');
+    else if (coreNorm === 'business development representative') corePatterns.push('\\bBDR\\b');
+    else if (coreNorm === 'business development manager') corePatterns.push('\\bBDM\\b');
+    else if (coreNorm === 'customer success manager') corePatterns.push('\\bCSM\\b');
   }
-  // Combine: match either the full phrase or any significant keyword
-  const allPatterns = [...patterns, ...keywords];
-  return new RegExp(`\\b(${allPatterns.join('|')})\\b`, 'i');
+
+  if (corePatterns.length === 0) return null;
+
+  // Deduplicate patterns
+  const unique = [...new Set(corePatterns)];
+  return new RegExp(`(${unique.join('|')})`, 'i');
 }
 
 async function runScoutInBackground(runId: number): Promise<void> {
@@ -1664,6 +1750,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
         niceToHave: criteria.nice_to_have,
         avoid: criteria.avoid,
         preApprovedCompanies: companyNames,
+        tierSettings,
       }
     );
 

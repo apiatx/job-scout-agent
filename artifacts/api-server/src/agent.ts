@@ -45,49 +45,42 @@ interface CriteriaForAgent {
   niceToHave: string[];
   avoid: string[];
   preApprovedCompanies?: string[];
+  tierSettings?: TierSettings;
 }
 
-async function scoreOne(job: ScrapedJob, criteriaText: string, preApprovedSection: string, preApprovedCompanies: string[]): Promise<JobMatch | null> {
+async function scoreOne(
+  job: ScrapedJob,
+  criteriaText: string,
+  preApprovedSection: string,
+  preApprovedCompanies: string[],
+  tierSettings?: TierSettings,
+  minSalary?: number | null,
+): Promise<JobMatch | null> {
   try {
-    // Check if this job is from a pre-approved company
     const isPreApproved = preApprovedCompanies.some(
       (name) => name.toLowerCase() === job.company.toLowerCase()
     );
     let companySpecificSection = preApprovedSection;
     if (isPreApproved) {
-      companySpecificSection += `\n\nIMPORTANT: This job is from ${job.company} which is on the user's pre-approved companies list. The user has already vetted and approved this company as a target employer. You MUST score this job at least 65 if the role title matches any of the user's target roles, regardless of whether the company sells hardware or software. The only valid reasons to score below 65 for a pre-approved company are: (1) the role title is completely wrong — e.g. engineering, product, marketing, HR, finance, legal — or (2) the job location is outside the user's location preferences.`;
+      companySpecificSection += `\n\nNOTE: ${job.company} is on the user's pre-approved companies list. The user has already decided this company is a target employer. Score at least 65 if the role title meaningfully matches any of the user's target roles. Only score below 65 if the role type is completely wrong (e.g. engineering, marketing, HR, finance, legal) or the location is outside the user's preferences.`;
     }
 
-    const prompt = `You are an expert career strategist and job matching assistant. Deeply evaluate this job opportunity for a senior enterprise sales professional.
+    // Build salary constraint text for the prompt
+    const salaryRule = minSalary
+      ? `SALARY REQUIREMENT (hard gate):
+The candidate requires a minimum of $${minSalary.toLocaleString()} base salary.
+- If the job listing shows a salary AND the highest figure is below $${minSalary.toLocaleString()}: set matchScore=0 and isMatch=false.
+- If no salary is listed: do not penalize — mention the unknown salary in whyGoodFit.`
+      : '';
+
+    const prompt = `You are an expert career strategist evaluating job opportunities for a sales professional. Your job is to score how well each job matches the candidate's stated criteria. Do not add opinions beyond what's in the criteria.
 
 ═══════════════════════════════════════════════════
-EVALUATION FRAMEWORK
+CANDIDATE CRITERIA
 ═══════════════════════════════════════════════════
+${criteriaText}
 
-ROLE ELIGIBILITY (hard gates — score 0 if violated):
-- Only quota-carrying AE/AM/Partner roles qualify. Immediately reject: Solutions Architect, Sales Engineer, Engagement Manager, Channel Manager, Customer Success Manager, Marketing, Recruiting, HR, Finance, Legal — UNLESS the description explicitly states direct quota responsibility.
-- Location: If candidate lists specific US regions, reject jobs outside those areas with matchScore=0 and locationFit=0.
-- REMOTE vs REMOTE-IN-TERRITORY: "Remote" alone = fully flexible, work from anywhere. "Remote, Chicago" or "Remote (Austin area)" = must live near that city — this is a territory role. If candidate has not listed that city in their preferred locations, treat it as a location mismatch and score locationFit accordingly (2-4 if territory city is distant, 0 if strict location filtering is required).
-
-ROLE TYPE SCORING GUIDANCE:
-- Enterprise AE = primary target → score 75-95 at strong companies
-- Commercial/Mid-Market/Corporate AE at hardware/infra companies → score 70-85 (strong pathway in)
-- Partner Manager with revenue quota at tech/hardware company → score 65-80
-- Account Manager with expansion quota at hardware/tech company → score 65-78
-- Director of Sales with individual quota → score 65-80
-- Generic AE at horizontal SaaS → score 40-60 maximum (AI displacement risk)
-
-AI DISPLACEMENT RISK — DEATH BY CLAUDE:
-Assess how easily this company's core product could be replaced by AI agents:
-- LOW (no penalty): Physical hardware, semiconductors, networking gear, storage, servers, industrial machinery, defense hardware, photonics, robotics, power systems, sensors, data center infrastructure — physical supply chains AI cannot replicate.
-- MEDIUM (-5 to matchScore): Complex vertical SaaS with deep operational integrations, specialized industry software, proprietary data moats, ERP, industrial control systems.
-- HIGH (-20 to matchScore): Horizontal SaaS easily replicable by Claude — generic workflow tools, basic project management, email productivity, simple analytics, CRM plugins, form builders, scheduling tools.
-
-GOVERNMENT/SLED NUANCE:
-- Tier 1 SLED (score normally 70+): Palantir, Anduril, Shield AI, L3Harris, Leidos, Booz Allen Hamilton, CACI, ManTech, SAIC, Raytheon, MITRE, Peraton — defense tech/AI, mission-critical.
-- Tier 2 SLED (score 40-55): Generic government IT VAR, basic hardware refresh, IT support shops.
-
-${companySpecificSection}
+${salaryRule}
 
 ═══════════════════════════════════════════════════
 JOB TO EVALUATE
@@ -97,67 +90,65 @@ Company: ${job.company}
 Location: ${job.location}
 ${job.description ? `Description: ${job.description.slice(0, 1200)}` : '(No description available)'}
 
+${companySpecificSection}
+
 ═══════════════════════════════════════════════════
-CANDIDATE CRITERIA
+SCORING INSTRUCTIONS
 ═══════════════════════════════════════════════════
-${criteriaText}
+1. matchScore (0-100): How well does this job match ALL of the candidate's criteria above?
+   - Start at 50, then adjust up/down based on each criterion.
+   - Role title match to target roles: +/-30 (biggest factor — role type must match)
+   - Location/remote match: +/-20
+   - Salary compliance: hard gate (see above)
+   - Must-have requirements met: +/-10 each
+   - Avoid keywords present: -20 each
+   - Company quality/reputation: +/-10
+   - AI displacement risk (how easily could AI agents replace this company's core product?): LOW=no penalty, MEDIUM=-5, HIGH=-20
+
+2. isMatch: true if matchScore >= 60, otherwise false.
+
+3. isHardware: true if the company sells physical hardware, semiconductors, networking equipment, industrial machinery, or data center infrastructure products.
+
+4. aiRisk — how easily could AI replace this company's core product?
+   - LOW: Physical hardware, semiconductors, networking gear, storage, servers, industrial/defense tech, robotics — physical supply chains AI cannot replicate.
+   - MEDIUM: Complex vertical SaaS with deep integrations, proprietary data moats, specialized industry software, ERP.
+   - HIGH: Generic horizontal SaaS — workflow tools, basic project management, email productivity, simple analytics, form builders.
+
+5. subScores (each 0-10, strictly objective based on criteria match):
+   - roleFit: Does the title/responsibilities precisely match the candidate's target roles? 10=exact match, 5=partial, 0=wrong role type entirely.
+   - companyQuality: Company reputation, financial health, growth trajectory. 10=elite/unicorn, 5=solid mid-market, 2=unknown startup.
+   - locationFit: How well does the job location/remote match the candidate's location preferences? 10=perfect match, 5=partial/territory, 0=wrong region with no remote.
+   - hiringUrgency: Signs of real active hiring. 10=specific unique JD with clear team context, 0=generic template copy-pasted across many cities.
+   - tailoringRequired: 10=minimal tailoring needed, 0=major overhaul required.
+   - referralOdds: Likelihood of finding a warm referral. 10=large well-known company, 0=tiny obscure startup.
+   - realVsFake: Confidence this is a genuine currently-open role. 10=specific unique JD, 0=generic evergreen pipeline template.
+
+LOCATION NOTE: "Remote" alone = work from anywhere. "Remote, [City]" or "Remote ([City] area)" = must live near that city. If the candidate's locations do not include that city, score locationFit 2-4 and reduce matchScore accordingly.
 
 ═══════════════════════════════════════════════════
 REQUIRED OUTPUT — JSON ONLY, NO MARKDOWN
 ═══════════════════════════════════════════════════
-Return this exact JSON structure:
 {
-  "matchScore": <0-100 integer — include AI displacement penalty before returning>,
-  "whyGoodFit": "<2-3 sentences: what makes this a fit or miss, and what the candidate's key selling point would be>",
+  "matchScore": <0-100 integer>,
+  "whyGoodFit": "<2-3 sentences explaining the match or mismatch against the candidate's specific criteria>",
   "isMatch": <true if matchScore >= 60, else false>,
-  "isHardware": <true if company sells physical hardware/infrastructure/semiconductor products>,
+  "isHardware": <true | false>,
   "aiRisk": <"LOW" | "MEDIUM" | "HIGH">,
-  "aiRiskReason": "<one sentence explaining AI displacement risk level>",
-  "opportunityTier": <"Top Target" | "Fast Win" | "Stretch Role" | "Probably Skip">,
+  "aiRiskReason": "<one sentence on AI displacement risk>",
   "subScores": {
-    "roleFit": <0-10: how precisely the role title/level matches the candidate's target roles>,
-    "companyQuality": <0-10: company reputation, growth trajectory, prestige, financial health. 10=top-tier public/unicorn, 5=solid mid-market, 2=unknown startup>,
-    "locationFit": <0-10: how well location/remote matches candidate preferences. 10=perfect match, 0=wrong region no remote>,
-    "hiringUrgency": <0-10: signs of active urgent hiring. 10=specific requirements+clear growth need. 0=generic copy-paste template, likely stale pipeline req>,
-    "tailoringRequired": <0-10: 10=almost no tailoring needed (generic requirements match well). 0=major overhaul needed (very specific different stack/industry)>,
-    "referralOdds": <0-10: likelihood candidate could find a warm referral. 10=large well-known company with many LinkedIn connections. 0=tiny obscure startup>,
-    "realVsFake": <0-10: confidence this is a genuine currently-open role. 10=specific unique JD with clear team context. 0=generic template, same JD across many cities, likely evergreen pipeline>
-  },
-  "tierReasoning": "<one sentence explaining why this tier was assigned>"
-}
-
-OPPORTUNITY TIER DECISION RULES — assign based on ROLE TYPE + COMPANY INDUSTRY + LOCATION, not just score:
-
-"Top Target":
-  WHO: Commercial AE, Mid-Market AE, Corporate AE, Account Executive (general enterprise with NO additional stretch qualifier), Account Manager, Named Account Executive, Major Account Executive — at a TARGET INDUSTRY company (hardware, cloud infrastructure, networking, storage, semiconductors, AI infrastructure, data center, industrial tech, defense tech). "Sr. Account Executive" (generic, no Enterprise in title) also belongs here at target-industry companies.
-  LOCATION: Job must be remote OR remote-in-territory matching candidate's target locations.
-  SCORE: matchScore≥65, aiRisk≠HIGH, realVsFake≥6.
-  INTENT: Sweet-spot roles at the right companies — realistic wins AND great career moves.
-
-"Fast Win":
-  WHO: Commercial AE, Mid-Market AE, Corporate AE, SMB AE, Inside Sales AE, Account Manager, Named AE, or Sr. Account Executive at ANY solid tech company (not required to be target industry). These roles have lower competition — you're not competing against 500 applicants.
-  LOCATION: Job must be remote OR remote-in-territory matching candidate's target locations.
-  SCORE: matchScore≥55, aiRisk≠HIGH, realVsFake≥5.
-  INTENT: Realistic wins you can move on quickly. Apply fast, less tailoring, good shot at getting through.
-
-"Stretch Role":
-  WHO: The COMBINATION of words in the title matters — do not flag individual words alone:
-  - "Strategic" anywhere → always Stretch (it signals a senior, competitive enterprise motion regardless of other words)
-  - "Sr." or "Senior" + "Enterprise" in the same title → Stretch (e.g. "Sr. Enterprise AE", "Senior Enterprise Account Executive")
-  - "Sr." or "Senior" + a specific competitive niche → Stretch (e.g. "Sr. Account Executive - AI HPC", "Senior AE, Financial Services")
-  - "Principal" level → Stretch (above standard Enterprise AE in seniority)
-  - Vertical niche specialty anywhere in title → Stretch regardless of level: Financial Services, Banking, Healthcare, Life Sciences, DoD, Government, SLED, Federal, Education
-  - Any Enterprise AE role at a hyper-competitive prestige company → Stretch: Databricks, Snowflake, Salesforce, Workday, ServiceNow, Veeva, Palantir, Stripe — even if title is "Enterprise AE"
-  NOT Stretch by themselves: "Sr. Account Executive" (generic no enterprise/niche), "Named Account Executive", "Major Account Executive", "Enterprise AE" at non-hyper-competitive company — these are Top Target or Fast Win.
-  SCORE: matchScore≥55.
-  INTENT: Aspirational — real opportunities but tougher competition, longer cycle, higher bar.
-
-"Probably Skip":
-  ANY of: Job is NOT remote and NOT in candidate's target territory (location mismatch → ALWAYS Probably Skip even if company is great); aiRisk=HIGH; realVsFake<5 (ghost/evergreen posting); matchScore<50; wrong role type (SDR, BDR, Solutions Architect, SE, CSM, Customer Success, Marketing, HR, Finance, Legal, Engineering); non-quota-carrying role. Time is better spent elsewhere.`;
+    "roleFit": <0-10>,
+    "companyQuality": <0-10>,
+    "locationFit": <0-10>,
+    "hiringUrgency": <0-10>,
+    "tailoringRequired": <0-10>,
+    "referralOdds": <0-10>,
+    "realVsFake": <0-10>
+  }
+}`;
 
     const message = await anthropic.messages.create({
       model: 'claude-haiku-4-5',
-      max_tokens: 1200,
+      max_tokens: 900,
       messages: [{ role: 'user', content: prompt }],
     });
 
@@ -172,8 +163,6 @@ OPPORTUNITY TIER DECISION RULES — assign based on ROLE TYPE + COMPANY INDUSTRY
       isHardware?: boolean;
       aiRisk?: 'LOW' | 'MEDIUM' | 'HIGH';
       aiRiskReason?: string;
-      opportunityTier?: OpportunityTier;
-      tierReasoning?: string;
       subScores?: {
         roleFit?: number;
         companyQuality?: number;
@@ -188,8 +177,7 @@ OPPORTUNITY TIER DECISION RULES — assign based on ROLE TYPE + COMPANY INDUSTRY
     if (!parsed.isMatch) {
       if (parsed.matchScore >= 30) {
         const riskTag = parsed.aiRisk ? ` [${parsed.aiRisk} risk]` : '';
-        const tier = parsed.opportunityTier ? ` [${parsed.opportunityTier}]` : '';
-        console.log(`  ✗ Rejected (${parsed.matchScore})${riskTag}${tier}: ${job.company} — "${job.title}" — ${parsed.whyGoodFit?.slice(0, 80)}`);
+        console.log(`  ✗ Rejected (${parsed.matchScore})${riskTag}: ${job.company} — "${job.title}" — ${parsed.whyGoodFit?.slice(0, 80)}`);
       }
       return null;
     }
@@ -204,10 +192,11 @@ OPPORTUNITY TIER DECISION RULES — assign based on ROLE TYPE + COMPANY INDUSTRY
       realVsFake:        Math.min(10, Math.max(0, parsed.subScores?.realVsFake ?? 5)),
     };
 
-    const validTiers: OpportunityTier[] = ['Top Target', 'Fast Win', 'Stretch Role', 'Probably Skip'];
-    const tier: OpportunityTier = validTiers.includes(parsed.opportunityTier as OpportunityTier)
-      ? (parsed.opportunityTier as OpportunityTier)
-      : computeTier(parsed.matchScore, parsed.aiRisk ?? 'unknown', subScores, job.title, job.company, job.location);
+    // Tier is ALWAYS computed from user settings — Claude does not assign tier.
+    const tier: OpportunityTier = computeTier(
+      parsed.matchScore, parsed.aiRisk ?? 'unknown', subScores,
+      job.title, job.company, job.location, tierSettings
+    );
 
     console.log(`  ✓ Match (${parsed.matchScore}) [${tier}] [AI:${parsed.aiRisk ?? '?'}]: ${job.company} — "${job.title}"`);
 
@@ -314,24 +303,19 @@ export function computeTier(
   const isAboveLevel = namedAbove || enterpriseAbove || srEnterpriseAbove ||
     strategicAbove || directorAbove || principalAbove || hasVerticalNiche;
 
-  // Accessible role types — realistic laterals or one step up for AE background
-  const hasCommercial         = /\bcommercial\b/i.test(title);
-  const hasMidMarket          = /\b(mid[.\s-]?market|midmarket)\b/i.test(title);
-  const hasCorporate          = /\bcorporate\b/i.test(title);
-  const hasRegional           = /\b(regional|territory)\b/i.test(title);
-  const hasPartner            = /\bpartner\b/i.test(title);
-  const hasStandardEnterprise = hasEnterprise && !isAboveLevel;
-  const isSeniorOnlyAE        = isSenior && !hasEnterprise;
+  // Role type modifiers — used to distinguish Top Target vs Fast Win, not for access gating
+  // Any role not above level is considered accessible (catch-all — we rely on title filter upstream)
+  const isAccessibleRole = !isAboveLevel;
 
-  const isGenericAE = !isAboveLevel &&
-    /\b(account executive|account manager|sales executive|sales manager|sales representative|specialist seller|client executive)\b/i.test(title);
-
-  const isAccessibleRole = hasStandardEnterprise || hasCommercial || hasMidMarket || hasCorporate ||
-    hasRegional || hasPartner || isSeniorOnlyAE || isGenericAE;
+  // Role types that typically have lower applicant competition → easier wins
+  const hasCommercial  = /\bcommercial\b/i.test(title);
+  const hasMidMarket   = /\b(mid[.\s-]?market|midmarket)\b/i.test(title);
+  const hasCorporate   = /\bcorporate\b/i.test(title);
+  const hasLowerBar    = hasCommercial || hasMidMarket || hasCorporate;
 
   // === TIER ASSIGNMENT ===
 
-  // STRETCH: Above the user's experience level (Major/Strategic/Sr.Enterprise/Director counted above unless user is Strategic level)
+  // STRETCH: Title signals above user's configured experience level
   if (isAboveLevel && matchScore >= stretchScore && s.realVsFake >= 5) {
     return 'Stretch Role';
   }
@@ -339,24 +323,26 @@ export function computeTier(
   const isQualityCompany = s.companyQuality >= 7;
   const goodRoleFit      = s.roleFit >= 6;
 
-  // TOP TARGET: Right role level + quality AI-safe company + strong fit + strong score
+  // TOP TARGET: Accessible role + high score + quality company + strong role fit
   if (isAccessibleRole && matchScore >= topTargetScore && isQualityCompany && goodRoleFit &&
-      aiRisk !== 'HIGH' && s.realVsFake >= 6) {
+      s.realVsFake >= 6) {
     return 'Top Target';
   }
 
-  // FAST WIN: More accessible role type with a decent score (lower company quality bar)
-  if ((hasCommercial || hasMidMarket || hasCorporate) &&
-      matchScore >= fastWinScore && s.realVsFake >= 5 && aiRisk !== 'HIGH') {
+  // FAST WIN: Lower-competition role type OR strong accessible role with solid score
+  if (isAccessibleRole && hasLowerBar && matchScore >= fastWinScore && s.realVsFake >= 5) {
+    return 'Fast Win';
+  }
+  if (isAccessibleRole && matchScore >= (fastWinScore + 5) && s.realVsFake >= 5) {
     return 'Fast Win';
   }
 
-  // FAST WIN fallback: any accessible role with a solid score
-  if (isAccessibleRole && matchScore >= (fastWinScore + 5) && s.realVsFake >= 5 && aiRisk !== 'HIGH') {
-    return 'Fast Win';
+  // TOP TARGET fallback: above-level role but strong enough to be worth it
+  if (isAboveLevel && matchScore >= topTargetScore && isQualityCompany && s.realVsFake >= 6) {
+    return 'Stretch Role';
   }
 
-  // STRETCH fallback: decent score but doesn't hit Top Target / Fast Win criteria
+  // STRETCH fallback: decent score, not disqualified
   if (matchScore >= stretchScore && s.realVsFake >= 5) return 'Stretch Role';
 
   return 'Probably Skip';
@@ -366,12 +352,14 @@ export async function rescoreJobOpportunity(
   job: { id: number; title: string; company: string; location: string; salary?: string; applyUrl: string; description?: string },
   criteriaText: string,
   preApprovedSection: string,
-  preApprovedCompanies: string[]
+  preApprovedCompanies: string[],
+  tierSettings?: TierSettings,
+  minSalary?: number | null,
 ): Promise<{ opportunityTier: OpportunityTier; subScores: SubScores; aiRisk: string; aiRiskReason: string; whyGoodFit: string; matchScore: number } | null> {
   try {
     const result = await scoreOne(
       { title: job.title, company: job.company, location: job.location, salary: job.salary, applyUrl: job.applyUrl, description: job.description },
-      criteriaText, preApprovedSection, preApprovedCompanies
+      criteriaText, preApprovedSection, preApprovedCompanies, tierSettings, minSalary
     );
     if (!result) return null;
     return {
@@ -477,29 +465,26 @@ export async function scoreJobsWithClaude(jobs: ScrapedJob[], criteria: Criteria
 
   const criteriaText = [
     criteria.targetRoles.length ? `Target roles: ${criteria.targetRoles.join(', ')}` : '',
-    criteria.industries.length ? `Industries: ${criteria.industries.join(', ')}` : '',
-    criteria.minSalary ? `Minimum salary: $${criteria.minSalary.toLocaleString()} base` : '',
-    criteria.locations.length ? `Locations: ${criteria.locations.join(', ')}` : '',
+    criteria.industries.length ? `Target industries: ${criteria.industries.join(', ')}` : '',
+    criteria.locations.length ? `Preferred locations: ${criteria.locations.join(', ')}` : '',
     (() => {
       const modes: string[] = criteria.allowedWorkModes ?? [];
       const parts: string[] = [];
       if (modes.includes('remote_us')) parts.push('true remote (US-wide, no city restriction)');
       if (modes.includes('remote_in_territory')) parts.push('remote-in-territory (must live near specified city)');
       if (modes.includes('onsite')) parts.push('on-site physical office');
-      return parts.length > 0 ? `Accepted work modes: ${parts.join(', ')}` : 'Work modes: any';
+      return parts.length > 0 ? `Accepted work modes: ${parts.join(', ')}` : '';
     })(),
     criteria.mustHave.length ? `Must have: ${criteria.mustHave.join(', ')}` : '',
     criteria.niceToHave.length ? `Nice to have: ${criteria.niceToHave.join(', ')}` : '',
-    criteria.avoid.length ? `Avoid: ${criteria.avoid.join(', ')}` : '',
+    criteria.avoid.length ? `Avoid (automatic disqualifier): ${criteria.avoid.join(', ')}` : '',
   ].filter(Boolean).join('\n');
 
-  // Build pre-approved companies section for the prompt
   let preApprovedSection = '';
   if (criteria.preApprovedCompanies && criteria.preApprovedCompanies.length > 0) {
     preApprovedSection = `PRE-APPROVED COMPANIES:
-The user has pre-approved these specific companies as target employers. If a job is from ANY of these companies, treat the company as an automatic match — only evaluate whether the ROLE TITLE and RESPONSIBILITIES match the user's target roles. Do not penalize or lower the score because of the industry or product type — the user has already decided these companies are good targets.
-Pre-approved companies: ${criteria.preApprovedCompanies.join(', ')}
-For jobs NOT from the pre-approved list, apply normal scoring criteria.`;
+The user has manually vetted and approved these employers as targets. If the job is from one of these companies, give the company the benefit of the doubt on fit — only evaluate the role title, responsibilities, and location against the user's criteria.
+Pre-approved companies: ${criteria.preApprovedCompanies.join(', ')}`;
   }
 
   const CONCURRENCY = 10;
@@ -508,7 +493,9 @@ For jobs NOT from the pre-approved list, apply normal scoring criteria.`;
   for (let i = 0; i < jobs.length; i += CONCURRENCY) {
     const batch = jobs.slice(i, i + CONCURRENCY);
     console.log(`Scoring batch ${Math.floor(i / CONCURRENCY) + 1}/${Math.ceil(jobs.length / CONCURRENCY)} (${batch.length} jobs)...`);
-    const batchResults = await Promise.all(batch.map((j) => scoreOne(j, criteriaText, preApprovedSection, criteria.preApprovedCompanies ?? [])));
+    const batchResults = await Promise.all(
+      batch.map((j) => scoreOne(j, criteriaText, preApprovedSection, criteria.preApprovedCompanies ?? [], criteria.tierSettings, criteria.minSalary))
+    );
     for (const r of batchResults) {
       if (r !== null) results.push(r);
     }
