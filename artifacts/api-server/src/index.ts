@@ -314,6 +314,10 @@ async function initDb(): Promise<void> {
   await safeAddColumn('jobs', 'ai_risk_reason', 'TEXT');
   await safeAddColumn('jobs', 'opportunity_tier', "TEXT NOT NULL DEFAULT 'unscored'");
   await safeAddColumn('jobs', 'sub_scores', 'JSONB');
+  await safeAddColumn('companies', 'scan_failures', 'INT NOT NULL DEFAULT 0');
+  await safeAddColumn('companies', 'last_scan_error', 'TEXT');
+  await safeAddColumn('companies', 'detect_status', "TEXT NOT NULL DEFAULT 'manual'");
+  await safeAddColumn('companies', 'ats_types_tried', "TEXT[] NOT NULL DEFAULT '{}'");
 
   // Deduplicate existing jobs — keep the most recent row per apply_url
   try {
@@ -728,6 +732,173 @@ app.delete('/api/companies/:id', async (req: Request, res: Response) => {
     await pool.query('DELETE FROM companies WHERE id=$1', [req.params.id]);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── ATS auto-detection ─────────────────────────────────────────────────────
+// Returns candidate ATS configs from Claude, then validates each by
+// actually probing the ATS API endpoint.
+async function detectAtsWithClaude(companyName: string, websiteHint?: string): Promise<{
+  ats_type: string; ats_slug: string | null; careers_url: string | null; confidence: string;
+}[]> {
+  const Anthropic = (await import('@anthropic-ai/sdk')).default;
+  const anthropic = new Anthropic();
+
+  const websiteLine = websiteHint ? `\nCompany website hint: ${websiteHint}` : '';
+
+  const prompt = `You are an expert at identifying what Applicant Tracking System (ATS) companies use.
+
+Company: "${companyName}"${websiteLine}
+
+Identify the top 3 most likely ATS configurations for this company. Return ONLY a JSON array:
+
+[
+  {
+    "ats_type": "greenhouse",
+    "ats_slug": "companyslug",
+    "careers_url": null,
+    "confidence": "high"
+  },
+  ...
+]
+
+ATS types and their ats_slug/careers_url patterns:
+- "greenhouse": ats_slug used in https://boards-api.greenhouse.io/v1/boards/ATS_SLUG/jobs — typically lowercase company name, no spaces (e.g. "purestorage", "databricks", "samsara")
+- "lever": ats_slug used in https://api.lever.co/v0/postings/ATS_SLUG — same pattern (e.g. "netflix", "stripe", "openai")
+- "workday": careers_url = "company.wd1.myworkdayjobs.com" (the full Workday subdomain), ats_slug = the path segment like "External" or "CompanyNameCareers"
+- "ashby": ats_slug used in https://api.ashbyhq.com/posting-api/job-board/ATS_SLUG — typically lowercase (e.g. "notion", "linear", "retool")
+- "plain": careers_url = the company's careers page URL (full URL with https://)
+
+Rules:
+- For greenhouse/lever/ashby: make your best guess at the slug (usually lowercase company name or abbreviation)
+- Always set ats_slug to null for "plain" type and set careers_url instead
+- Always set careers_url to null for greenhouse/lever/ashby (they don't need it)
+- Order candidates from most likely to least likely
+
+Return raw JSON only, no markdown.`;
+
+  const response = await anthropic.messages.create({
+    model: 'claude-haiku-4-5',
+    max_tokens: 512,
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  const text = response.content[0].type === 'text' ? response.content[0].text.trim() : '[]';
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    const match = text.match(/\[[\s\S]*\]/);
+    if (match) {
+      try { return JSON.parse(match[0]); } catch { /* fall through */ }
+    }
+    return [];
+  }
+}
+
+async function validateAtsCandidate(candidate: {
+  ats_type: string; slug?: string | null; careers_url?: string | null;
+}): Promise<boolean> {
+  try {
+    if (candidate.ats_type === 'greenhouse' && candidate.slug) {
+      const r = await fetch(
+        `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(candidate.slug)}/jobs`,
+        { signal: AbortSignal.timeout(8000), headers: { 'User-Agent': 'Mozilla/5.0' } }
+      );
+      return r.ok;
+    }
+    if (candidate.ats_type === 'lever' && candidate.slug) {
+      const r = await fetch(
+        `https://api.lever.co/v0/postings/${encodeURIComponent(candidate.slug)}?mode=json`,
+        { signal: AbortSignal.timeout(8000), headers: { 'User-Agent': 'Mozilla/5.0' } }
+      );
+      if (!r.ok) return false;
+      const data = await r.json();
+      return Array.isArray(data); // valid Lever boards return an array
+    }
+    if (candidate.ats_type === 'ashby' && candidate.slug) {
+      const r = await fetch(
+        `https://api.ashbyhq.com/posting-api/job-board/${encodeURIComponent(candidate.slug)}`,
+        { signal: AbortSignal.timeout(8000), headers: { 'User-Agent': 'Mozilla/5.0' } }
+      );
+      if (!r.ok) return false;
+      const data = await r.json();
+      return !!(data && (data.jobPostings || data.jobs));
+    }
+    if (candidate.ats_type === 'workday' && candidate.careers_url) {
+      // Workday validation: just check the subdomain root resolves
+      const domain = (candidate.careers_url as string).replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+      const r = await fetch(
+        `https://${domain}/`,
+        { signal: AbortSignal.timeout(10000), method: 'HEAD', headers: { 'User-Agent': 'Mozilla/5.0' } }
+      );
+      return r.status < 500;
+    }
+    if (candidate.ats_type === 'plain' && candidate.careers_url) {
+      const r = await fetch(candidate.careers_url,
+        { signal: AbortSignal.timeout(8000), method: 'HEAD', headers: { 'User-Agent': 'Mozilla/5.0' } }
+      );
+      return r.status < 400;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+app.post('/api/companies/detect', async (req: Request, res: Response) => {
+  try {
+    const { name, website } = req.body as { name: string; website?: string };
+    if (!name?.trim()) { res.status(400).json({ error: 'Company name required.' }); return; }
+
+    const companyName = name.trim();
+    console.log(`[detect] Starting ATS detection for: ${companyName}`);
+
+    // Get Claude's candidates
+    const candidates = await detectAtsWithClaude(companyName, website?.trim());
+    console.log(`[detect] Claude returned ${candidates.length} candidates for ${companyName}:`, candidates.map(c => `${c.ats_type}/${c.ats_slug || c.careers_url}`).join(', '));
+
+    // Probe each candidate
+    let detected: typeof candidates[0] | null = null;
+    for (const c of candidates) {
+      const valid = await validateAtsCandidate({ ats_type: c.ats_type, slug: c.ats_slug, careers_url: c.careers_url });
+      console.log(`[detect] ${c.ats_type}/${c.ats_slug || c.careers_url} → ${valid ? 'VALID ✓' : 'invalid ✗'}`);
+      if (valid) { detected = c; break; }
+    }
+
+    if (detected) {
+      // Save with verified status
+      const { rows } = await pool.query(
+        `INSERT INTO companies (name, ats_type, ats_slug, careers_url, detect_status)
+         VALUES ($1,$2,$3,$4,'detected') RETURNING *`,
+        [companyName, detected.ats_type, detected.ats_slug ?? null, detected.careers_url ?? null]
+      );
+      console.log(`[detect] Saved ${companyName} as ${detected.ats_type}/${detected.ats_slug || detected.careers_url}`);
+      res.json({ ok: true, company: rows[0], detected: true, ats_type: detected.ats_type, ats_slug: detected.ats_slug, careers_url: detected.careers_url, confidence: detected.confidence });
+    } else {
+      // Save with first candidate as best guess, mark pending for retry
+      const best = candidates[0];
+      if (best) {
+        const { rows } = await pool.query(
+          `INSERT INTO companies (name, ats_type, ats_slug, careers_url, detect_status, last_scan_error)
+           VALUES ($1,$2,$3,$4,'pending',$5) RETURNING *`,
+          [companyName, best.ats_type, best.ats_slug ?? null, best.careers_url ?? null,
+           `Auto-detection tried ${candidates.length} ATS configs — none validated. Will retry on next scout run.`]
+        );
+        res.json({ ok: true, company: rows[0], detected: false, message: `Couldn't verify ATS for "${companyName}" — saved best guess (${best.ats_type}). Will retry automatically.` });
+      } else {
+        // Claude gave us nothing — save as plain with flag
+        const { rows } = await pool.query(
+          `INSERT INTO companies (name, ats_type, detect_status, last_scan_error)
+           VALUES ($1,'plain','pending','Claude could not identify an ATS for this company. Please add the careers URL manually.') RETURNING *`,
+          [companyName]
+        );
+        res.json({ ok: true, company: rows[0], detected: false, message: `Could not identify ATS for "${companyName}". Add a careers URL manually if you know it.` });
+      }
+    }
+  } catch (e) {
+    console.error('[detect] Error:', e);
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 // Jobs
@@ -1540,31 +1711,54 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
     // ── Stage 2a: Scrape Greenhouse, Lever, and Workday companies ──
     for (const c of companies) {
-      const co = c as { name: string; ats_type: string; ats_slug: string | null; careers_url: string | null };
+      const co = c as { id: number; name: string; ats_type: string; ats_slug: string | null; careers_url: string | null; scan_failures: number; ats_types_tried: string[] };
       try {
         let jobCount = 0;
+        let scraped = false;
         if (co.ats_type === 'greenhouse' && co.ats_slug) {
           const jobs = await scrapeGreenhouseJobs(co.ats_slug, co.name);
           jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Greenhouse' })));
           perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
+          scraped = true;
         } else if (co.ats_type === 'lever' && co.ats_slug) {
           const jobs = await scrapeLeverJobs(co.ats_slug, co.name);
           jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Lever' })));
           perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
+          scraped = true;
         } else if (co.ats_type === 'workday' && co.ats_slug && co.careers_url) {
           const jobs = await scrapeWorkdayJobs(co.name, co.careers_url, co.ats_slug);
           jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Workday' })));
           perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
+          scraped = true;
         }
         // "plain" companies: covered by JobSpy broad search below
+        if (scraped) {
+          // Clear failure streak on success
+          if ((co.scan_failures ?? 0) > 0) {
+            await pool.query(
+              `UPDATE companies SET scan_failures=0, last_scan_error=NULL WHERE id=$1`,
+              [co.id]
+            ).catch(() => {});
+          }
+        }
         companiesScanned++;
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e);
         perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: 0, error: errMsg });
         console.error(`Error scraping ${co.name}:`, e);
+        // Record failure for retry logic
+        await pool.query(
+          `UPDATE companies SET
+             scan_failures = scan_failures + 1,
+             last_scan_error = $1,
+             ats_types_tried = array_append(ats_types_tried, $2),
+             detect_status = CASE WHEN detect_status = 'detected' THEN 'failed' ELSE detect_status END
+           WHERE id = $3`,
+          [errMsg, co.ats_type, co.id]
+        ).catch(() => {});
         companiesScanned++;
       }
     }
@@ -2324,21 +2518,20 @@ textarea:focus,input:focus{border-color:var(--gold)}
 <div class="panel" id="panel-companies">
   <div class="company-list" id="company-list"></div>
   <div class="sec-title" style="margin-bottom:12px">Add Company</div>
-  <div class="add-form">
-    <div class="fg"><label>Company Name</label><input type="text" id="co-name" placeholder="Acme Corp"></div>
-    <div class="fg">
-      <label>ATS Type</label>
-      <select id="co-type">
-        <option value="greenhouse">Greenhouse</option>
-        <option value="lever">Lever</option>
-        <option value="workday">Workday</option>
-        <option value="plain">Plain URL</option>
-      </select>
+  <div style="font-size:12px;color:var(--muted);margin-bottom:14px">Type a company name — AI will automatically detect the job board and verify it's working.</div>
+  <div class="add-form" style="align-items:flex-end">
+    <div class="fg" style="flex:2">
+      <label>Company Name</label>
+      <input type="text" id="co-name" placeholder="e.g. Salesforce, HubSpot, Oracle" onkeydown="if(event.key==='Enter')addCompanyAuto()">
     </div>
-    <div class="fg"><label>Slug / Domain / URL</label><input type="text" id="co-slug" placeholder="companyname or domain"></div>
+    <div class="fg" style="flex:1">
+      <label>Website <span class="hint">(optional — helps detection)</span></label>
+      <input type="text" id="co-website" placeholder="e.g. salesforce.com" onkeydown="if(event.key==='Enter')addCompanyAuto()">
+    </div>
   </div>
-  <div style="margin-top:12px">
-    <button class="btn btn-gold" onclick="addCompany()">Add Company</button>
+  <div style="margin-top:12px;display:flex;align-items:center;gap:12px">
+    <button class="btn btn-gold" id="co-add-btn" onclick="addCompanyAuto()">Add Company</button>
+    <span id="co-detect-status" style="font-size:12px;color:var(--muted)"></span>
   </div>
 </div>
 <div class="panel" id="panel-settings">
@@ -3177,34 +3370,71 @@ async function loadCompanies() {
   var res = await fetch('/api/companies');
   var cos = await res.json();
   var list = document.getElementById('company-list');
-  if (!cos.length) { list.innerHTML = '<div class="empty">No companies added yet.</div>'; return; }
+  if (!cos.length) { list.innerHTML = '<div class="empty">No companies yet — add one below.</div>'; return; }
   var html = '';
   cos.forEach(function(c) {
     var detail = c.ats_slug || c.careers_url || '';
-    var typeBadge = '<span class="source-badge">' + esc(c.ats_type) + '</span>';
+    var status = c.detect_status || 'manual';
+    var statusColor = status === 'detected' ? 'var(--green)' : status === 'pending' ? '#f5a623' : status === 'failed' ? 'var(--red)' : 'var(--muted)';
+    var statusLabel = status === 'detected' ? '✓ verified' : status === 'pending' ? '⏳ pending' : status === 'failed' ? '✗ failed' : '';
+    var atsLabel = c.ats_type ? c.ats_type.charAt(0).toUpperCase() + c.ats_type.slice(1) : '';
+    var errorHtml = (status === 'failed' || status === 'pending') && c.last_scan_error
+      ? '<div style="font-size:11px;color:var(--muted);margin-top:3px;white-space:normal">' + esc(c.last_scan_error.slice(0, 120)) + (c.last_scan_error.length > 120 ? '…' : '') + '</div>'
+      : '';
     html +=
-      '<div class="company-row">' +
-        '<span class="company-name">' + esc(c.name) + '</span>' +
-        typeBadge +
-        '<span class="company-meta">' + esc(detail) + '</span>' +
+      '<div class="company-row" style="flex-wrap:wrap;gap:4px">' +
+        '<span class="company-name" style="flex:1;min-width:120px">' + esc(c.name) + '</span>' +
+        '<span class="source-badge">' + esc(atsLabel) + '</span>' +
+        (detail ? '<span class="company-meta" style="font-size:11px">' + esc(detail) + '</span>' : '') +
+        (statusLabel ? '<span style="font-size:11px;color:' + statusColor + ';font-weight:600">' + statusLabel + '</span>' : '') +
+        '<button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="retryDetect(' + c.id + ',' + JSON.stringify(c.name) + ')" title="Re-run auto-detection">↻</button>' +
         '<button class="btn btn-ghost btn-sm" onclick="deleteCompany(' + c.id + ')">Remove</button>' +
+        (errorHtml ? '<div style="width:100%;padding-left:4px">' + errorHtml + '</div>' : '') +
       '</div>';
   });
   list.innerHTML = html;
 }
-async function addCompany() {
+async function addCompanyAuto() {
   var name = document.getElementById('co-name').value.trim();
-  var type = document.getElementById('co-type').value;
-  var slug = document.getElementById('co-slug').value.trim();
-  if (!name || !slug) { alert('Name and slug/URL are required.'); return; }
-  var body = { name: name, ats_type: type };
-  if (type === 'plain' || type === 'other') { body.careers_url = slug; }
-  else if (type === 'workday') { body.careers_url = slug; }
-  else { body.ats_slug = slug; }
-  await fetch('/api/companies', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-  document.getElementById('co-name').value = '';
-  document.getElementById('co-slug').value = '';
-  loadCompanies();
+  var website = document.getElementById('co-website').value.trim();
+  if (!name) { alert('Company name is required.'); return; }
+  var btn = document.getElementById('co-add-btn');
+  var statusEl = document.getElementById('co-detect-status');
+  btn.disabled = true;
+  statusEl.textContent = 'Asking AI to detect job board…';
+  statusEl.style.color = 'var(--muted)';
+  try {
+    var res = await fetch('/api/companies/detect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, website: website || undefined })
+    });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Detection failed');
+    if (data.detected) {
+      var atsParts = [data.ats_type, data.ats_slug || data.careers_url].filter(Boolean).join('/');
+      statusEl.textContent = '✓ Detected: ' + atsParts + (data.confidence ? ' (' + data.confidence + ' confidence)' : '');
+      statusEl.style.color = 'var(--green)';
+    } else {
+      statusEl.textContent = data.message || 'Saved with best guess — will retry on next scout run.';
+      statusEl.style.color = '#f5a623';
+    }
+    document.getElementById('co-name').value = '';
+    document.getElementById('co-website').value = '';
+    loadCompanies();
+    setTimeout(function() { statusEl.textContent = ''; }, 8000);
+  } catch(e) {
+    statusEl.textContent = 'Error: ' + (e.message || String(e));
+    statusEl.style.color = 'var(--red)';
+  }
+  btn.disabled = false;
+}
+async function retryDetect(id, name) {
+  if (!confirm('Re-run auto-detection for ' + name + '?')) return;
+  // Remove old entry and re-add with fresh detection
+  await fetch('/api/companies/' + id, { method: 'DELETE' });
+  document.getElementById('co-name').value = name;
+  addCompanyAuto();
 }
 async function deleteCompany(id) {
   await fetch('/api/companies/' + id, { method:'DELETE' });
