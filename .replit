@@ -20,3 +20,8 @@ externalPort = 80
 
 [agent]
 expertMode = true
+
+[deployment]
+build = ["sh", "-c", "pnpm --filter @workspace/api-server run build"]
+run = ["sh", "-c", "PORT=8080 pnpm --filter @workspace/api-server run start"]
+deploymentTarget = "cloudrun"
