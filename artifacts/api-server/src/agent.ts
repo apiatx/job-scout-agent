@@ -672,6 +672,30 @@ The resume MUST fit the target page count. This is non-negotiable.
 - 2-page target: ${wordMin}-${wordMax} words. Expand bullets with context and achievements.
 Count your words before finalizing. If over limit, edit down. If under, enrich.
 
+PHASE 5 — COVER LETTER (the resume's human counterpart):
+The cover letter must sound like a real, confident person wrote it — not a robot, not an HR drone.
+
+BANNED PHRASES (use any of these and the letter fails):
+- "I am writing to express my interest"
+- "I am excited/thrilled/delighted to apply"
+- "I believe I would be a great fit"
+- "I am a highly motivated/driven/passionate professional"
+- "Please find attached my resume"
+- "Thank you for your time and consideration"
+- "I look forward to hearing from you"
+- "Dear Hiring Manager" (use a specific name if in JD, otherwise skip the salutation entirely)
+- Any sentence starting with "I am a" followed by an adjective
+
+COVER LETTER RULES:
+1. Open with a specific, real hook — reference something concrete about the company or role (a product, a market move, a challenge the team faces). Not a compliment. A real observation.
+2. Write like someone who already belongs in the room — confident, direct, no hedging
+3. 3 short paragraphs max. Each paragraph does one job.
+4. Vary sentence length. Mix short punchy sentences with longer ones. Rhythm matters.
+5. Use first person naturally but don't start consecutive sentences with "I"
+6. Connect 1-2 real achievements from the resume to what the role actually needs — specific numbers, specific outcomes
+7. End with something direct, not groveling. "Happy to talk through it" beats "I look forward to the opportunity to further discuss"
+8. Tone: confident peer-to-peer, not applicant-to-gatekeeper
+
 ABSOLUTE RULES:
 - Never fabricate data, companies, titles, or achievements not in the base resume
 - Only reframe, optimize, and reorder existing information
@@ -711,7 +735,7 @@ Respond ONLY with a valid JSON object — no markdown fences, no text outside th
     "pageEstimate": "~X words → fits Y page(s)"
   },
   "resume": "# Full Name\\n\\n## Summary\\n[2-3 sentence power summary mirroring JD language]\\n\\n## Experience\\n**Job Title** — **Company Name** | Location | Dates\\n- [Strong verb] + [achievement] + [metric]\\n...\\n\\n## Key Skills\\n[JD-matched skills first, comma-separated]\\n\\n## Education\\n...",
-  "coverLetter": "# Cover Letter\\n\\n[Recipient info]\\n\\n[Opening hook — reference company by name and why this role specifically]\\n\\n[Body — connect 2-3 specific achievements to the role's requirements using JD language]\\n\\n[Closing — confident call to action]\\n\\n[Sign-off]",
+  "coverLetter": "# Cover Letter\\n\\n[First name Last name]\\n[City, State | phone | email]\\n\\n[Opening paragraph: 2-3 sentences. Start with a real, specific observation about the company or role — not a compliment, a real hook. Then make the connection to why you're reaching out. No corporate filler.]\\n\\n[Middle paragraph: 2-3 sentences. Drop 1-2 specific achievements with real numbers. Connect them directly to what the role needs. Be concrete.]\\n\\n[Closing paragraph: 1-2 sentences. Direct and confident. No groveling.]\\n\\n[First name only]",
   "suggestedEdits": "## Suggested Edits for Your Resume\\n\\nMake these targeted changes directly in your original document — no full rewrite needed. Only reframe existing facts; never add anything that isn't true.\\n\\n### Skills / Summary Section\\n- **Add keyword**: [exact JD term] — appears as required in the JD\\n- **Move to top**: [skill] — JD lists this as a primary requirement\\n- **Remove or demote**: [unrelated skill] — not mentioned in JD, wastes prime real estate\\n\\n### [Company Name] ([start]–[end])\\n- **Bullet 1** — Change: \\"[current wording]\\" → \\"[improved wording with metric + JD keyword]\\"\\n  _Why: JD requires [specific signal]; adding [metric] proves impact_\\n- **Add**: One bullet about [topic] using language like \\"[JD-mirrored phrase]\\" — JD specifically calls this out\\n\\n### [Next Company / Role]\\n- **Bullet X** — Change: \\"[current]\\" → \\"[improved]\\"\\n  _Why: [reason]_\\n\\n> **Note**: If you have exact numbers (quota %, deal sizes, headcount), slot them in where shown as placeholders — your actual figures will be stronger than estimates."
 }`;
 
