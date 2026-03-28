@@ -2,7 +2,7 @@
 
 ## Overview
 
-A full-stack automated job search agent that discovers job listings across Greenhouse, Lever, and Workday career portals, plus JobSpy (Indeed). Jobs are scored with Claude AI using a multi-dimensional Opportunity Scoring Engine, classified into four tiers (Top Targets / Fast Wins / Stretch Roles / Probably Skip), and surfaced in a dashboard. Supports tailored resume/cover letter generation, company research, salary estimation, and daily digest emails via Gmail.
+A full-stack automated job search agent that discovers job listings via a **hybrid pipeline**: Greenhouse, Lever, and Workday career portals + JobSpy (LinkedIn/Indeed/Glassdoor) + **Gemini with Google Search grounding** (supplemental discovery). Jobs are scored with Claude AI using a multi-dimensional Opportunity Scoring Engine, classified into four tiers (Top Targets / Fast Wins / Stretch Roles / Probably Skip), and surfaced in a dashboard. Supports tailored resume/cover letter generation, company research, salary estimation, and daily digest emails via Gmail.
 
 ## Stack
 
@@ -19,13 +19,14 @@ A full-stack automated job search agent that discovers job listings across Green
 ```text
 artifacts/api-server/
 ├── src/
-│   ├── index.ts          # Main Express server + HTML frontend template (3400+ lines)
-│   ├── agent.ts          # Claude AI scoring, tier logic, tailoring, research
-│   ├── scraper.ts        # Greenhouse, Lever, Workday scrapers + JobSpy wrapper
-│   ├── jobspy_scraper.py # Python: Indeed search via jobspy library
+│   ├── index.ts             # Main Express server + HTML frontend template (4700+ lines)
+│   ├── agent.ts             # Claude AI scoring, tier logic, tailoring, research
+│   ├── scraper.ts           # Greenhouse, Lever, Workday scrapers + JobSpy wrapper
+│   ├── jobspy_scraper.py    # Python: LinkedIn/Indeed/Glassdoor via jobspy
+│   ├── gemini_discovery.ts  # Gemini + Google Search grounding discovery module
 │   └── lib/
-│       ├── salary.ts     # Claude-based salary estimation
-│       └── gmail.ts      # Gmail OAuth + email sending
+│       ├── salary.ts        # Claude-based salary estimation
+│       └── gmail.ts         # Gmail OAuth + email sending
 ```
 
 ## Database Schema

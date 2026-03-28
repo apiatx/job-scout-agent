@@ -1,0 +1,371 @@
+Implement a new hybrid job discovery pipeline for my Job Search Scout app.
+
+Goal:
+Keep JobSpy as the primary scraping backbone for job boards, but add a second discovery/enrichment layer using the Gemini API with Grounding with Google Search so it can mimic Google AI Search behavior: real-time web-grounded responses with citations, surfaced sources, and search metadata. Gemini should help find additional job listings and direct company career pages that JobSpy may miss, then enrich those jobs with better metadata and descriptions. The backend must remain the final source of truth for matching jobs to user settings. Do NOT let Gemini or Claude directly decide what jobs appear on the jobs page without deterministic backend filtering.
+
+Core product rule:
+
+* User settings in the frontend already define what JobSpy and Gemini should search for.
+* JobSpy + Gemini are discovery inputs.
+* Backend deterministic logic is the gatekeeper.
+* Claude is downstream only for tailoring/writing.
+
+High-level architecture:
+
+1. User settings define exact job criteria.
+2. JobSpy scrapes jobs from supported sources.
+3. Gemini with Google Search grounding discovers additional jobs and direct company career pages.
+4. Normalize both JobSpy jobs and Gemini jobs into one common schema.
+5. Deduplicate aggressively.
+6. Apply deterministic hard filters based on user settings.
+7. Apply a scoring/ranking layer.
+8. Only then pass selected jobs and their descriptions to Claude for resume tailoring / downstream writing.
+
+Important principle:
+
+* Backend logic decides what jobs qualify.
+* Gemini is only for discovery + enrichment.
+* Claude is only for resume tailoring / candidate-facing writing.
+* Do NOT build a pipeline where raw Gemini results and raw JobSpy results are dumped into Claude and Claude decides what fits.
+
+PART 1: SETTINGS / FILTERING MODEL
+Create or extend a structured settings schema for saved user preferences. The frontend already has customizable user settings; inspect the current implementation and reuse/extend it rather than replacing it.
+
+It should support exact filtering fields like:
+
+* target_titles: string[]
+* excluded_titles: string[]
+* target_keywords: string[]
+* excluded_keywords: string[]
+* remote_preference: enum("remote","hybrid","onsite","any")
+* preferred_locations: string[]
+* location_radius_miles: number | null
+* minimum_salary: number | null
+* employment_types: string[]
+* seniority_levels: string[]
+* industries: string[]
+* target_company_sizes: string[]
+* blacklist_companies: string[]
+* whitelist_companies: string[]
+* require_easy_apply: boolean | null
+* must_have_skills: string[]
+* avoid_skills: string[]
+* max_job_age_days: number | null
+
+Make this schema reusable by both JobSpy jobs and Gemini-discovered jobs.
+
+PART 2: GEMINI SEARCH INTEGRATION
+Add a Gemini-based discovery module that uses Gemini API + Grounding with Google Search to find additional job listings and direct company career pages based on the saved user settings.
+
+Gemini requirements:
+
+* Read Gemini API key from Replit Secrets / environment variables.
+* Use the current Google GenAI SDK / currently supported Gemini API client for this project stack. Do not assume an outdated SDK.
+* Prefer model selection via env var, with recommended defaults:
+
+  * GEMINI_MODEL=gemini-3.1-pro-preview for best quality / complex reasoning
+  * fallback option GEMINI_MODEL=gemini-3-flash-preview for lower latency / lower cost
+* Use the current Google Search grounding tool name for current Gemini models:
+
+  * `google_search`
+* Do NOT use `google_search_retrieval` unless the installed SDK/version truly requires it for an older model path.
+
+Use Gemini search only for:
+
+* finding jobs JobSpy may miss
+* finding direct company careers pages
+* validating job URLs/pages are still live
+* extracting or enriching job descriptions/metadata
+* generating richer company/job context for the jobs report
+
+Do NOT use Gemini as the final decision-maker for fit.
+
+Search strategy:
+Generate selective web queries based on saved user settings. Examples:
+
+* "remote enterprise account executive site:greenhouse.io OR site:lever.co OR site:ashbyhq.com"
+* "account executive careers remote SaaS"
+* "site:company.com/careers enterprise sales remote"
+* "site:jobs.ashbyhq.com senior account executive remote"
+* "site:boards.greenhouse.io enterprise account executive"
+
+Use settings to dynamically generate a focused set of search queries rather than generic wide-net web search.
+
+PART 3: GEMINI “GOOGLE AI SEARCH” RESPONSE HANDLING
+When Gemini returns a grounded response, capture and preserve the search metadata so the app can mimic Google AI Search behavior.
+
+Specifically, if available from the response, capture:
+
+* groundingMetadata
+* groundingMetadata.groundingChunks
+* groundingMetadata.searchEntryPoint
+* groundingMetadata.webSearchQueries
+* any citation/source linkage metadata needed to map generated claims to sources
+
+Use these for:
+
+* showing citations / sources in the jobs report
+* exposing the web queries Gemini used
+* optionally rendering search suggestion / search-entry-point UI later
+* debugging why a Gemini-discovered job was found
+* confidence / provenance tracking
+
+Important:
+
+* Do not just keep Gemini plain-text output.
+* Parse and persist structured grounding metadata where available.
+* Preserve enough response metadata that later I can build a Google-AI-search-like UX around it.
+
+PART 4: NORMALIZED JOB SCHEMA
+Create a unified normalized job schema that all ingestion sources map into.
+
+Use a structure similar to:
+{
+"job_id": "string",
+"external_id": "string | null",
+"title": "string",
+"company": "string",
+"location": "string | null",
+"remote_type": "remote | hybrid | onsite | unknown",
+"salary_min": "number | null",
+"salary_max": "number | null",
+"currency": "string | null",
+"description": "string | null",
+"description_snippet": "string | null",
+"url": "string",
+"source": "jobspy | gemini | company_site | linkedin | indeed | workday | greenhouse | lever | ashby | other",
+"source_type": "scraped | searched | enriched",
+"posted_at": "datetime | null",
+"employment_type": "string | null",
+"seniority": "string | null",
+"skills": "string[]",
+"company_size": "string | null",
+"industry": "string | null",
+"is_live": "boolean | null",
+"ingestion_confidence": "number",
+"fit_score": "number | null",
+"fit_reasons": "string[]",
+"raw_payload": "object | null",
+"gemini_grounding_metadata": "object | null",
+"gemini_web_search_queries": "string[]",
+"gemini_sources": "object[]"
+}
+
+Normalize JobSpy jobs into this schema.
+Normalize Gemini-discovered jobs into this schema.
+Preserve source attribution.
+
+PART 5: DEDUPLICATION
+Build dedupe logic before ranking. Deduplicate across JobSpy and Gemini results using:
+
+* normalized URL
+* company + normalized title
+* company + location + title
+* fuzzy similarity for reposted duplicates
+* prefer the better-quality record when duplicates exist:
+
+  * keep the version with fuller description
+  * keep the direct company URL when possible
+  * keep the fresher posted date when possible
+  * merge useful metadata from both records
+
+Return a single deduped canonical job record.
+
+PART 6: DETERMINISTIC HARD FILTERS
+Before any LLM scoring, implement exact backend filtering against the saved settings:
+
+* exclude blacklisted companies
+* exclude excluded titles
+* exclude excluded keywords
+* require target title/title similarity threshold
+* enforce remote/hybrid/on-site preferences
+* enforce preferred locations/radius if not remote
+* enforce minimum salary when salary exists
+* exclude stale jobs older than max_job_age_days if configured
+* exclude mismatched employment type if configured
+* exclude obvious seniority mismatch if configured
+* exclude jobs missing must-have skills when that can be reliably inferred
+* optionally boost whitelist companies
+
+Important:
+These filters must be deterministic backend logic, not LLM judgment.
+
+PART 7: SCORING / RANKING LAYER
+After hard filtering, add a ranking/scoring layer.
+
+Build two scores:
+
+1. deterministic_score
+2. llm_score
+
+Deterministic score should consider:
+
+* title match strength
+* keyword match strength
+* remote/location match
+* salary match
+* company whitelist boost
+* freshness
+* source quality
+* direct company site boost
+* description completeness
+
+LLM score should be optional and used only after the hard filters pass.
+The LLM score should evaluate nuanced fit like:
+
+* how aligned the role is to the user’s broader goals
+* whether the role looks strategically strong
+* whether the description suggests likely fit or stretch
+* whether the posting looks low quality / evergreen / suspicious
+* short fit explanation
+
+If you implement LLM scoring, keep it structured and bounded. Do not let it overrule hard disqualifiers.
+
+Final ranking should combine deterministic score + optional llm_score.
+
+PART 8: CLAUDE HANDOFF
+Only after jobs are normalized, filtered, deduped, and ranked, create the payload for Claude.
+
+Claude should receive:
+
+* selected job record
+* full job description if available
+* user resume
+* user target settings
+* any extracted missing keywords / focus areas
+
+Claude’s responsibilities:
+
+* tailor resume to the selected job
+* preserve truthfulness
+* improve relevance
+* rewrite summary / bullets if needed
+* identify missing keywords
+* optionally generate outreach messaging later
+
+Claude should NOT:
+
+* perform raw job discovery
+* dedupe jobs
+* determine final search eligibility
+
+PART 9: JOBS REPORT / ENRICHMENT
+Add a richer jobs report layer for the jobs page.
+
+For top-ranked jobs, include:
+
+* why this job matched
+* what settings it matched strongly
+* notable missing pieces / stretch areas
+* source(s) found from
+* whether direct company page was found
+* whether job appears live
+* short company context if available
+* short explanation for ranking
+* citations / sources from Gemini grounding where available
+* Gemini-used search queries where useful for transparency/debugging
+
+This should make the jobs page more transparent and useful.
+
+PART 10: GEMINI IMPLEMENTATION DETAILS
+Implement Gemini discovery using the currently supported Google GenAI SDK / API pattern for current models.
+
+Expectations:
+
+* Use `google_search` tool when calling Gemini for grounded web search.
+* Use the current generate-content pattern for standard grounded search requests.
+* If the response includes grounding metadata, persist it.
+* Support structured output / JSON-friendly parsing where possible so Gemini results can be normalized safely.
+* Add retries / graceful error handling.
+* If Gemini is unavailable, rate-limited, or not configured, skip Gemini discovery and continue with JobSpy only.
+
+Do not overengineer UI rendering of Google’s `searchEntryPoint` yet unless there is already a clean place for it. Capture and preserve it first so I can choose later whether to expose it.
+
+PART 11: OPTIONAL FUTURE HOOK FOR DEEP RESEARCH
+Do not make Deep Research the primary job-search flow.
+
+However, create the code in a way that leaves room for a future optional “Deep Company / Role Research” mode using Gemini Deep Research later.
+
+Notes:
+
+* Deep Research is not part of the normal grounded-search request flow.
+* It should not block or complicate the current jobs pipeline.
+* If helpful, add comments or abstraction points for a future premium feature like:
+
+  * deep company research
+  * interview prep research
+  * multi-step hiring-manager/company analysis
+
+PART 12: FILES / CODE CHANGES
+Please inspect the existing codebase and integrate this cleanly into the current architecture instead of bolting on random scripts.
+
+I expect you to:
+
+* find the current JobSpy job ingestion flow
+* find the current settings storage / settings page backend
+* find the current jobs page data flow
+* add the Gemini discovery service cleanly
+* add normalization, dedupe, and filtering in the backend pipeline
+* update any API routes / handlers needed
+* update types/interfaces/schemas if frontend uses them
+* ensure the jobs page can display combined ranked results
+
+PART 13: IMPLEMENTATION RULES
+
+* Keep all existing JobSpy functionality intact.
+* Do not break the current jobs page.
+* Do not remove any existing sources.
+* Make this additive and safe.
+* Reuse existing utilities and patterns where possible.
+* Keep code modular.
+* Add comments where logic is non-obvious.
+* Add logging around:
+
+  * JobSpy results count
+  * Gemini results count
+  * deduped count
+  * filtered out count
+  * final ranked count
+* Make environment variables explicit and documented.
+
+PART 14: ENVIRONMENT VARIABLES
+Support environment variables like:
+
+* GEMINI_API_KEY
+* GEMINI_MODEL
+* GEMINI_ENABLE_SEARCH=true/false
+* GEMINI_MAX_RESULTS=number
+* GEMINI_TIMEOUT_SECONDS=number
+
+Recommended defaults:
+
+* GEMINI_MODEL=gemini-3.1-pro-preview for quality
+* optional lower-cost alternative: gemini-3-flash-preview
+
+If Gemini is not configured, the system should gracefully skip Gemini discovery and still work with JobSpy only.
+
+PART 15: OUTPUT EXPECTATIONS
+When finished, provide:
+
+1. A summary of what you changed
+2. Key files modified
+3. Any new environment variables required
+4. Any migration/setup steps
+5. Any follow-up improvements you recommend
+
+Before changing code, first inspect and summarize the current relevant architecture:
+
+* job ingestion
+* job filtering
+* settings persistence
+* jobs page API route
+
+Then implement against that actual structure.
+Do not assume the current architecture. Inspect first, then modify safely.
+
+Bonus if possible:
+
+* Add a source breakdown in the jobs response so we can see how many came from JobSpy vs Gemini.
+* Add confidence metadata so later I can tune the weighting.
+* Prefer direct company job pages over aggregator links when both exist.
+* Preserve Gemini grounding metadata in a way that can support a future citation UI.

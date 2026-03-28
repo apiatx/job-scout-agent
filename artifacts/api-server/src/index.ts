@@ -7,6 +7,7 @@ import mammoth from 'mammoth';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, UnderlineType } from 'docx';
 import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, runJobSpyScraper, proxyConfigured } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
+import { runGeminiJobDiscovery, deduplicateJobLists } from './gemini_discovery.js';
 import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier } from './agent.js';
 import type { SubScores, OpportunityTier, TierSettings, TailoringAnalysis } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
@@ -335,6 +336,9 @@ async function initDb(): Promise<void> {
   await safeAddColumn('companies', 'last_scan_error', 'TEXT');
   await safeAddColumn('companies', 'detect_status', "TEXT NOT NULL DEFAULT 'manual'");
   await safeAddColumn('companies', 'ats_types_tried', "TEXT[] NOT NULL DEFAULT '{}'");
+  // Gemini discovery columns — added when hybrid pipeline was introduced
+  await safeAddColumn('jobs', 'gemini_grounding_metadata', 'JSONB');
+  await safeAddColumn('jobs', 'ingestion_confidence', 'FLOAT');
 
   // Deduplicate existing jobs — keep the most recent row per apply_url
   try {
@@ -947,7 +951,24 @@ app.get('/api/jobs', async (req: Request, res: Response) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-// Save / unsave jobs
+// Source breakdown — returns count of jobs per discovery source
+app.get('/api/jobs/source-breakdown', async (_req, res: Response) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        source,
+        COUNT(*)::int AS count,
+        ROUND(AVG(match_score))::int AS avg_score,
+        COUNT(*) FILTER (WHERE gemini_grounding_metadata IS NOT NULL)::int AS with_grounding
+      FROM jobs
+      GROUP BY source
+      ORDER BY count DESC
+    `);
+    const total = rows.reduce((sum: number, r: Record<string, unknown>) => sum + (r.count as number), 0);
+    res.json({ breakdown: rows, total });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 app.get('/api/jobs/saved', async (_req, res: Response) => {
   try {
     const { rows } = await pool.query(
@@ -1932,9 +1953,9 @@ async function runScoutInBackground(runId: number): Promise<void> {
       return;
     }
     const criteria = cRows[0] as {
-      target_roles: string[]; industries: string[]; min_salary: number | null;
+      target_roles: string[]; industries: string[]; min_salary: number | null; min_ote: number | null;
       locations: string[]; must_have: string[]; nice_to_have: string[]; avoid: string[];
-      remote_strict: boolean; experience_level: string;
+      remote_strict: boolean; experience_level: string; work_type: string;
       stretch_companies: string[]; vertical_niches: string[];
       top_target_score: number; fast_win_score: number; stretch_score: number;
       allowed_work_modes: string[]; experience_levels: string[];
@@ -1956,8 +1977,10 @@ async function runScoutInBackground(runId: number): Promise<void> {
     for (const c of companies) { byType[(c as any).ats_type] = (byType[(c as any).ats_type] || 0) + 1; }
     console.log(`  Companies by ATS type:`, byType);
 
-    type Job = { title: string; company: string; location: string; salary?: string; applyUrl: string; description?: string; source: string };
+    type Job = { title: string; company: string; location: string; salary?: string; applyUrl: string; description?: string; source: string; _fromJobSpy?: boolean; _fromGemini?: boolean };
     const allJobs: Job[] = [];
+    // Side-map: applyUrl → per-job metadata for Gemini-sourced jobs
+    const geminiMetaByUrl = new Map<string, { groundingMetadata?: object; confidence?: number }>();
     let companiesScanned = 0;
     const perCompanyStats: { name: string; type: string; jobs: number; error?: string }[] = [];
 
@@ -2057,6 +2080,67 @@ async function runScoutInBackground(runId: number): Promise<void> {
       // Re-attach the correct source to each safe job using its applyUrl as key
       const sourceByUrl = new Map(jobSpyJobs.map(j => [j.applyUrl, j.source]));
       allJobs.push(...safeJobSpyJobs.map(j => ({ ...j, source: sourceByUrl.get(j.applyUrl) ?? 'JobSpy' })));
+    }
+
+    // ── Stage 2c: Gemini + Google Search grounding — supplemental discovery ──
+    let geminiJobsFound = 0;
+    let geminiDeduped = 0;
+    try {
+      const geminiResult = await runGeminiJobDiscovery({
+        target_roles:  criteria.target_roles ?? [],
+        locations:     criteria.locations ?? [],
+        work_type:     criteria.work_type ?? 'any',
+        must_have:     criteria.must_have ?? [],
+        nice_to_have:  criteria.nice_to_have ?? [],
+        avoid:         criteria.avoid ?? [],
+        industries:    criteria.industries ?? [],
+        min_salary:    criteria.min_salary ?? null,
+      });
+
+      if (!geminiResult.skipped && geminiResult.jobs.length > 0) {
+        // Merge Gemini results with existing allJobs — dedup by URL + company+title
+        const { merged, deduplicatedCount } = deduplicateJobLists(
+          allJobs as Array<ScrapedJob & { source: string; _fromJobSpy?: boolean }>,
+          geminiResult.jobs
+        );
+
+        geminiJobsFound = geminiResult.jobs.length;
+        geminiDeduped   = deduplicatedCount;
+        const netNew    = geminiJobsFound - deduplicatedCount;
+
+        // Store gemini metadata for net-new jobs so we can persist it to DB later
+        for (const gJob of geminiResult.jobs) {
+          if (!allJobs.some(j => j.applyUrl === gJob.applyUrl)) {
+            geminiMetaByUrl.set(gJob.applyUrl, {
+              groundingMetadata: gJob.geminiGroundingMetadata as object | undefined,
+              confidence:        gJob.ingestionConfidence,
+            });
+          }
+        }
+
+        // Rebuild allJobs from merged (preserves all existing + net-new Gemini jobs)
+        allJobs.length = 0;
+        for (const j of merged) {
+          allJobs.push({
+            title:       j.title,
+            company:     j.company,
+            location:    j.location,
+            salary:      j.salary,
+            applyUrl:    j.applyUrl,
+            description: j.description,
+            source:      j.source,
+            _fromJobSpy: (j as any)._fromJobSpy,
+            _fromGemini: (j as any)._fromGemini,
+          });
+        }
+
+        console.log(`[Gemini] ${geminiJobsFound} discovered → ${deduplicatedCount} dupes merged → ${netNew} net-new added`);
+        console.log(`[Gemini] Grounding sources: ${geminiResult.totalGroundingSources} | Queries: ${geminiResult.queriesUsed.join(', ')}`);
+      } else if (geminiResult.skipped) {
+        console.log(`[Gemini] Skipped: ${geminiResult.skipReason}`);
+      }
+    } catch (e) {
+      console.error(`[Gemini] Unexpected error (non-fatal):`, e);
     }
 
     console.log(`\n──── SCRAPE RESULTS ────────────────────────────────────────`);
@@ -2232,11 +2316,13 @@ async function runScoutInBackground(runId: number): Promise<void> {
         finalTier = m.opportunityTier ?? 'unscored';
       }
 
+      // Look up Gemini-specific metadata for this job (if it came from Gemini)
+      const geminiMeta = geminiMetaByUrl.get(m.applyUrl);
       await pool.query(
-        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
          ON CONFLICT (apply_url) DO NOTHING`,
-        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null)]
+        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), geminiMeta?.groundingMetadata ? JSON.stringify(geminiMeta.groundingMetadata) : null, geminiMeta?.confidence ?? null]
       );
     }
 
@@ -2276,10 +2362,18 @@ async function runScoutInBackground(runId: number): Promise<void> {
       console.log(`───────────────────────────────────────────────────────────`);
     }
 
+    // ── Source breakdown for reporting ───────────────────────────────────
+    const srcBreakdown: Record<string, number> = {};
+    for (const j of allJobs) { srcBreakdown[j.source] = (srcBreakdown[j.source] ?? 0) + 1; }
+
     console.log(`════════════════════════════════════════════════════════════`);
     console.log(`SCOUT RUN #${runId} COMPLETE`);
     console.log(`  Companies scanned: ${companiesScanned}`);
     console.log(`  Raw jobs scraped:  ${allJobs.length}`);
+    console.log(`  Source breakdown:  ${Object.entries(srcBreakdown).map(([k,v]) => `${k}: ${v}`).join(' | ')}`);
+    if (geminiJobsFound > 0) {
+      console.log(`  Gemini discovery:  ${geminiJobsFound} found → ${geminiDeduped} already in JobSpy → ${geminiJobsFound - geminiDeduped} net-new`);
+    }
     console.log(`  Passed title filter: ${toScore.length}`);
     console.log(`  Pre-filtered (location/avoid/salary): ${preFiltered.length}`);
     console.log(`  Claude matches (score >= 50): ${matches.length}`);
