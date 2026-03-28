@@ -1,0 +1,65 @@
+Final correction pass: fix the Gemini model waterfall cleanly and align it with the current Google Gemini docs and the intended architecture.
+
+Context:
+The current implementation is close, but the model fallback logic is still wrong/inconsistent. I want the Gemini discovery pipeline to use the correct current model family and fallbacks for Google Search-grounded job discovery.
+
+What to fix:
+
+1. Keep the current `@google/genai` SDK.
+2. Keep the current Google Search grounding integration pattern.
+3. Update the model waterfall so it no longer assumes “Gemini 3 doesn’t exist” and no longer defaults to older 2.0-era fallback logic unless absolutely necessary.
+
+Use this model selection policy:
+
+* Default discovery/search model: `gemini-3-flash-preview`
+* Higher-quality optional model: `gemini-3.1-pro-preview`
+* Env override: `GEMINI_MODEL` should still take priority if set
+* Alias fallbacks after the explicit models:
+
+  * `gemini-flash-latest`
+  * `gemini-pro-latest`
+* Do NOT use `gemini-2.0-flash` as the standard fallback for grounded search unless there is a hard compatibility reason and you explicitly document that reason
+* Do NOT claim Gemini 3 is unavailable; current Gemini docs clearly include Gemini 3 family models
+
+Implementation requirements:
+
+1. Build a clean fallback chain for Gemini grounded job discovery.
+2. If `GEMINI_MODEL` is set, prepend it to the candidate list and try it first.
+3. Then fall back in this general order:
+
+   * `gemini-3-flash-preview`
+   * `gemini-3.1-pro-preview`
+   * `gemini-flash-latest`
+   * `gemini-pro-latest`
+4. Deduplicate the model list if the env override matches one of the defaults.
+5. On model-not-found / unsupported-model / unsupported-tool errors, advance to the next candidate.
+6. Log which model was actually used.
+7. If all candidates fail, gracefully skip Gemini discovery and continue with JobSpy-only mode.
+8. Keep Gemini strictly as discovery/enrichment only. Do not let this change affect the deterministic hard-filtering or Claude tailoring boundaries.
+
+Grounding/tooling requirements:
+
+* Continue using the current Google Search grounding tool pattern for current models.
+* Preserve grounding metadata:
+
+  * `groundingMetadata`
+  * `groundingChunks`
+  * `webSearchQueries`
+  * `searchEntryPoint`
+  * `groundingSupports`
+* Keep structured parsing / normalization intact.
+
+Important:
+
+* Do not refactor unrelated parts of the pipeline.
+* Do not regress any existing Gemini metadata persistence, deduplication, scoring, or jobs API explanation fields.
+* Keep the change focused on model waterfall correctness and safe fallback behavior.
+
+After making the change, report back with:
+
+1. The final fallback order actually implemented
+2. The exact file(s) changed
+3. The exact env var behavior
+4. The exact error conditions that trigger fallback to the next model
+5. A short code snippet of the final candidate-model selection logic
+6. Confirmation that Gemini 3 family models are now treated as first-class supported models in the pipeline

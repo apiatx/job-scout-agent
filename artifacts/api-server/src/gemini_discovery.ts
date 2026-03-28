@@ -12,23 +12,24 @@
  *
  * ── Model selection / fallback waterfall ─────────────────────────────────────
  *
- * Google Search grounding is available on specific Gemini model families only,
- * and uses different tool names per family:
+ * Google Search grounding tool names by model family (per Google docs):
  *
- *   Gemini 2.0+  →  `googleSearch: {}`          (new tool, stable)
- *   Gemini 1.5   →  `googleSearchRetrieval: {}`  (legacy tool, deprecated path)
+ *   Gemini 2.0+ (incl. 2.5 and 3-series)  →  `googleSearch: {}`
+ *   Gemini 1.5                             →  `googleSearchRetrieval: {}`
  *
- * NOTE: "Gemini 3" does not exist as a released model family (as of this writing).
- * Google's versioning scheme uses major.minor (e.g. 1.5, 2.0, 2.5). The model
- * names "gemini-3.1-pro-preview" and "gemini-3-flash-preview" referenced in
- * the original spec are not real Google model identifiers. The candidates below
- * use the actual current production and preview model identifiers.
+ * Gemini 3 IS a current Google model family. gemini-3-flash-preview and
+ * gemini-3.1-pro-preview are documented, supported model identifiers.
+ * gemini-2.0-flash is deprecated by Google and excluded from the default chain.
  *
  * Candidate waterfall (tried in order until one succeeds):
- *   1. GEMINI_MODEL env var          — user-configured override (any valid name)
- *   2. gemini-2.5-pro-preview-03-25  — quality default; googleSearch ✅
- *   3. gemini-2.0-flash              — stable, confirmed googleSearch ✅
- *   4. gemini-1.5-flash-latest       — legacy fallback; googleSearchRetrieval ✅
+ *   1. GEMINI_MODEL env var       — user-configured override (any valid name)
+ *   2. gemini-3-flash-preview     — speed/cost default; Gemini 3, googleSearch ✅
+ *   3. gemini-3.1-pro-preview     — quality upgrade; Gemini 3, googleSearch ✅
+ *   4. gemini-flash-latest        — alias fallback; googleSearch ✅
+ *   5. gemini-pro-latest          — alias fallback; googleSearch ✅
+ *
+ * If GEMINI_MODEL matches an entry in the built-in list, the duplicate is
+ * removed so the model is only tried once (at the front of the chain).
  *
  * The waterfall catches model-unavailability errors and advances to the next
  * candidate. Which model was actually used is logged prominently.
@@ -108,35 +109,41 @@ interface ModelCandidate {
 }
 
 /**
- * Built-in candidate chain (used when GEMINI_MODEL env var is not set).
- * Each candidate uses the correct grounding tool for its model family.
+ * Built-in candidate chain — Gemini 3-series models first (current generation),
+ * with alias fallbacks. gemini-2.0-flash intentionally excluded (deprecated by Google).
  */
 const BUILTIN_CANDIDATES: ModelCandidate[] = [
   {
-    modelName: 'gemini-2.5-pro-preview-03-25',
+    modelName: 'gemini-3-flash-preview',
     toolFamily: 'googleSearch',
-    note: 'quality default — strong reasoning + web grounding',
+    note: 'Gemini 3 Flash — speed/cost default; googleSearch grounding ✅',
   },
   {
-    modelName: 'gemini-2.0-flash',
+    modelName: 'gemini-3.1-pro-preview',
     toolFamily: 'googleSearch',
-    note: 'stable speed/cost — introduced the googleSearch tool pattern',
+    note: 'Gemini 3.1 Pro — quality upgrade; googleSearch grounding ✅',
   },
   {
-    modelName: 'gemini-1.5-flash-latest',
-    toolFamily: 'googleSearchRetrieval',
-    note: 'legacy fallback — uses googleSearchRetrieval (1.5-series grounding)',
+    modelName: 'gemini-flash-latest',
+    toolFamily: 'googleSearch',
+    note: 'alias fallback — resolves to latest supported Flash model',
+  },
+  {
+    modelName: 'gemini-pro-latest',
+    toolFamily: 'googleSearch',
+    note: 'alias fallback — resolves to latest supported Pro model',
   },
 ];
 
-/** Detects which tool family a model name belongs to */
+/** Detects which tool family a model name belongs to.
+ *  Only Gemini 1.5-series uses the legacy googleSearchRetrieval tool.
+ *  All 2.0+, 2.5, and 3-series models use the modern googleSearch tool.
+ */
 function detectToolFamily(modelName: string): GroundingToolFamily {
-  // Gemini 1.5 models use the legacy googleSearchRetrieval tool
-  if (modelName.startsWith('gemini-1.') || modelName.includes('-1.5')) {
+  if (modelName.startsWith('gemini-1.') || modelName.includes('-1.5') || modelName.includes('1.5-')) {
     return 'googleSearchRetrieval';
   }
-  // Gemini 2.0+ use the modern googleSearch tool
-  return 'googleSearch';
+  return 'googleSearch'; // Gemini 2.0, 2.5, 3.x and all current models
 }
 
 /** Builds the grounding tool config appropriate for the model family */
@@ -185,11 +192,16 @@ export async function runGeminiJobDiscovery(
   const maxResults = parseInt(process.env.GEMINI_MAX_RESULTS ?? '30', 10);
   const timeoutMs  = parseInt(process.env.GEMINI_TIMEOUT_SECONDS ?? '90', 10) * 1000;
 
-  // Build the candidate list — user override goes first if set
+  // Build the candidate list — user override goes first if set.
+  // If the env model matches a built-in name, remove the duplicate from the
+  // built-in list so each model is tried at most once.
   const envModel = process.env.GEMINI_MODEL?.trim();
+  const builtinsWithoutEnvDupe = envModel
+    ? BUILTIN_CANDIDATES.filter(c => c.modelName !== envModel)
+    : BUILTIN_CANDIDATES;
   const candidates: ModelCandidate[] = envModel
-    ? [{ modelName: envModel, toolFamily: detectToolFamily(envModel), note: 'user-configured via GEMINI_MODEL env var' }, ...BUILTIN_CANDIDATES]
-    : [...BUILTIN_CANDIDATES];
+    ? [{ modelName: envModel, toolFamily: detectToolFamily(envModel), note: 'user-configured via GEMINI_MODEL env var' }, ...builtinsWithoutEnvDupe]
+    : [...builtinsWithoutEnvDupe];
 
   console.log(`\n──── GEMINI DISCOVERY ──────────────────────────────────────`);
   console.log(`[Gemini] Candidate chain: ${candidates.map(c => c.modelName).join(' → ')}`);
