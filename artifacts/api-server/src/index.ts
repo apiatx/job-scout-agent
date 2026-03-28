@@ -2800,6 +2800,17 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="resume-split">
       <div class="resume-col">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div class="sec-title">Tailored Resume</div>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-result-resume')">Copy</button>
+            <button class="btn btn-ghost btn-sm" onclick="downloadDocx('tailor-result-resume','Tailored_Resume')">⬇ Word</button>
+            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-result-resume')">⬇ PDF</button>
+          </div>
+        </div>
+        <div class="resume-rendered" id="tailor-result-resume"></div>
+      </div>
+      <div class="resume-col">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
           <div class="sec-title">Cover Letter</div>
           <div style="display:flex;gap:6px">
             <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-result-cover')">Copy</button>
@@ -2809,25 +2820,11 @@ textarea:focus,input:focus{border-color:var(--gold)}
         </div>
         <div class="resume-rendered" id="tailor-result-cover"></div>
       </div>
-      <div class="resume-col">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-          <div class="sec-title">Resume Edit Suggestions</div>
-          <div style="display:flex;gap:6px">
-            <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-result-edits')">Copy</button>
-          </div>
-        </div>
-        <div class="resume-rendered" id="tailor-result-edits"></div>
-      </div>
     </div>
     <details style="margin-top:16px;border:1px solid var(--border);border-radius:8px;padding:0 12px">
-      <summary style="cursor:pointer;font-size:12px;color:var(--muted);padding:10px 0;user-select:none">▸ Full Tailored Resume (for download or reference)</summary>
-      <div style="padding-bottom:12px">
-        <div style="display:flex;gap:6px;margin-bottom:8px">
-          <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-result-resume')">Copy</button>
-          <button class="btn btn-ghost btn-sm" onclick="downloadDocx('tailor-result-resume','Tailored_Resume')">⬇ Word</button>
-          <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-result-resume')">⬇ PDF</button>
-        </div>
-        <div class="resume-rendered" id="tailor-result-resume"></div>
+      <summary style="cursor:pointer;font-size:13px;color:var(--gold);font-weight:600;padding:12px 0;user-select:none">▸ What Changed & Why</summary>
+      <div style="padding-bottom:14px">
+        <div class="resume-rendered" id="tailor-result-edits"></div>
       </div>
     </details>
   </div>
@@ -3069,6 +3066,17 @@ textarea:focus,input:focus{border-color:var(--gold)}
         <div style="display:flex;gap:16px">
           <div style="flex:1;min-width:0">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <h3 style="margin:0">Tailored Resume</h3>
+              <div style="display:flex;gap:6px">
+                <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-resume')">Copy</button>
+                <button class="btn btn-ghost btn-sm" onclick="downloadDocxFromModal('tailor-resume','Tailored_Resume')">⬇ Word</button>
+                <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-resume')">⬇ PDF</button>
+              </div>
+            </div>
+            <div class="resume-rendered" id="tailor-resume" style="max-height:380px"></div>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
               <h3 style="margin:0">Cover Letter</h3>
               <div style="display:flex;gap:6px">
                 <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-cover')">Copy</button>
@@ -3078,25 +3086,11 @@ textarea:focus,input:focus{border-color:var(--gold)}
             </div>
             <div class="resume-rendered" id="tailor-cover" style="max-height:380px"></div>
           </div>
-          <div style="flex:1;min-width:0">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-              <h3 style="margin:0">Resume Edit Suggestions</h3>
-              <div style="display:flex;gap:6px">
-                <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-edits')">Copy</button>
-              </div>
-            </div>
-            <div class="resume-rendered" id="tailor-edits" style="max-height:380px"></div>
-          </div>
         </div>
         <details style="margin-top:16px;border:1px solid var(--border);border-radius:8px;padding:0 12px">
-          <summary style="cursor:pointer;font-size:12px;color:var(--muted);padding:10px 0;user-select:none">▸ Full Tailored Resume (for download or reference)</summary>
-          <div style="padding-bottom:12px">
-            <div style="display:flex;gap:6px;margin-bottom:8px">
-              <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-resume')">Copy</button>
-              <button class="btn btn-ghost btn-sm" onclick="downloadDocxFromModal('tailor-resume','Tailored_Resume')">⬇ Word</button>
-              <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-resume')">⬇ PDF</button>
-            </div>
-            <div class="resume-rendered" id="tailor-resume" style="max-height:350px"></div>
+          <summary style="cursor:pointer;font-size:13px;color:var(--gold);font-weight:600;padding:12px 0;user-select:none">▸ What Changed & Why</summary>
+          <div style="padding-bottom:14px">
+            <div class="resume-rendered" id="tailor-edits"></div>
           </div>
         </details>
       </div>

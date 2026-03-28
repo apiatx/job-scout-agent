@@ -672,7 +672,11 @@ The resume MUST fit the target page count. This is non-negotiable.
 - 2-page target: ${wordMin}-${wordMax} words. Expand bullets with context and achievements.
 Count your words before finalizing. If over limit, edit down. If under, enrich.
 
-PHASE 5 — COVER LETTER (the resume's human counterpart):
+PHASE 5 — REASONING LOG (after writing the resume):
+Write a clear, honest explanation of every meaningful change you made in the tailored resume — what was changed, what you removed, what you added, and exactly why. Reference the JD signals that drove each decision. Be specific: name the bullet, name the keyword, name the section. This helps the candidate understand and trust the output.
+Format it as a readable document with ### headers per section. Include a short "What was NOT changed and why" note at the end.
+
+PHASE 6 — COVER LETTER (the resume's human counterpart):
 The cover letter must sound like a real, confident person wrote it — not a robot, not an HR drone.
 
 BANNED PHRASES (use any of these and the letter fails):
@@ -736,7 +740,7 @@ Respond ONLY with a valid JSON object — no markdown fences, no text outside th
   },
   "resume": "# Full Name\\n\\n## Summary\\n[2-3 sentence power summary mirroring JD language]\\n\\n## Experience\\n**Job Title** — **Company Name** | Location | Dates\\n- [Strong verb] + [achievement] + [metric]\\n...\\n\\n## Key Skills\\n[JD-matched skills first, comma-separated]\\n\\n## Education\\n...",
   "coverLetter": "# Cover Letter\\n\\n[First name Last name]\\n[City, State | phone | email]\\n\\n[Opening paragraph: 2-3 sentences. Start with a real, specific observation about the company or role — not a compliment, a real hook. Then make the connection to why you're reaching out. No corporate filler.]\\n\\n[Middle paragraph: 2-3 sentences. Drop 1-2 specific achievements with real numbers. Connect them directly to what the role needs. Be concrete.]\\n\\n[Closing paragraph: 1-2 sentences. Direct and confident. No groveling.]\\n\\n[First name only]",
-  "suggestedEdits": "## Suggested Edits for Your Resume\\n\\nMake these targeted changes directly in your original document — no full rewrite needed. Only reframe existing facts; never add anything that isn't true.\\n\\n### Skills / Summary Section\\n- **Add keyword**: [exact JD term] — appears as required in the JD\\n- **Move to top**: [skill] — JD lists this as a primary requirement\\n- **Remove or demote**: [unrelated skill] — not mentioned in JD, wastes prime real estate\\n\\n### [Company Name] ([start]–[end])\\n- **Bullet 1** — Change: \\"[current wording]\\" → \\"[improved wording with metric + JD keyword]\\"\\n  _Why: JD requires [specific signal]; adding [metric] proves impact_\\n- **Add**: One bullet about [topic] using language like \\"[JD-mirrored phrase]\\" — JD specifically calls this out\\n\\n### [Next Company / Role]\\n- **Bullet X** — Change: \\"[current]\\" → \\"[improved]\\"\\n  _Why: [reason]_\\n\\n> **Note**: If you have exact numbers (quota %, deal sizes, headcount), slot them in where shown as placeholders — your actual figures will be stronger than estimates."
+  "suggestedEdits": "## What Changed & Why\\n\\nHere's the reasoning behind every major move made in the tailored resume:\\n\\n### Summary\\n[1-2 sentences on how the summary was repositioned and what JD signals drove it]\\n\\n### Skills Section\\n- **Added**: [keyword] — [why: required in JD / ATS must-match]\\n- **Moved up**: [skill] — [why: JD lists it as primary requirement]\\n- **Removed**: [skill] — [why: not mentioned in JD, used the space for higher-signal terms]\\n\\n### [Company Name] ([years])\\n- **Bullet X rewritten** — original focused on [X]; new version leads with [stronger verb + JD-matched outcome] because the JD signals [specific requirement]\\n- **New bullet added** — covers [topic] because JD explicitly calls out [signal]\\n\\n### [Next Company / Role]\\n- [reasoning for changes made to that role]\\n\\n### What was NOT changed and why\\n[Brief note on anything deliberately kept as-is and the rationale]"
 }`;
 
   const message = await anthropic.messages.create({
