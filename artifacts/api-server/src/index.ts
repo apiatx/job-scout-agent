@@ -4,6 +4,7 @@ import multer from 'multer';
 import * as pdfParseLib from 'pdf-parse';
 const pdfParse = (pdfParseLib as any).default ?? pdfParseLib;
 import mammoth from 'mammoth';
+import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, UnderlineType } from 'docx';
 import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, runJobSpyScraper, proxyConfigured } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
 import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier } from './agent.js';
@@ -1270,7 +1271,7 @@ app.post('/api/resumes/:id/activate', async (req: Request, res: Response) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-// Resume file upload (PDF or DOCX) — extracts text
+// Resume file upload (PDF or DOCX) — extracts text and auto-saves to DB
 app.post('/api/resume/upload', upload.single('file'), async (req: Request, res: Response) => {
   try {
     const mreq = req as any;
@@ -1292,7 +1293,112 @@ app.post('/api/resume/upload', upload.single('file'), async (req: Request, res: 
     }
     // Clean up extracted text
     text = text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-    res.json({ ok: true, text });
+
+    // Auto-save to settings (active resume) and saved_resumes
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('resume', $1) ON CONFLICT (key) DO UPDATE SET value=$1`,
+      [text]
+    );
+    // Save as named resume using the filename (strip extension)
+    const resumeName = originalname.replace(/\.[^.]+$/, '');
+    const { rows: inserted } = await pool.query(
+      `INSERT INTO saved_resumes (name, content) VALUES ($1, $2) RETURNING id`,
+      [resumeName, text]
+    );
+    const newId = inserted[0].id;
+    // Mark as active
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('active_resume_id', $1) ON CONFLICT (key) DO UPDATE SET value=$1`,
+      [String(newId)]
+    );
+
+    res.json({ ok: true, text, savedId: newId, savedName: resumeName });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Word document generation helpers ─────────────────────────────────────
+
+/** Parse inline markdown (bold/italic) into TextRun array */
+function parseInline(text: string): TextRun[] {
+  const runs: TextRun[] = [];
+  // Match **bold**, *italic*, or plain text segments
+  const re = /[*][*]([^*]+)[*][*]|[*]([^*]+)[*]|([^*]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m[1] !== undefined) runs.push(new TextRun({ text: m[1], bold: true }));
+    else if (m[2] !== undefined) runs.push(new TextRun({ text: m[2], italics: true }));
+    else if (m[3] !== undefined) runs.push(new TextRun({ text: m[3] }));
+  }
+  return runs.length ? runs : [new TextRun({ text })];
+}
+
+/** Convert Markdown text to a .docx Buffer */
+async function markdownToDocx(md: string): Promise<Buffer> {
+  const lines = md.split('\n');
+  const children: Paragraph[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (/^# /.test(line)) {
+      children.push(new Paragraph({
+        heading: HeadingLevel.HEADING_1,
+        children: parseInline(line.slice(2).trim()),
+        spacing: { after: 80 },
+      }));
+    } else if (/^## /.test(line)) {
+      children.push(new Paragraph({
+        heading: HeadingLevel.HEADING_2,
+        children: parseInline(line.slice(3).trim()),
+        spacing: { before: 240, after: 60 },
+        border: { bottom: { style: 'single', size: 4, color: '666666', space: 4 } },
+      }));
+    } else if (/^### /.test(line)) {
+      children.push(new Paragraph({
+        heading: HeadingLevel.HEADING_3,
+        children: parseInline(line.slice(4).trim()),
+        spacing: { before: 160, after: 40 },
+      }));
+    } else if (/^- /.test(line)) {
+      children.push(new Paragraph({
+        bullet: { level: 0 },
+        children: parseInline(line.slice(2).trim()),
+        spacing: { after: 40 },
+      }));
+    } else if (line.trim() === '') {
+      children.push(new Paragraph({ children: [new TextRun({ text: '' })], spacing: { after: 80 } }));
+    } else {
+      children.push(new Paragraph({
+        children: parseInline(line.trim()),
+        spacing: { after: 80 },
+      }));
+    }
+  }
+
+  const doc = new Document({
+    styles: {
+      default: {
+        document: {
+          run: { font: 'Calibri', size: 22 }, // 11pt
+        },
+      },
+    },
+    sections: [{ children }],
+  });
+
+  return Packer.toBuffer(doc);
+}
+
+// Download tailored document as Word
+app.post('/api/download-docx', async (req: Request, res: Response) => {
+  try {
+    const { text, filename } = req.body as { text: string; filename?: string };
+    if (!text) { res.status(400).json({ error: 'text is required' }); return; }
+    const buf = await markdownToDocx(text);
+    const name = (filename || 'document').replace(/[^a-zA-Z0-9_-]/g, '_') + '.docx';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+    res.end(buf);
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -2621,9 +2727,10 @@ textarea:focus,input:focus{border-color:var(--gold)}
       <div class="resume-col">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
           <div class="sec-title">Tailored Resume</div>
-          <div style="display:flex;gap:8px">
+          <div style="display:flex;gap:6px">
             <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-result-resume')">Copy</button>
-            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-result-resume')">Download PDF</button>
+            <button class="btn btn-ghost btn-sm" onclick="downloadDocx('tailor-result-resume','Tailored_Resume')">⬇ Word</button>
+            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-result-resume')">⬇ PDF</button>
           </div>
         </div>
         <div class="resume-rendered" id="tailor-result-resume"></div>
@@ -2631,9 +2738,10 @@ textarea:focus,input:focus{border-color:var(--gold)}
       <div class="resume-col">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
           <div class="sec-title">Cover Letter</div>
-          <div style="display:flex;gap:8px">
+          <div style="display:flex;gap:6px">
             <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-result-cover')">Copy</button>
-            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-result-cover')">Download PDF</button>
+            <button class="btn btn-ghost btn-sm" onclick="downloadDocx('tailor-result-cover','Cover_Letter')">⬇ Word</button>
+            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-result-cover')">⬇ PDF</button>
           </div>
         </div>
         <div class="resume-rendered" id="tailor-result-cover"></div>
@@ -2864,9 +2972,10 @@ textarea:focus,input:focus{border-color:var(--gold)}
       <div class="modal-section">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
           <h3 style="margin:0">Tailored Resume</h3>
-          <div style="display:flex;gap:8px">
+          <div style="display:flex;gap:6px">
             <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-resume')">Copy</button>
-            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-resume')">Download PDF</button>
+            <button class="btn btn-ghost btn-sm" onclick="downloadDocxFromModal('tailor-resume','Tailored_Resume')">⬇ Word</button>
+            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-resume')">⬇ PDF</button>
           </div>
         </div>
         <div class="resume-rendered" id="tailor-resume" style="max-height:350px"></div>
@@ -2874,9 +2983,10 @@ textarea:focus,input:focus{border-color:var(--gold)}
       <div class="modal-section">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
           <h3 style="margin:0">Cover Letter</h3>
-          <div style="display:flex;gap:8px">
+          <div style="display:flex;gap:6px">
             <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-cover')">Copy</button>
-            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-cover')">Download PDF</button>
+            <button class="btn btn-ghost btn-sm" onclick="downloadDocxFromModal('tailor-cover','Cover_Letter')">⬇ Word</button>
+            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-cover')">⬇ PDF</button>
           </div>
         </div>
         <div class="resume-rendered" id="tailor-cover" style="max-height:350px"></div>
@@ -3409,7 +3519,9 @@ function renderMarkdown(md) {
   return out.join('\\n');
 }
 function setRendered(id, mdText) {
-  document.getElementById(id).innerHTML = renderMarkdown(mdText);
+  var el = document.getElementById(id);
+  el.innerHTML = renderMarkdown(mdText);
+  el.dataset.md = mdText;
 }
 function copyRendered(id) {
   var text = document.getElementById(id).innerText;
@@ -3420,6 +3532,33 @@ function printResume(id) {
   el.classList.add('print-target');
   window.print();
   el.classList.remove('print-target');
+}
+async function downloadDocx(id, filename) {
+  var el = document.getElementById(id);
+  var md = el.dataset.md || el.innerText;
+  await _postDocxDownload(md, filename);
+}
+async function downloadDocxFromModal(id, filename) {
+  await downloadDocx(id, filename);
+}
+async function _postDocxDownload(md, filename) {
+  try {
+    var res = await fetch('/api/download-docx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: md, filename: filename })
+    });
+    if (!res.ok) { alert('Download failed'); return; }
+    var blob = await res.blob();
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename + '.docx';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch(e) { alert('Download error: ' + e.message); }
 }
 
 // ── resume ────────────────────────────────────────────────────────────────
@@ -3525,7 +3664,7 @@ async function uploadResumeFile(input) {
   var file = input.files[0];
   if (!file) return;
   var msg = document.getElementById('upload-msg');
-  msg.textContent = 'Extracting text from ' + file.name + '…';
+  msg.textContent = 'Uploading and saving ' + file.name + '…';
   msg.style.color = 'var(--gold)';
   var form = new FormData();
   form.append('file', file);
@@ -3534,8 +3673,10 @@ async function uploadResumeFile(input) {
     var data = await res.json();
     if (data.error) { msg.textContent = 'Error: ' + data.error; msg.style.color = 'var(--red)'; return; }
     document.getElementById('resume-text').value = data.text;
-    msg.textContent = '✓ Text extracted — review and click "Save as Active"';
+    msg.textContent = '✓ Saved as "' + data.savedName + '" — ready to use';
     msg.style.color = '#4ade80';
+    _activeResumeId = data.savedId;
+    await loadSavedResumes();
     setTimeout(function(){ msg.textContent = ''; }, 5000);
   } catch(e) { msg.textContent = 'Upload failed: ' + e.message; msg.style.color = 'var(--red)'; }
   input.value = '';
