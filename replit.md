@@ -51,7 +51,8 @@ artifacts/api-server/
 | must_have | TEXT[] | [...] | Required keywords |
 | nice_to_have | TEXT[] | [...] | Preferred keywords |
 | avoid | TEXT[] | [...] | Skip keywords |
-| min_salary | INT | 130000 | Minimum salary |
+| min_salary | INT | 130000 | Minimum base salary (hard gate) |
+| min_ote | INT | null | Minimum OTE/total comp (hard gate) |
 | work_type | TEXT | 'any' | any/remote/office/hybrid |
 | remote_strict | BOOLEAN | true | Reject remote-in-territory jobs |
 | your_name | TEXT | '' | For resume tailoring |

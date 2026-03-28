@@ -288,6 +288,7 @@ async function initDb(): Promise<void> {
   await safeAddColumn('criteria', 'stretch_score', 'INT NOT NULL DEFAULT 55');
   await safeAddColumn('criteria', 'allowed_work_modes', "TEXT[] NOT NULL DEFAULT '{}'");
   await safeAddColumn('criteria', 'experience_levels', "TEXT[] NOT NULL DEFAULT '{}'");
+  await safeAddColumn('criteria', 'min_ote', 'INT');
   // Migrate remote_strict → allowed_work_modes for existing rows
   await pool.query(`
     UPDATE criteria
@@ -678,7 +679,7 @@ app.get('/api/criteria', async (_req, res: Response) => {
 app.put('/api/criteria', async (req: Request, res: Response) => {
   try {
     const {
-      target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid,
+      target_roles, industries, min_salary, min_ote, work_type, locations, must_have, nice_to_have, avoid,
       your_name, your_email, remote_strict,
       experience_level, stretch_companies, vertical_niches, top_target_score, fast_win_score, stretch_score,
       allowed_work_modes, experience_levels, proxy_url,
@@ -697,12 +698,13 @@ app.put('/api/criteria', async (req: Request, res: Response) => {
       allowed_work_modes ?? ['remote_us'],
       experience_levels && experience_levels.length > 0 ? experience_levels : ['senior'],
       proxy_url ?? '',
+      min_ote ?? null,
     ];
     let savedRow: Record<string, unknown>;
     if (existing.length === 0) {
       const { rows } = await pool.query(
-        `INSERT INTO criteria (target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email, remote_strict, experience_level, stretch_companies, vertical_niches, top_target_score, fast_win_score, stretch_score, allowed_work_modes, experience_levels, proxy_url)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING *`, params
+        `INSERT INTO criteria (target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email, remote_strict, experience_level, stretch_companies, vertical_niches, top_target_score, fast_win_score, stretch_score, allowed_work_modes, experience_levels, proxy_url, min_ote)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING *`, params
       );
       savedRow = rows[0];
     } else {
@@ -710,8 +712,8 @@ app.put('/api/criteria', async (req: Request, res: Response) => {
         `UPDATE criteria SET target_roles=$1, industries=$2, min_salary=$3, work_type=$4, locations=$5,
          must_have=$6, nice_to_have=$7, avoid=$8, your_name=$9, your_email=$10, remote_strict=$11,
          experience_level=$12, stretch_companies=$13, vertical_niches=$14, top_target_score=$15, fast_win_score=$16, stretch_score=$17,
-         allowed_work_modes=$18, experience_levels=$19, proxy_url=$20
-         WHERE id=$21 RETURNING *`, [...params, existing[0].id]
+         allowed_work_modes=$18, experience_levels=$19, proxy_url=$20, min_ote=$21
+         WHERE id=$22 RETURNING *`, [...params, existing[0].id]
       );
       savedRow = rows[0];
     }
@@ -1004,6 +1006,8 @@ app.post('/api/jobs/rescore-all', async (_req, res: Response) => {
     const criteria = cRows[0] as any;
     const { rows: companyRows } = await pool.query('SELECT name FROM companies');
     const companyNames = companyRows.map((r: any) => r.name as string);
+    const { rows: resumeRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
+    const candidateResume: string = resumeRows[0]?.value ?? '';
     const rescorerTierSettings: TierSettings = {
       verticalNiches: criteria.vertical_niches ?? [],
       topTargetScore: criteria.top_target_score ?? 65,
@@ -1042,7 +1046,8 @@ app.post('/api/jobs/rescore-all', async (_req, res: Response) => {
           try {
             const result = await rescoreJobOpportunity(
               { id: j.id, title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.apply_url, description: j.description },
-              criteriaText, preApprovedSection, companyNames, rescorerTierSettings, criteria.min_salary ?? null
+              criteriaText, preApprovedSection, companyNames, rescorerTierSettings,
+              criteria.min_salary ?? null, candidateResume || undefined, criteria.min_ote ?? null,
             );
             if (result) {
               await pool.query(
@@ -2143,6 +2148,10 @@ async function runScoutInBackground(runId: number): Promise<void> {
       return;
     }
 
+    // Load the candidate's resume for resume-aware scoring
+    const { rows: resumeSettingRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
+    const candidateResume: string = resumeSettingRows[0]?.value ?? '';
+
     // Pass pre-approved company names from the database to Claude scoring
     // Only send genuinely new jobs (URLs not already in DB) to Claude
     const matches = await scoreJobsWithClaude(
@@ -2151,6 +2160,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
         targetRoles: criteria.target_roles,
         industries: criteria.industries,
         minSalary: criteria.min_salary,
+        minOte: criteria.min_ote ?? null,
         locations: criteria.locations,
         allowedWorkModes: criteria.allowed_work_modes ?? [],
         mustHave: criteria.must_have,
@@ -2158,6 +2168,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
         avoid: criteria.avoid,
         preApprovedCompanies: companyNames,
         tierSettings,
+        candidateResume: candidateResume || undefined,
       }
     );
 
@@ -2833,8 +2844,12 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="sec-title" style="margin-bottom:16px">Search Criteria</div>
   <div class="settings-grid">
     <div class="fg">
-      <label>Minimum Base Pay</label>
+      <label>Minimum Base Pay <span class="hint">Hard gate — jobs below this base are skipped</span></label>
       <div class="input-prefix"><span>$</span><input type="number" id="set-salary" placeholder="150000" step="5000"></div>
+    </div>
+    <div class="fg">
+      <label>Minimum OTE <span class="hint">On-Target Earnings (base + commission at quota)</span></label>
+      <div class="input-prefix"><span>$</span><input type="number" id="set-ote" placeholder="350000" step="10000"></div>
     </div>
     <div class="fg full" style="padding:14px 16px;background:#141414;border:1px solid var(--border);border-radius:8px">
       <label style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px;display:block">Work Modes <span class="hint">(select all that apply)</span></label>
@@ -3240,9 +3255,9 @@ function subScoresHtml(j) {
   if (!j.sub_scores) return '';
   var s = typeof j.sub_scores === 'string' ? JSON.parse(j.sub_scores) : j.sub_scores;
   var dims = [
-    ['roleFit','Role Fit'],['companyQuality','Company'],['locationFit','Location'],
-    ['hiringUrgency','Hiring Urgency'],['tailoringRequired','Tailoring Needed'],
-    ['referralOdds','Referral Odds'],['realVsFake','Real vs Fake']
+    ['roleFit','Role Fit'],['qualificationFit','Qualification'],['companyQuality','Company'],
+    ['locationFit','Location'],['hiringUrgency','Hiring Urgency'],
+    ['tailoringRequired','Tailoring Needed'],['referralOdds','Referral Odds'],['realVsFake','Real vs Fake']
   ];
   var rows = '';
   for (var i = 0; i < dims.length; i++) {
@@ -4105,6 +4120,7 @@ async function loadCriteria() {
       c = await res.json();
     }
     document.getElementById('set-salary').value = c.min_salary || '';
+    document.getElementById('set-ote').value = c.min_ote || '';
     document.getElementById('set-name').value = c.your_name || '';
     document.getElementById('set-email').value = c.your_email || '';
     document.getElementById('set-proxy-url').value = c.proxy_url || '';
@@ -4167,6 +4183,7 @@ async function saveCriteria() {
   if (expLevels.length === 0) expLevels = ['senior'];
   var body = {
     min_salary: Number(document.getElementById('set-salary').value) || null,
+    min_ote: Number(document.getElementById('set-ote').value) || null,
     allowed_work_modes: workModes,
     experience_levels: expLevels,
     your_name: document.getElementById('set-name').value.trim(),

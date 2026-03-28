@@ -9,13 +9,14 @@ const anthropic = new Anthropic({
 });
 
 export interface SubScores {
-  roleFit: number;          // 0-10: role title/level vs target roles
-  companyQuality: number;   // 0-10: company reputation, growth, prestige
-  locationFit: number;      // 0-10: remote/hybrid/location match
-  hiringUrgency: number;    // 0-10: active hiring signals vs stale evergreen
-  tailoringRequired: number;// 0-10: 10=minimal tailoring, 0=major overhaul needed
-  referralOdds: number;     // 0-10: likelihood of finding a warm referral
-  realVsFake: number;       // 0-10: confidence this is a genuine open role
+  roleFit: number;           // 0-10: role title/level vs target roles
+  companyQuality: number;    // 0-10: company reputation, growth, prestige
+  locationFit: number;       // 0-10: remote/hybrid/location match
+  hiringUrgency: number;     // 0-10: active hiring signals vs stale evergreen
+  tailoringRequired: number; // 0-10: 10=minimal tailoring, 0=major overhaul needed
+  referralOdds: number;      // 0-10: likelihood of finding a warm referral
+  realVsFake: number;        // 0-10: confidence this is a genuine open role
+  qualificationFit: number;  // 0-10: how well candidate's actual background matches JD requirements
 }
 
 export type OpportunityTier = 'Top Target' | 'Fast Win' | 'Stretch Role' | 'Probably Skip' | 'unscored';
@@ -38,7 +39,8 @@ export interface JobMatch {
 interface CriteriaForAgent {
   targetRoles: string[];
   industries: string[];
-  minSalary?: number | null;
+  minSalary?: number | null;   // minimum base salary
+  minOte?: number | null;      // minimum OTE (total on-target earnings)
   locations: string[];
   allowedWorkModes?: string[];
   mustHave: string[];
@@ -46,6 +48,7 @@ interface CriteriaForAgent {
   avoid: string[];
   preApprovedCompanies?: string[];
   tierSettings?: TierSettings;
+  candidateResume?: string;    // raw resume text for qualification matching
 }
 
 async function scoreOne(
@@ -55,6 +58,8 @@ async function scoreOne(
   preApprovedCompanies: string[],
   tierSettings?: TierSettings,
   minSalary?: number | null,
+  candidateResume?: string,
+  minOte?: number | null,
 ): Promise<JobMatch | null> {
   try {
     const isPreApproved = preApprovedCompanies.some(
@@ -65,18 +70,36 @@ async function scoreOne(
       companySpecificSection += `\n\nNOTE: ${job.company} is on the user's pre-approved companies list. The user has already decided this company is a target employer. Score at least 65 if the role title meaningfully matches any of the user's target roles. Only score below 65 if the role type is completely wrong (e.g. engineering, marketing, HR, finance, legal) or the location is outside the user's preferences.`;
     }
 
-    // Build salary constraint text for the prompt
-    const salaryRule = minSalary
-      ? `SALARY REQUIREMENT (hard gate):
-The candidate requires a minimum of $${minSalary.toLocaleString()} base salary.
-- If the job listing shows a salary AND the highest figure is below $${minSalary.toLocaleString()}: set matchScore=0 and isMatch=false.
-- If no salary is listed: do not penalize — mention the unknown salary in whyGoodFit.`
+    // Build salary constraint text
+    const salaryParts: string[] = [];
+    if (minSalary) {
+      salaryParts.push(`Minimum BASE salary: $${minSalary.toLocaleString()}. If the listing shows a base salary AND the highest figure is below this: set matchScore=0, isMatch=false.`);
+    }
+    if (minOte) {
+      salaryParts.push(`Minimum OTE (On-Target Earnings / total comp): $${minOte.toLocaleString()}. OTE is the total package including base + variable/commission when at 100% quota. If the listing shows an OTE AND the highest figure is below this: set matchScore=0, isMatch=false.`);
+    }
+    const salaryRule = salaryParts.length > 0
+      ? `COMPENSATION REQUIREMENTS (hard gates):\n${salaryParts.join('\n')}\nIf no salary is listed: do not penalize — mention the unknown compensation in whyGoodFit.`
       : '';
 
-    const prompt = `You are an expert career strategist evaluating job opportunities for a sales professional. Your job is to score how well each job matches the candidate's stated criteria. Do not add opinions beyond what's in the criteria.
-
+    // Candidate background section
+    const resumeSection = candidateResume
+      ? `═══════════════════════════════════════════════════
+CANDIDATE BACKGROUND (from uploaded resume)
 ═══════════════════════════════════════════════════
-CANDIDATE CRITERIA
+Read this to understand who the candidate actually IS — their real experience, past titles, industries sold into, methodologies used, deal sizes, and achievements. Use this to evaluate whether they are genuinely qualified for the role.
+
+${candidateResume.slice(0, 2500)}
+`
+      : '';
+
+    const prompt = `You are a world-class career strategist and executive recruiter who evaluates job-candidate fit with surgical precision. You understand the nuances of enterprise sales roles deeply: the difference between hunters and farmers, the difference between SMB/Commercial/Mid-Market/Enterprise/Strategic levels, industry vertical specialists vs generalists, and what methodologies like MEDDPICC, Challenger, or Command of the Message signal about a candidate.
+
+Your job: evaluate how well THIS job matches THIS specific candidate — based on their actual background (resume) AND their stated preferences.
+
+${resumeSection}
+═══════════════════════════════════════════════════
+CANDIDATE PREFERENCES & CRITERIA
 ═══════════════════════════════════════════════════
 ${criteriaText}
 
@@ -88,22 +111,25 @@ JOB TO EVALUATE
 Title: ${job.title}
 Company: ${job.company}
 Location: ${job.location}
-${job.description ? `Description: ${job.description.slice(0, 1200)}` : '(No description available)'}
+${job.description ? `Description:\n${job.description.slice(0, 1500)}` : '(No description available)'}
 
 ${companySpecificSection}
 
 ═══════════════════════════════════════════════════
 SCORING INSTRUCTIONS
 ═══════════════════════════════════════════════════
-1. matchScore (0-100): How well does this job match ALL of the candidate's criteria above?
-   - Start at 50, then adjust up/down based on each criterion.
-   - Role title match to target roles: +/-30 (biggest factor — role type must match)
-   - Location/remote match: +/-20
-   - Salary compliance: hard gate (see above)
-   - Must-have requirements met: +/-10 each
-   - Avoid keywords present: -20 each
-   - Company quality/reputation: +/-10
-   - AI displacement risk (how easily could AI agents replace this company's core product?): LOW=no penalty, MEDIUM=-5, HIGH=-20
+Score based on BOTH the candidate's preferences AND their actual qualifications from the resume.
+
+1. matchScore (0-100): Overall fit score combining preferences + actual qualification.
+   - Start at 50. Adjust up/down:
+   - Role title matches target roles: +/-25 (biggest factor)
+   - Candidate is actually qualified based on resume: +/-20 (second biggest factor)
+   - Location/remote match: +/-15
+   - Compensation meets requirements (if known): hard gate
+   - Must-have requirements met: +/-8 each
+   - Avoid keywords present: -25 each (likely disqualifier)
+   - Company quality/fit with candidate's industry background: +/-10
+   - AI displacement risk: LOW=no penalty, MEDIUM=-5, HIGH=-20
 
 2. isMatch: true if matchScore >= 60, otherwise false.
 
@@ -114,27 +140,28 @@ SCORING INSTRUCTIONS
    - MEDIUM: Complex vertical SaaS with deep integrations, proprietary data moats, specialized industry software, ERP.
    - HIGH: Generic horizontal SaaS — workflow tools, basic project management, email productivity, simple analytics, form builders.
 
-5. subScores (each 0-10, strictly objective based on criteria match):
-   - roleFit: Does the title/responsibilities precisely match the candidate's target roles? 10=exact match, 5=partial, 0=wrong role type entirely.
-   - companyQuality: Company reputation, financial health, growth trajectory. 10=elite/unicorn, 5=solid mid-market, 2=unknown startup.
-   - locationFit: How well does the job location/remote match the candidate's location preferences? 10=perfect match, 5=partial/territory, 0=wrong region with no remote.
-   - hiringUrgency: Signs of real active hiring. 10=specific unique JD with clear team context, 0=generic template copy-pasted across many cities.
-   - tailoringRequired: 10=minimal tailoring needed, 0=major overhaul required.
+5. subScores (each 0-10):
+   - roleFit: Does the title/responsibilities precisely match the candidate's target roles AND their experience level? 10=exact title+level match, 5=partial, 0=wrong type.
+   - companyQuality: Company reputation, financial health, growth stage. 10=elite/public/unicorn, 5=solid mid-market, 2=tiny unknown.
+   - locationFit: Remote/location match against candidate preferences. 10=perfect, 0=wrong region, no remote.
+   - hiringUrgency: Signs of real active hiring vs evergreen pipeline posting. 10=specific team context, 0=generic template.
+   - tailoringRequired: 10=candidate's background is a natural fit (minimal resume work), 0=significant gap (major tailoring needed).
    - referralOdds: Likelihood of finding a warm referral. 10=large well-known company, 0=tiny obscure startup.
-   - realVsFake: Confidence this is a genuine currently-open role. 10=specific unique JD, 0=generic evergreen pipeline template.
+   - realVsFake: Confidence this is a genuine currently-open role. 10=specific unique JD, 0=generic evergreen template.
+   - qualificationFit: How well does the candidate's ACTUAL background from the resume match what this JD requires? Consider: industry experience, past title level, deal sizes, methodologies, product types sold. 10=highly qualified (has done this exact work before), 5=transferable skills with some gap, 0=significant qualification mismatch.
 
-LOCATION NOTE: "Remote" alone = work from anywhere. "Remote, [City]" or "Remote ([City] area)" = must live near that city. If the candidate's locations do not include that city, score locationFit 2-4 and reduce matchScore accordingly.
+LOCATION NOTE: "Remote" alone = work from anywhere. "Remote, [City]" means must live near that city. Score locationFit 2-4 if city doesn't match candidate's locations.
 
 ═══════════════════════════════════════════════════
 REQUIRED OUTPUT — JSON ONLY, NO MARKDOWN
 ═══════════════════════════════════════════════════
 {
   "matchScore": <0-100 integer>,
-  "whyGoodFit": "<2-3 sentences explaining the match or mismatch against the candidate's specific criteria>",
+  "whyGoodFit": "<2-3 sentences that SPECIFICALLY reference the candidate's background and why this role does or doesn't fit — mention their past titles, industries, or specific experience. Not generic statements.>",
   "isMatch": <true if matchScore >= 60, else false>,
   "isHardware": <true | false>,
   "aiRisk": <"LOW" | "MEDIUM" | "HIGH">,
-  "aiRiskReason": "<one sentence on AI displacement risk>",
+  "aiRiskReason": "<one sentence on AI displacement risk for this company's product>",
   "subScores": {
     "roleFit": <0-10>,
     "companyQuality": <0-10>,
@@ -142,7 +169,8 @@ REQUIRED OUTPUT — JSON ONLY, NO MARKDOWN
     "hiringUrgency": <0-10>,
     "tailoringRequired": <0-10>,
     "referralOdds": <0-10>,
-    "realVsFake": <0-10>
+    "realVsFake": <0-10>,
+    "qualificationFit": <0-10>
   }
 }`;
 
@@ -171,6 +199,7 @@ REQUIRED OUTPUT — JSON ONLY, NO MARKDOWN
         tailoringRequired?: number;
         referralOdds?: number;
         realVsFake?: number;
+        qualificationFit?: number;
       };
     };
 
@@ -183,13 +212,14 @@ REQUIRED OUTPUT — JSON ONLY, NO MARKDOWN
     }
 
     const subScores: SubScores = {
-      roleFit:           Math.min(10, Math.max(0, parsed.subScores?.roleFit ?? 5)),
-      companyQuality:    Math.min(10, Math.max(0, parsed.subScores?.companyQuality ?? 5)),
-      locationFit:       Math.min(10, Math.max(0, parsed.subScores?.locationFit ?? 5)),
-      hiringUrgency:     Math.min(10, Math.max(0, parsed.subScores?.hiringUrgency ?? 5)),
-      tailoringRequired: Math.min(10, Math.max(0, parsed.subScores?.tailoringRequired ?? 5)),
-      referralOdds:      Math.min(10, Math.max(0, parsed.subScores?.referralOdds ?? 5)),
-      realVsFake:        Math.min(10, Math.max(0, parsed.subScores?.realVsFake ?? 5)),
+      roleFit:            Math.min(10, Math.max(0, parsed.subScores?.roleFit ?? 5)),
+      companyQuality:     Math.min(10, Math.max(0, parsed.subScores?.companyQuality ?? 5)),
+      locationFit:        Math.min(10, Math.max(0, parsed.subScores?.locationFit ?? 5)),
+      hiringUrgency:      Math.min(10, Math.max(0, parsed.subScores?.hiringUrgency ?? 5)),
+      tailoringRequired:  Math.min(10, Math.max(0, parsed.subScores?.tailoringRequired ?? 5)),
+      referralOdds:       Math.min(10, Math.max(0, parsed.subScores?.referralOdds ?? 5)),
+      realVsFake:         Math.min(10, Math.max(0, parsed.subScores?.realVsFake ?? 5)),
+      qualificationFit:   Math.min(10, Math.max(0, parsed.subScores?.qualificationFit ?? 5)),
     };
 
     // Tier is ALWAYS computed from user settings — Claude does not assign tier.
@@ -320,12 +350,23 @@ export function computeTier(
     return 'Stretch Role';
   }
 
-  const isQualityCompany = s.companyQuality >= 7;
-  const goodRoleFit      = s.roleFit >= 6;
+  const isQualityCompany  = s.companyQuality >= 7;
+  const goodRoleFit       = s.roleFit >= 6;
+  // qualificationFit is a new field — legacy jobs (scored before this feature) have it undefined.
+  // When undefined, do NOT apply any qualification gates so existing jobs are never downgraded.
+  const qualFitRaw      = s.qualificationFit;
+  const qualFitKnown    = qualFitRaw !== undefined && qualFitRaw !== null;
+  const qualFit         = qualFitRaw ?? 7; // treat legacy as "well qualified" — no penalty
+  const strongQualFit   = !qualFitKnown || qualFit >= 7;
+  const weakQualFit     = qualFitKnown && qualFit < 4;
+
+  // Hard downgrade: candidate is significantly underqualified (only applied when score is known)
+  if (weakQualFit && matchScore < topTargetScore) return 'Probably Skip';
 
   // TOP TARGET: Accessible role + high score + quality company + strong role fit
+  // qualificationFit gate is only applied when the score was actually computed
   if (isAccessibleRole && matchScore >= topTargetScore && isQualityCompany && goodRoleFit &&
-      s.realVsFake >= 6) {
+      s.realVsFake >= 6 && (strongQualFit || qualFit >= 6)) {
     return 'Top Target';
   }
 
@@ -355,11 +396,13 @@ export async function rescoreJobOpportunity(
   preApprovedCompanies: string[],
   tierSettings?: TierSettings,
   minSalary?: number | null,
+  candidateResume?: string,
+  minOte?: number | null,
 ): Promise<{ opportunityTier: OpportunityTier; subScores: SubScores; aiRisk: string; aiRiskReason: string; whyGoodFit: string; matchScore: number } | null> {
   try {
     const result = await scoreOne(
       { title: job.title, company: job.company, location: job.location, salary: job.salary, applyUrl: job.applyUrl, description: job.description },
-      criteriaText, preApprovedSection, preApprovedCompanies, tierSettings, minSalary
+      criteriaText, preApprovedSection, preApprovedCompanies, tierSettings, minSalary, candidateResume, minOte,
     );
     if (!result) return null;
     return {
@@ -494,7 +537,14 @@ Pre-approved companies: ${criteria.preApprovedCompanies.join(', ')}`;
     const batch = jobs.slice(i, i + CONCURRENCY);
     console.log(`Scoring batch ${Math.floor(i / CONCURRENCY) + 1}/${Math.ceil(jobs.length / CONCURRENCY)} (${batch.length} jobs)...`);
     const batchResults = await Promise.all(
-      batch.map((j) => scoreOne(j, criteriaText, preApprovedSection, criteria.preApprovedCompanies ?? [], criteria.tierSettings, criteria.minSalary))
+      batch.map((j) => scoreOne(
+        j, criteriaText, preApprovedSection,
+        criteria.preApprovedCompanies ?? [],
+        criteria.tierSettings,
+        criteria.minSalary,
+        criteria.candidateResume,
+        criteria.minOte,
+      ))
     );
     for (const r of batchResults) {
       if (r !== null) results.push(r);
