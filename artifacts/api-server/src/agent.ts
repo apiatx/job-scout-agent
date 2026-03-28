@@ -598,10 +598,10 @@ ${job.why_good_fit ? `Why it's a good fit: ${job.why_good_fit}` : ''}
 CANDIDATE'S BASE RESUME:
 ${baseResume}
 
-Respond ONLY with a JSON object (no markdown, no extra text):
+Respond ONLY with a JSON object (no extra text outside the JSON):
 {
-  "resume": "<the full tailored resume text, formatted with clear sections>",
-  "coverLetter": "<the full cover letter>"
+  "resume": "<the full tailored resume in Markdown format — use # for name, ## for section headers (Summary, Experience, Skills, Education), **bold** for job titles and company names, and - bullet points for achievements>",
+  "coverLetter": "<the full cover letter in Markdown format — use ## for greeting/opening/closing headers, paragraphs separated by blank lines>"
 }`;
 
   const message = await anthropic.messages.create({

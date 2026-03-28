@@ -33,7 +33,8 @@ artifacts/api-server/
 - `criteria` — All user-configurable search settings
 - `companies` — Target companies (greenhouse/lever/workday/plain types)
 - `jobs` — Job matches with AI scores, tiers, sub_scores JSONB
-- `settings` — Key/value store (resume text, schedule, etc.)
+- `settings` — Key/value store (resume text, active_resume_id, schedule, etc.)
+- `saved_resumes` — Named resume versions (id, name, content, created_at)
 - `scout_runs` — Run history
 - `tailored_docs` — Generated resumes/cover letters per job
 - `research_briefs` — Claude company research cache

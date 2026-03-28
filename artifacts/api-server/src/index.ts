@@ -1,5 +1,9 @@
 import express, { type Request, type Response } from 'express';
 import pg from 'pg';
+import multer from 'multer';
+import * as pdfParseLib from 'pdf-parse';
+const pdfParse = (pdfParseLib as any).default ?? pdfParseLib;
+import mammoth from 'mammoth';
 import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, runJobSpyScraper, proxyConfigured } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
 import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier } from './agent.js';
@@ -19,6 +23,9 @@ if (!process.env.DATABASE_URL) {
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
 app.use(express.json({ limit: '2mb' }));
+
+// Multer — in-memory storage for resume file uploads (PDF / DOCX)
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 // ── Health check — MUST be the very first route for Replit ────────────────
 app.get('/health', (_req, res) => { res.status(200).json({ status: 'ok' }); });
@@ -253,6 +260,13 @@ async function initDb(): Promise<void> {
       company_name TEXT NOT NULL,
       data_json    JSONB NOT NULL,
       created_at   TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS saved_resumes (
+      id         SERIAL PRIMARY KEY,
+      name       TEXT NOT NULL,
+      content    TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
 
@@ -1196,6 +1210,89 @@ app.put('/api/resume', async (req: Request, res: Response) => {
       [resume ?? '']
     );
     res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Saved resumes — list
+app.get('/api/resumes', async (_req, res: Response) => {
+  try {
+    const { rows } = await pool.query('SELECT id, name, LEFT(content, 120) AS preview, created_at FROM saved_resumes ORDER BY created_at DESC');
+    const { rows: active } = await pool.query("SELECT value FROM settings WHERE key='active_resume_id'");
+    res.json({ resumes: rows, activeId: active[0]?.value ? Number(active[0].value) : null });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Saved resumes — get one (full content)
+app.get('/api/resumes/:id', async (req: Request, res: Response) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM saved_resumes WHERE id=$1', [Number(req.params.id)]);
+    if (!rows.length) { res.status(404).json({ error: 'Not found' }); return; }
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Saved resumes — create / rename
+app.post('/api/resumes', async (req: Request, res: Response) => {
+  try {
+    const { name, content } = req.body;
+    if (!name || !content) { res.status(400).json({ error: 'name and content required' }); return; }
+    const { rows } = await pool.query(
+      'INSERT INTO saved_resumes (name, content) VALUES ($1, $2) RETURNING *',
+      [name, content]
+    );
+    res.json({ ok: true, resume: rows[0] });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Saved resumes — delete
+app.delete('/api/resumes/:id', async (req: Request, res: Response) => {
+  try {
+    await pool.query('DELETE FROM saved_resumes WHERE id=$1', [Number(req.params.id)]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Saved resumes — activate (loads content into active settings resume)
+app.post('/api/resumes/:id/activate', async (req: Request, res: Response) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM saved_resumes WHERE id=$1', [Number(req.params.id)]);
+    if (!rows.length) { res.status(404).json({ error: 'Not found' }); return; }
+    const r = rows[0];
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('resume', $1) ON CONFLICT (key) DO UPDATE SET value=$1`,
+      [r.content]
+    );
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('active_resume_id', $1) ON CONFLICT (key) DO UPDATE SET value=$1`,
+      [String(r.id)]
+    );
+    res.json({ ok: true, resume: r });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// Resume file upload (PDF or DOCX) — extracts text
+app.post('/api/resume/upload', upload.single('file'), async (req: Request, res: Response) => {
+  try {
+    const mreq = req as any;
+    if (!mreq.file) { res.status(400).json({ error: 'No file uploaded' }); return; }
+    const { mimetype, buffer, originalname } = mreq.file as { mimetype: string; buffer: Buffer; originalname: string };
+    let text = '';
+    if (mimetype === 'application/pdf' || originalname.toLowerCase().endsWith('.pdf')) {
+      const parsed = await pdfParse(buffer);
+      text = parsed.text;
+    } else if (
+      mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+      originalname.toLowerCase().endsWith('.docx')
+    ) {
+      const result = await mammoth.extractRawText({ buffer });
+      text = result.value;
+    } else {
+      res.status(400).json({ error: 'Unsupported file type. Upload a PDF or Word (.docx) file.' });
+      return;
+    }
+    // Clean up extracted text
+    text = text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    res.json({ ok: true, text });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -2343,6 +2440,33 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .resume-split{display:grid;grid-template-columns:1fr 1fr;gap:20px}
 @media(max-width:800px){.resume-split{grid-template-columns:1fr}}
 .resume-col{display:flex;flex-direction:column}
+/* resume toolbar */
+.resume-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.resume-dropdown-wrap{position:relative;display:inline-block}
+.resume-dropdown{position:absolute;top:calc(100% + 4px);left:0;min-width:280px;background:var(--surface);border:1px solid var(--border);border-radius:8px;z-index:100;box-shadow:0 8px 32px rgba(0,0,0,.35);overflow:hidden}
+.resume-dropdown-item{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;font-size:13px;cursor:pointer;color:var(--text)}
+.resume-dropdown-item:hover{background:var(--bg)}
+.resume-dropdown-item.active-r{border-left:3px solid var(--gold)}
+.resume-dropdown-empty{padding:12px 14px;color:var(--muted);font-size:12px}
+.resume-dd-name{font-weight:600;flex:1}
+.resume-dd-preview{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px}
+.resume-dd-del{background:none;border:none;color:var(--muted);cursor:pointer;padding:2px 6px;border-radius:4px;font-size:14px}
+.resume-dd-del:hover{color:var(--red)}
+/* save-name modal */
+.save-name-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+/* formatted resume output */
+.resume-rendered{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:20px;font-size:13px;line-height:1.75;color:var(--text);max-height:600px;overflow-y:auto}
+.resume-rendered h1{font-size:20px;font-weight:700;color:var(--text);margin:0 0 4px}
+.resume-rendered h2{font-size:13px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:.08em;margin:16px 0 6px;border-bottom:1px solid var(--border);padding-bottom:4px}
+.resume-rendered h3{font-size:13px;font-weight:600;color:var(--text);margin:10px 0 4px}
+.resume-rendered p{margin:0 0 6px;white-space:pre-wrap}
+.resume-rendered ul{margin:0 0 8px;padding-left:20px}
+.resume-rendered li{margin-bottom:3px}
+.resume-rendered strong{color:var(--text);font-weight:700}
+/* upload zone */
+.upload-zone{border:2px dashed var(--border);border-radius:8px;padding:12px 16px;display:flex;align-items:center;gap:10px;cursor:pointer;color:var(--muted);font-size:12px;transition:border-color .2s}
+.upload-zone:hover{border-color:var(--gold);color:var(--text)}
+@media print{body *{visibility:hidden}.print-target,.print-target *{visibility:visible}.print-target{position:fixed;top:0;left:0;width:100%;background:#fff;color:#000;padding:40px;font-size:13px;line-height:1.7}.print-target h1{font-size:22px;font-weight:700;margin-bottom:4px}.print-target h2{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin:16px 0 6px;border-bottom:1px solid #ccc;padding-bottom:4px}.print-target h3{font-size:13px;font-weight:600;margin:10px 0 4px}.print-target ul{padding-left:20px}.print-target li{margin-bottom:3px}}
 
 /* email tab */
 .email-section{max-width:100%}
@@ -2452,35 +2576,67 @@ textarea:focus,input:focus{border-color:var(--gold)}
 </div>
 
 <div class="panel" id="panel-resume">
+  <!-- Toolbar: saved resumes picker + upload -->
+  <div class="resume-toolbar">
+    <div class="resume-dropdown-wrap" id="resume-dd-wrap">
+      <button class="btn btn-ghost btn-sm" onclick="toggleResumeDropdown()" id="resume-dd-btn">Saved Resumes ▾</button>
+      <div class="resume-dropdown" id="resume-dropdown" style="display:none">
+        <div id="resume-dd-list"><div class="resume-dropdown-empty">No saved resumes yet.</div></div>
+        <div style="border-top:1px solid var(--border);padding:10px 14px">
+          <div class="save-name-row">
+            <input type="text" id="resume-save-name" placeholder="Name this resume…" style="flex:1;padding:6px 10px;font-size:12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text)">
+            <button class="btn btn-gold btn-sm" onclick="saveNamedResume()">Save Current</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <label class="upload-zone" style="cursor:pointer">
+      <span>📎 Upload PDF or Word doc</span>
+      <input type="file" accept=".pdf,.docx" style="display:none" onchange="uploadResumeFile(this)">
+    </label>
+    <span id="upload-msg" style="font-size:12px;color:var(--muted)"></span>
+  </div>
+
   <div class="resume-split">
     <div class="resume-col">
-      <div class="sec-title" style="margin-bottom:8px">Base Resume</div>
-      <textarea id="resume-text" rows="20" placeholder="Paste your full resume here..."></textarea>
+      <div class="sec-title" style="margin-bottom:8px">Base Resume <span id="active-resume-label" style="color:var(--gold);font-weight:400;font-size:11px"></span></div>
+      <textarea id="resume-text" rows="20" placeholder="Paste your full resume here, or upload a PDF/Word file above…"></textarea>
       <div class="save-row">
-        <button class="btn btn-gold btn-sm" onclick="saveResume()">Save Resume</button>
+        <button class="btn btn-gold btn-sm" onclick="saveResume()">Save as Active</button>
         <span class="ok-msg" id="resume-msg" style="display:none">Saved!</span>
       </div>
     </div>
     <div class="resume-col">
       <div class="sec-title" style="margin-bottom:8px">Job Description</div>
-      <textarea id="job-desc-text" rows="20" placeholder="Paste the job listing description here..."></textarea>
+      <textarea id="job-desc-text" rows="20" placeholder="Paste the job listing description here…"></textarea>
       <div class="save-row">
         <button class="btn btn-gold" onclick="tailorFromDesc()">Tailor Resume</button>
         <span id="tailor-inline-msg" style="font-size:12px;color:var(--muted)"></span>
       </div>
     </div>
   </div>
+
   <div id="tailor-result" style="display:none;margin-top:24px">
     <div class="resume-split">
       <div class="resume-col">
-        <div class="sec-title" style="margin-bottom:8px">Tailored Resume</div>
-        <div class="modal-text" id="tailor-result-resume" style="max-height:500px"></div>
-        <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="copyText('tailor-result-resume')">Copy Resume</button>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div class="sec-title">Tailored Resume</div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-result-resume')">Copy</button>
+            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-result-resume')">Download PDF</button>
+          </div>
+        </div>
+        <div class="resume-rendered" id="tailor-result-resume"></div>
       </div>
       <div class="resume-col">
-        <div class="sec-title" style="margin-bottom:8px">Cover Letter</div>
-        <div class="modal-text" id="tailor-result-cover" style="max-height:500px"></div>
-        <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="copyText('tailor-result-cover')">Copy Cover Letter</button>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div class="sec-title">Cover Letter</div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-result-cover')">Copy</button>
+            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-result-cover')">Download PDF</button>
+          </div>
+        </div>
+        <div class="resume-rendered" id="tailor-result-cover"></div>
       </div>
     </div>
   </div>
@@ -2706,14 +2862,24 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div id="tailor-loading" style="text-align:center;padding:32px;color:var(--muted)">Generating tailored resume &amp; cover letter with Claude...</div>
     <div id="tailor-content" style="display:none">
       <div class="modal-section">
-        <h3>Tailored Resume</h3>
-        <div class="modal-text" id="tailor-resume"></div>
-        <button class="btn btn-ghost btn-sm copy-btn" onclick="copyText('tailor-resume')">Copy Resume</button>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <h3 style="margin:0">Tailored Resume</h3>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-resume')">Copy</button>
+            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-resume')">Download PDF</button>
+          </div>
+        </div>
+        <div class="resume-rendered" id="tailor-resume" style="max-height:350px"></div>
       </div>
       <div class="modal-section">
-        <h3>Cover Letter</h3>
-        <div class="modal-text" id="tailor-cover"></div>
-        <button class="btn btn-ghost btn-sm copy-btn" onclick="copyText('tailor-cover')">Copy Cover Letter</button>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <h3 style="margin:0">Cover Letter</h3>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-cover')">Copy</button>
+            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-cover')">Download PDF</button>
+          </div>
+        </div>
+        <div class="resume-rendered" id="tailor-cover" style="max-height:350px"></div>
       </div>
     </div>
   </div>
@@ -3212,12 +3378,141 @@ async function loadRuns() {
   }
 }
 
+// ── Markdown renderer (simple, no deps) ──────────────────────────────────
+function renderMarkdown(md) {
+  if (!md) return '';
+  var reBold = new RegExp('[*][*](.+?)[*][*]', 'g');
+  var reItal = new RegExp('[*]([^*]+?)[*]', 'g');
+  function inlineEsc(raw) {
+    var s = raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return s.replace(reBold,'<strong>$1</strong>').replace(reItal,'<em>$1</em>');
+  }
+  var rows = md.split('\\n');
+  var out = [];
+  var i = 0;
+  while (i < rows.length) {
+    var row = rows[i];
+    if (/^### /.test(row))     { out.push('<h3>' + inlineEsc(row.slice(4)) + '</h3>'); i++; }
+    else if (/^## /.test(row)) { out.push('<h2>' + inlineEsc(row.slice(3)) + '</h2>'); i++; }
+    else if (/^# /.test(row))  { out.push('<h1>' + inlineEsc(row.slice(2)) + '</h1>'); i++; }
+    else if (/^- /.test(row)) {
+      var items = [];
+      while (i < rows.length && /^- /.test(rows[i])) {
+        items.push('<li>' + inlineEsc(rows[i].slice(2)) + '</li>');
+        i++;
+      }
+      out.push('<ul>' + items.join('') + '</ul>');
+    }
+    else if (row.trim() === '') { out.push(''); i++; }
+    else { out.push('<p>' + inlineEsc(row) + '</p>'); i++; }
+  }
+  return out.join('\\n');
+}
+function setRendered(id, mdText) {
+  document.getElementById(id).innerHTML = renderMarkdown(mdText);
+}
+function copyRendered(id) {
+  var text = document.getElementById(id).innerText;
+  navigator.clipboard.writeText(text);
+}
+function printResume(id) {
+  var el = document.getElementById(id);
+  el.classList.add('print-target');
+  window.print();
+  el.classList.remove('print-target');
+}
+
 // ── resume ────────────────────────────────────────────────────────────────
+var _savedResumes = [];
+var _activeResumeId = null;
+
 async function loadResume() {
   var res = await fetch('/api/resume');
   var data = await res.json();
   document.getElementById('resume-text').value = data.resume || '';
+  await loadSavedResumes();
 }
+
+async function loadSavedResumes() {
+  var res = await fetch('/api/resumes');
+  var data = await res.json();
+  _savedResumes = data.resumes || [];
+  _activeResumeId = data.activeId;
+  renderResumeDropdown();
+  var label = document.getElementById('active-resume-label');
+  if (_activeResumeId) {
+    var active = _savedResumes.find(function(r){return r.id===_activeResumeId;});
+    label.textContent = active ? '— ' + active.name : '';
+  } else { label.textContent = ''; }
+}
+
+function renderResumeDropdown() {
+  var list = document.getElementById('resume-dd-list');
+  if (!_savedResumes.length) {
+    list.innerHTML = '<div class="resume-dropdown-empty">No saved resumes yet. Name and save one below.</div>';
+    return;
+  }
+  list.innerHTML = _savedResumes.map(function(r){
+    var isActive = r.id === _activeResumeId;
+    return '<div class="resume-dropdown-item' + (isActive?' active-r':'') + '">' +
+      '<div style="flex:1;min-width:0" onclick="activateResume(' + r.id + ')">' +
+        '<div class="resume-dd-name">' + esc(r.name) + (isActive?' ✓':'') + '</div>' +
+        '<div class="resume-dd-preview">' + esc(r.preview || '') + '</div>' +
+      '</div>' +
+      '<button class="resume-dd-del" onclick="deleteResume(' + r.id + ',event)" title="Delete">✕</button>' +
+    '</div>';
+  }).join('');
+}
+
+function toggleResumeDropdown() {
+  var dd = document.getElementById('resume-dropdown');
+  var isOpen = dd.style.display !== 'none';
+  dd.style.display = isOpen ? 'none' : '';
+  if (!isOpen) {
+    // close on outside click
+    setTimeout(function(){
+      document.addEventListener('click', function closeDD(e){
+        if (!document.getElementById('resume-dd-wrap').contains(e.target)) {
+          dd.style.display = 'none';
+          document.removeEventListener('click', closeDD);
+        }
+      });
+    }, 0);
+  }
+}
+
+async function activateResume(id) {
+  var res = await fetch('/api/resumes/' + id + '/activate', { method:'POST' });
+  var data = await res.json();
+  if (data.ok) {
+    document.getElementById('resume-text').value = data.resume.content;
+    document.getElementById('resume-dropdown').style.display = 'none';
+    _activeResumeId = id;
+    await loadSavedResumes();
+  }
+}
+
+async function saveNamedResume() {
+  var name = document.getElementById('resume-save-name').value.trim();
+  var content = document.getElementById('resume-text').value.trim();
+  if (!name) { alert('Please enter a name for this resume.'); return; }
+  if (!content) { alert('Please paste or upload your resume text first.'); return; }
+  var res = await fetch('/api/resumes', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, content}) });
+  var data = await res.json();
+  if (data.ok) {
+    document.getElementById('resume-save-name').value = '';
+    await loadSavedResumes();
+  }
+}
+
+async function deleteResume(id, e) {
+  e.stopPropagation();
+  if (!confirm('Delete this saved resume?')) return;
+  await fetch('/api/resumes/' + id, { method:'DELETE' });
+  if (_activeResumeId === id) _activeResumeId = null;
+  await loadSavedResumes();
+}
+
 async function saveResume() {
   var text = document.getElementById('resume-text').value;
   await fetch('/api/resume', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({resume:text}) });
@@ -3225,6 +3520,27 @@ async function saveResume() {
   msg.style.display = '';
   setTimeout(function(){ msg.style.display = 'none'; }, 2500);
 }
+
+async function uploadResumeFile(input) {
+  var file = input.files[0];
+  if (!file) return;
+  var msg = document.getElementById('upload-msg');
+  msg.textContent = 'Extracting text from ' + file.name + '…';
+  msg.style.color = 'var(--gold)';
+  var form = new FormData();
+  form.append('file', file);
+  try {
+    var res = await fetch('/api/resume/upload', { method:'POST', body: form });
+    var data = await res.json();
+    if (data.error) { msg.textContent = 'Error: ' + data.error; msg.style.color = 'var(--red)'; return; }
+    document.getElementById('resume-text').value = data.text;
+    msg.textContent = '✓ Text extracted — review and click "Save as Active"';
+    msg.style.color = '#4ade80';
+    setTimeout(function(){ msg.textContent = ''; }, 5000);
+  } catch(e) { msg.textContent = 'Upload failed: ' + e.message; msg.style.color = 'var(--red)'; }
+  input.value = '';
+}
+
 async function tailorFromDesc() {
   var resume = document.getElementById('resume-text').value.trim();
   var jobDesc = document.getElementById('job-desc-text').value.trim();
@@ -3238,8 +3554,8 @@ async function tailorFromDesc() {
     var res = await fetch('/api/tailor-freeform', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({resume:resume, jobDescription:jobDesc}) });
     var data = await res.json();
     if (data.error) { msg.textContent = 'Error: ' + data.error; msg.style.color = 'var(--red)'; return; }
-    document.getElementById('tailor-result-resume').textContent = data.resume_text || '';
-    document.getElementById('tailor-result-cover').textContent = data.cover_letter || '';
+    setRendered('tailor-result-resume', data.resume_text || '');
+    setRendered('tailor-result-cover', data.cover_letter || '');
     document.getElementById('tailor-result').style.display = '';
     msg.textContent = '';
   } catch(e) { msg.textContent = 'Error: ' + e.message; msg.style.color = 'var(--red)'; }
@@ -3271,8 +3587,8 @@ async function tailorResume(jobId) {
       document.getElementById('tailor-loading').textContent = 'Error: ' + data.error;
       return;
     }
-    document.getElementById('tailor-resume').textContent = data.resume_text || '';
-    document.getElementById('tailor-cover').textContent = data.cover_letter || '';
+    setRendered('tailor-resume', data.resume_text || '');
+    setRendered('tailor-cover', data.cover_letter || '');
     document.getElementById('tailor-loading').style.display = 'none';
     document.getElementById('tailor-content').style.display = '';
   } catch(e) {
