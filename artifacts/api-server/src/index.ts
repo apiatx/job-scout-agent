@@ -1470,7 +1470,7 @@ app.post('/api/tailor/:jobId', async (req: Request, res: Response) => {
       `INSERT INTO tailored_docs (job_id, resume_text, cover_letter) VALUES ($1, $2, $3) RETURNING *`,
       [jobId, result.resume, result.coverLetter]
     );
-    res.json({ ...inserted[0], analysis: result.analysis });
+    res.json({ ...inserted[0], analysis: result.analysis, suggested_edits: result.suggestedEdits ?? '' });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -1491,7 +1491,7 @@ app.post('/api/tailor-freeform', async (req: Request, res: Response) => {
       description: jobDescription,
     };
     const result = await tailorResumeWithClaude(fakeJob, resume, { targetPages });
-    res.json({ resume_text: result.resume, cover_letter: result.coverLetter, analysis: result.analysis });
+    res.json({ resume_text: result.resume, cover_letter: result.coverLetter, suggested_edits: result.suggestedEdits ?? '', analysis: result.analysis });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -2626,22 +2626,6 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .page-toggle{display:flex;gap:0;border:1px solid var(--border);border-radius:6px;overflow:hidden}
 .page-toggle-btn{padding:5px 14px;font-size:12px;font-weight:600;background:transparent;border:none;color:var(--muted);cursor:pointer;transition:all .15s}
 .page-toggle-btn.active{background:var(--gold);color:#000}
-/* resume view toggle */
-.rvt{display:flex;gap:0;border:1px solid var(--border);border-radius:6px;overflow:hidden}
-.rvt-btn{background:transparent;border:none;color:var(--muted);font-size:11px;padding:4px 10px;cursor:pointer;transition:background .15s,color .15s;font-family:inherit}
-.rvt-btn:hover{background:rgba(255,255,255,.05);color:var(--text)}
-.rvt-btn.active{background:var(--gold);color:#1a1207;font-weight:600}
-.resume-formatted-view{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px 20px;font-size:13px;line-height:1.75;color:var(--text);max-height:500px;overflow-y:auto}
-.resume-formatted-view h1{font-size:20px;font-weight:700;color:var(--text);margin:0 0 4px}
-.resume-formatted-view h2{font-size:12px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:.1em;margin:18px 0 6px;border-bottom:1px solid var(--border);padding-bottom:4px}
-.resume-formatted-view h3{font-size:13px;font-weight:600;color:var(--text);margin:10px 0 2px}
-.resume-formatted-view p{margin:2px 0;white-space:pre-wrap}
-.resume-formatted-view ul{margin:4px 0 8px;padding-left:18px}
-.resume-formatted-view li{margin-bottom:2px}
-.resume-formatted-view strong,.resume-formatted-view b{color:var(--text);font-weight:700}
-.resume-formatted-view em,.resume-formatted-view i{font-style:italic}
-.resume-formatted-view a{color:var(--gold);text-decoration:none}
-.resume-formatted-view .empty-hint{color:var(--muted);font-size:12px;text-align:center;padding:40px 0}
 /* tailoring analysis panel */
 .tailor-analysis{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:16px;font-size:12px}
 .tailor-analysis-title{font-size:11px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px}
@@ -2794,13 +2778,8 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="resume-col">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
         <div class="sec-title">Base Resume <span id="active-resume-label" style="color:var(--gold);font-weight:400;font-size:11px"></span></div>
-        <div class="rvt" id="resume-view-toggle">
-          <button class="rvt-btn active" id="rvt-formatted" onclick="setResumeView('formatted')">Formatted</button>
-          <button class="rvt-btn" id="rvt-edit" onclick="setResumeView('edit')">Edit Text</button>
-        </div>
       </div>
-      <div class="resume-formatted-view" id="resume-formatted-view"><div class="empty-hint">Upload a PDF or Word doc above, or switch to Edit Text to paste your resume.</div></div>
-      <textarea id="resume-text" rows="20" placeholder="Paste your full resume here, or upload a PDF/Word file above…" style="display:none" oninput="_resumeHtmlDirty=true"></textarea>
+      <textarea id="resume-text" rows="20" placeholder="Paste your full resume here, or upload a PDF/Word file above…"></textarea>
       <div class="save-row">
         <button class="btn btn-gold btn-sm" onclick="saveResume()">Save as Active</button>
         <span class="ok-msg" id="resume-msg" style="display:none">Saved!</span>
@@ -2821,17 +2800,6 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="resume-split">
       <div class="resume-col">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-          <div class="sec-title">Tailored Resume</div>
-          <div style="display:flex;gap:6px">
-            <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-result-resume')">Copy</button>
-            <button class="btn btn-ghost btn-sm" onclick="downloadDocx('tailor-result-resume','Tailored_Resume')">⬇ Word</button>
-            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-result-resume')">⬇ PDF</button>
-          </div>
-        </div>
-        <div class="resume-rendered" id="tailor-result-resume"></div>
-      </div>
-      <div class="resume-col">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
           <div class="sec-title">Cover Letter</div>
           <div style="display:flex;gap:6px">
             <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-result-cover')">Copy</button>
@@ -2841,7 +2809,27 @@ textarea:focus,input:focus{border-color:var(--gold)}
         </div>
         <div class="resume-rendered" id="tailor-result-cover"></div>
       </div>
+      <div class="resume-col">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div class="sec-title">Resume Edit Suggestions</div>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-result-edits')">Copy</button>
+          </div>
+        </div>
+        <div class="resume-rendered" id="tailor-result-edits"></div>
+      </div>
     </div>
+    <details style="margin-top:16px;border:1px solid var(--border);border-radius:8px;padding:0 12px">
+      <summary style="cursor:pointer;font-size:12px;color:var(--muted);padding:10px 0;user-select:none">▸ Full Tailored Resume (for download or reference)</summary>
+      <div style="padding-bottom:12px">
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-result-resume')">Copy</button>
+          <button class="btn btn-ghost btn-sm" onclick="downloadDocx('tailor-result-resume','Tailored_Resume')">⬇ Word</button>
+          <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-result-resume')">⬇ PDF</button>
+        </div>
+        <div class="resume-rendered" id="tailor-result-resume"></div>
+      </div>
+    </details>
   </div>
 </div>
 
@@ -3078,26 +3066,39 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div id="tailor-content" style="display:none">
       <div class="modal-section">
         <div id="tailor-analysis-modal" style="display:none" class="tailor-analysis"></div>
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-          <h3 style="margin:0">Tailored Resume</h3>
-          <div style="display:flex;gap:6px">
-            <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-resume')">Copy</button>
-            <button class="btn btn-ghost btn-sm" onclick="downloadDocxFromModal('tailor-resume','Tailored_Resume')">⬇ Word</button>
-            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-resume')">⬇ PDF</button>
+        <div style="display:flex;gap:16px">
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <h3 style="margin:0">Cover Letter</h3>
+              <div style="display:flex;gap:6px">
+                <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-cover')">Copy</button>
+                <button class="btn btn-ghost btn-sm" onclick="downloadDocxFromModal('tailor-cover','Cover_Letter')">⬇ Word</button>
+                <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-cover')">⬇ PDF</button>
+              </div>
+            </div>
+            <div class="resume-rendered" id="tailor-cover" style="max-height:380px"></div>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <h3 style="margin:0">Resume Edit Suggestions</h3>
+              <div style="display:flex;gap:6px">
+                <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-edits')">Copy</button>
+              </div>
+            </div>
+            <div class="resume-rendered" id="tailor-edits" style="max-height:380px"></div>
           </div>
         </div>
-        <div class="resume-rendered" id="tailor-resume" style="max-height:350px"></div>
-      </div>
-      <div class="modal-section">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-          <h3 style="margin:0">Cover Letter</h3>
-          <div style="display:flex;gap:6px">
-            <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-cover')">Copy</button>
-            <button class="btn btn-ghost btn-sm" onclick="downloadDocxFromModal('tailor-cover','Cover_Letter')">⬇ Word</button>
-            <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-cover')">⬇ PDF</button>
+        <details style="margin-top:16px;border:1px solid var(--border);border-radius:8px;padding:0 12px">
+          <summary style="cursor:pointer;font-size:12px;color:var(--muted);padding:10px 0;user-select:none">▸ Full Tailored Resume (for download or reference)</summary>
+          <div style="padding-bottom:12px">
+            <div style="display:flex;gap:6px;margin-bottom:8px">
+              <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-resume')">Copy</button>
+              <button class="btn btn-ghost btn-sm" onclick="downloadDocxFromModal('tailor-resume','Tailored_Resume')">⬇ Word</button>
+              <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-resume')">⬇ PDF</button>
+            </div>
+            <div class="resume-rendered" id="tailor-resume" style="max-height:350px"></div>
           </div>
-        </div>
-        <div class="resume-rendered" id="tailor-cover" style="max-height:350px"></div>
+        </details>
       </div>
     </div>
   </div>
@@ -3672,99 +3673,10 @@ async function _postDocxDownload(md, filename) {
 // ── resume ────────────────────────────────────────────────────────────────
 var _savedResumes = [];
 var _activeResumeId = null;
-var _resumeCurrentHtml = ''; // tracks the HTML currently in the formatted view
-var _resumeHtmlDirty = false; // true when textarea was edited without refreshing formatted view
-
-// Convert plain text resume to HTML for the formatted view
-function textToResumeHtml(text) {
-  if (!text || !text.trim()) return '<div class="empty-hint">No resume content yet \u2014 upload a file or switch to Edit Text to paste.</div>';
-  function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-  var lines = text.split('\\n');
-  var out = [];
-  var inList = false;
-  var firstNonEmpty = -1;
-  for (var k = 0; k < lines.length; k++) { if (lines[k].trim()) { firstNonEmpty = k; break; } }
-  function endList() { if (inList) { out.push('</ul>'); inList = false; } }
-  function isSectionHeader(s) {
-    if (s.length < 3 || s.length > 60) return false;
-    if (/^#{1,3} /.test(s)) return true;
-    // ALL CAPS: no lowercase letters, at least one uppercase, no 4-digit years, no @ or .
-    var up = s.toUpperCase();
-    return up === s && /[A-Z]/.test(s) && !/[0-9]{4}/.test(s) && !/[@.]/.test(s);
-  }
-  function isContactLine(s) {
-    if (s.indexOf('@') > 0 && s.indexOf('.') > s.indexOf('@')) return true;
-    if (s.replace(/[^0-9]/g,'').length >= 10) return true;
-    if (s.indexOf('linkedin.com') >= 0 || s.indexOf('github.com') >= 0) return true;
-    return false;
-  }
-  function isBullet(s) {
-    if (s.length < 2) return false;
-    var c = s.charCodeAt(0);
-    // ASCII: - (45) * (42) + (43); Unicode: bullet (8226) en-dash (8211) white-bullet (9702) middle-dot (183)
-    return (c === 45 || c === 42 || c === 43 || c === 8226 || c === 8211 || c === 9702 || c === 183) && s.charAt(1) === ' ';
-  }
-  for (var i = 0; i < lines.length; i++) {
-    var line = lines[i];
-    var trim = line.trim();
-    if (!trim) { endList(); out.push('<div style="height:5px"></div>'); continue; }
-    if (i === firstNonEmpty) {
-      endList();
-      out.push('<h1>' + esc(trim) + '</h1>');
-      continue;
-    }
-    if (/^# /.test(trim)) { endList(); out.push('<h1>' + esc(trim.slice(2)) + '</h1>'); continue; }
-    if (/^## /.test(trim)) { endList(); out.push('<h2>' + esc(trim.slice(3)) + '</h2>'); continue; }
-    if (/^### /.test(trim)) { endList(); out.push('<h3>' + esc(trim.slice(4)) + '</h3>'); continue; }
-    if (isBullet(trim)) {
-      if (!inList) { out.push('<ul>'); inList = true; }
-      out.push('<li>' + esc(trim.slice(2).trim()) + '</li>');
-      continue;
-    }
-    if (isSectionHeader(trim)) { endList(); out.push('<h2>' + esc(trim) + '</h2>'); continue; }
-    if (isContactLine(trim)) { endList(); out.push('<p style="color:#94a3b8;font-size:12px;margin:2px 0">' + esc(trim) + '</p>'); continue; }
-    endList();
-    out.push('<p>' + esc(trim) + '</p>');
-  }
-  endList();
-  return out.join('');
-}
-
-function setResumeFormattedContent(htmlOrEmpty, fallbackText) {
-  var html = htmlOrEmpty || '';
-  if (!html && fallbackText) html = textToResumeHtml(fallbackText);
-  if (!html) html = '<div class="empty-hint">Upload a PDF or Word doc, or switch to Edit Text to paste.</div>';
-  _resumeCurrentHtml = html;
-  _resumeHtmlDirty = false;
-  document.getElementById('resume-formatted-view').innerHTML = html;
-}
-
-function setResumeView(mode) {
-  var fv = document.getElementById('resume-formatted-view');
-  var ta = document.getElementById('resume-text');
-  var btnF = document.getElementById('rvt-formatted');
-  var btnE = document.getElementById('rvt-edit');
-  if (mode === 'formatted') {
-    // Sync formatted view from textarea if user edited it
-    if (_resumeHtmlDirty) { setResumeFormattedContent('', ta.value); }
-    fv.style.display = '';
-    ta.style.display = 'none';
-    btnF.classList.add('active');
-    btnE.classList.remove('active');
-  } else {
-    fv.style.display = 'none';
-    ta.style.display = '';
-    ta.focus();
-    btnE.classList.add('active');
-    btnF.classList.remove('active');
-  }
-}
-
 async function loadResume() {
   var res = await fetch('/api/resume');
   var data = await res.json();
   document.getElementById('resume-text').value = data.resume || '';
-  setResumeFormattedContent(data.resume_html || '', data.resume || '');
   await loadSavedResumes();
 }
 
@@ -3821,8 +3733,6 @@ async function activateResume(id) {
   var data = await res.json();
   if (data.ok) {
     document.getElementById('resume-text').value = data.resume.content;
-    setResumeFormattedContent(data.resume.content_html || '', data.resume.content || '');
-    setResumeView('formatted');
     document.getElementById('resume-dropdown').style.display = 'none';
     _activeResumeId = id;
     await loadSavedResumes();
@@ -3834,8 +3744,7 @@ async function saveNamedResume() {
   var content = document.getElementById('resume-text').value.trim();
   if (!name) { alert('Please enter a name for this resume.'); return; }
   if (!content) { alert('Please paste or upload your resume text first.'); return; }
-  var content_html = _resumeCurrentHtml || textToResumeHtml(content);
-  var res = await fetch('/api/resumes', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, content, content_html}) });
+  var res = await fetch('/api/resumes', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, content}) });
   var data = await res.json();
   if (data.ok) {
     document.getElementById('resume-save-name').value = '';
@@ -3853,10 +3762,7 @@ async function deleteResume(id, e) {
 
 async function saveResume() {
   var text = document.getElementById('resume-text').value;
-  var resume_html = _resumeCurrentHtml || textToResumeHtml(text);
-  // Sync formatted view if textarea was edited
-  if (_resumeHtmlDirty) { setResumeFormattedContent('', text); }
-  await fetch('/api/resume', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({resume:text, resume_html}) });
+  await fetch('/api/resume', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({resume:text}) });
   var msg = document.getElementById('resume-msg');
   msg.style.display = '';
   setTimeout(function(){ msg.style.display = 'none'; }, 2500);
@@ -3875,10 +3781,7 @@ async function uploadResumeFile(input) {
     var data = await res.json();
     if (data.error) { msg.textContent = 'Error: ' + data.error; msg.style.color = 'var(--red)'; return; }
     document.getElementById('resume-text').value = data.text;
-    // Use rich mammoth HTML for DOCX, or auto-convert PDF text
-    setResumeFormattedContent(data.html || '', data.text || '');
-    setResumeView('formatted');
-    msg.textContent = '✓ Saved as "' + data.savedName + '" — formatting preserved';
+    msg.textContent = '✓ Saved as "' + data.savedName + '"';
     msg.style.color = '#4ade80';
     _activeResumeId = data.savedId;
     await loadSavedResumes();
@@ -3952,6 +3855,7 @@ async function tailorFromDesc() {
     if (data.error) { msg.textContent = 'Error: ' + data.error; msg.style.color = 'var(--red)'; return; }
     setRendered('tailor-result-resume', data.resume_text || '');
     setRendered('tailor-result-cover', data.cover_letter || '');
+    setRendered('tailor-result-edits', data.suggested_edits || '');
     if (data.analysis) renderAnalysis('tailor-analysis-inline', data.analysis);
     document.getElementById('tailor-result').style.display = '';
     msg.textContent = '';
@@ -3984,6 +3888,7 @@ async function doTailorJob(jobId, force) {
     }
     setRendered('tailor-resume', data.resume_text || '');
     setRendered('tailor-cover', data.cover_letter || '');
+    setRendered('tailor-edits', data.suggested_edits || '');
     if (data.analysis) renderAnalysis('tailor-analysis-modal', data.analysis);
     document.getElementById('tailor-loading').style.display = 'none';
     document.getElementById('tailor-content').style.display = '';

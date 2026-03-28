@@ -635,7 +635,7 @@ export async function tailorResumeWithClaude(
   job: { title: string; company: string; location: string; description?: string; why_good_fit?: string; apply_url?: string },
   baseResume: string,
   options?: { targetPages?: 1 | 2 }
-): Promise<{ resume: string; coverLetter: string; analysis?: TailoringAnalysis }> {
+): Promise<{ resume: string; coverLetter: string; suggestedEdits?: string; analysis?: TailoringAnalysis }> {
 
   // Estimate base resume word count to calibrate page target
   const baseWordCount = baseResume.trim().split(/\s+/).length;
@@ -711,7 +711,8 @@ Respond ONLY with a valid JSON object — no markdown fences, no text outside th
     "pageEstimate": "~X words → fits Y page(s)"
   },
   "resume": "# Full Name\\n\\n## Summary\\n[2-3 sentence power summary mirroring JD language]\\n\\n## Experience\\n**Job Title** — **Company Name** | Location | Dates\\n- [Strong verb] + [achievement] + [metric]\\n...\\n\\n## Key Skills\\n[JD-matched skills first, comma-separated]\\n\\n## Education\\n...",
-  "coverLetter": "# Cover Letter\\n\\n[Recipient info]\\n\\n[Opening hook — reference company by name and why this role specifically]\\n\\n[Body — connect 2-3 specific achievements to the role's requirements using JD language]\\n\\n[Closing — confident call to action]\\n\\n[Sign-off]"
+  "coverLetter": "# Cover Letter\\n\\n[Recipient info]\\n\\n[Opening hook — reference company by name and why this role specifically]\\n\\n[Body — connect 2-3 specific achievements to the role's requirements using JD language]\\n\\n[Closing — confident call to action]\\n\\n[Sign-off]",
+  "suggestedEdits": "## Suggested Edits for Your Resume\\n\\nMake these targeted changes directly in your original document — no full rewrite needed. Only reframe existing facts; never add anything that isn't true.\\n\\n### Skills / Summary Section\\n- **Add keyword**: [exact JD term] — appears as required in the JD\\n- **Move to top**: [skill] — JD lists this as a primary requirement\\n- **Remove or demote**: [unrelated skill] — not mentioned in JD, wastes prime real estate\\n\\n### [Company Name] ([start]–[end])\\n- **Bullet 1** — Change: \\"[current wording]\\" → \\"[improved wording with metric + JD keyword]\\"\\n  _Why: JD requires [specific signal]; adding [metric] proves impact_\\n- **Add**: One bullet about [topic] using language like \\"[JD-mirrored phrase]\\" — JD specifically calls this out\\n\\n### [Next Company / Role]\\n- **Bullet X** — Change: \\"[current]\\" → \\"[improved]\\"\\n  _Why: [reason]_\\n\\n> **Note**: If you have exact numbers (quota %, deal sizes, headcount), slot them in where shown as placeholders — your actual figures will be stronger than estimates."
 }`;
 
   const message = await anthropic.messages.create({
@@ -728,10 +729,11 @@ Respond ONLY with a valid JSON object — no markdown fences, no text outside th
 
   try {
     const text = block.text.trim().replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
-    const parsed = JSON.parse(text) as { resume: string; coverLetter: string; analysis?: TailoringAnalysis };
+    const parsed = JSON.parse(text) as { resume: string; coverLetter: string; suggestedEdits?: string; analysis?: TailoringAnalysis };
     return {
       resume: parsed.resume ?? '',
       coverLetter: parsed.coverLetter ?? '',
+      suggestedEdits: parsed.suggestedEdits,
       analysis: parsed.analysis,
     };
   } catch {
