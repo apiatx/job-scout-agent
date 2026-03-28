@@ -8,7 +8,7 @@ import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, Unde
 import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, runJobSpyScraper, proxyConfigured } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
 import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier } from './agent.js';
-import type { SubScores, OpportunityTier, TierSettings } from './agent.js';
+import type { SubScores, OpportunityTier, TierSettings, TailoringAnalysis } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
 // RepVue: link-out only (no scraping — RepVue blocks automated requests)
 
@@ -1406,14 +1406,21 @@ app.post('/api/download-docx', async (req: Request, res: Response) => {
 app.post('/api/tailor/:jobId', async (req: Request, res: Response) => {
   try {
     const jobId = Number(req.params.jobId);
-    // Check if we already have a tailored doc
-    const { rows: existing } = await pool.query(
-      'SELECT * FROM tailored_docs WHERE job_id=$1 ORDER BY created_at DESC LIMIT 1', [jobId]
-    );
-    if (existing.length > 0) {
-      res.json(existing[0]);
-      return;
+    const targetPages = (req.body?.targetPages === 1 || req.body?.targetPages === 2)
+      ? req.body.targetPages as 1 | 2 : undefined;
+    const force = req.body?.force === true;
+
+    // Return cached doc unless force-refresh or targetPages explicitly set
+    if (!force && targetPages === undefined) {
+      const { rows: existing } = await pool.query(
+        'SELECT * FROM tailored_docs WHERE job_id=$1 ORDER BY created_at DESC LIMIT 1', [jobId]
+      );
+      if (existing.length > 0) {
+        res.json({ ...existing[0], cached: true });
+        return;
+      }
     }
+
     // Get job details
     const { rows: jobRows } = await pool.query('SELECT * FROM jobs WHERE id=$1', [jobId]);
     if (jobRows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
@@ -1423,19 +1430,21 @@ app.post('/api/tailor/:jobId', async (req: Request, res: Response) => {
     const resume = resRows[0]?.value ?? '';
     if (!resume) { res.status(400).json({ error: 'No base resume saved. Please save your resume first.' }); return; }
 
-    const result = await tailorResumeWithClaude(job, resume);
+    const result = await tailorResumeWithClaude(job, resume, { targetPages });
     const { rows: inserted } = await pool.query(
       `INSERT INTO tailored_docs (job_id, resume_text, cover_letter) VALUES ($1, $2, $3) RETURNING *`,
       [jobId, result.resume, result.coverLetter]
     );
-    res.json(inserted[0]);
+    res.json({ ...inserted[0], analysis: result.analysis });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 // Freeform resume tailoring (from pasted job description)
 app.post('/api/tailor-freeform', async (req: Request, res: Response) => {
   try {
-    const { resume, jobDescription } = req.body;
+    const { resume, jobDescription, targetPages } = req.body as {
+      resume: string; jobDescription: string; targetPages?: 1 | 2;
+    };
     if (!resume || !jobDescription) {
       res.status(400).json({ error: 'Both resume and job description are required.' });
       return;
@@ -1446,8 +1455,8 @@ app.post('/api/tailor-freeform', async (req: Request, res: Response) => {
       location: '',
       description: jobDescription,
     };
-    const result = await tailorResumeWithClaude(fakeJob, resume);
-    res.json({ resume_text: result.resume, cover_letter: result.coverLetter });
+    const result = await tailorResumeWithClaude(fakeJob, resume, { targetPages });
+    res.json({ resume_text: result.resume, cover_letter: result.coverLetter, analysis: result.analysis });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -2572,6 +2581,20 @@ textarea:focus,input:focus{border-color:var(--gold)}
 /* upload zone */
 .upload-zone{border:2px dashed var(--border);border-radius:8px;padding:12px 16px;display:flex;align-items:center;gap:10px;cursor:pointer;color:var(--muted);font-size:12px;transition:border-color .2s}
 .upload-zone:hover{border-color:var(--gold);color:var(--text)}
+/* page target toggle */
+.page-toggle{display:flex;gap:0;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.page-toggle-btn{padding:5px 14px;font-size:12px;font-weight:600;background:transparent;border:none;color:var(--muted);cursor:pointer;transition:all .15s}
+.page-toggle-btn.active{background:var(--gold);color:#000}
+/* tailoring analysis panel */
+.tailor-analysis{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:16px;font-size:12px}
+.tailor-analysis-title{font-size:11px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px}
+.tailor-kw-list{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.tailor-kw{background:rgba(201,163,71,.15);border:1px solid rgba(201,163,71,.3);color:var(--gold);border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600}
+.tailor-kw.pref{background:rgba(100,116,139,.15);border-color:rgba(100,116,139,.3);color:#94a3b8}
+.tailor-kw.method{background:rgba(139,92,246,.15);border-color:rgba(139,92,246,.3);color:#a78bfa}
+.tailor-kw.signal{background:rgba(74,222,128,.1);border-color:rgba(74,222,128,.3);color:#4ade80}
+.tailor-signal-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.tailor-page-badge{display:inline-flex;align-items:center;gap:4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-size:11px;color:var(--muted);margin-top:8px}
 @media print{body *{visibility:hidden}.print-target,.print-target *{visibility:visible}.print-target{position:fixed;top:0;left:0;width:100%;background:#fff;color:#000;padding:40px;font-size:13px;line-height:1.7}.print-target h1{font-size:22px;font-weight:700;margin-bottom:4px}.print-target h2{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin:16px 0 6px;border-bottom:1px solid #ccc;padding-bottom:4px}.print-target h3{font-size:13px;font-weight:600;margin:10px 0 4px}.print-target ul{padding-left:20px}.print-target li{margin-bottom:3px}}
 
 /* email tab */
@@ -2701,6 +2724,13 @@ textarea:focus,input:focus{border-color:var(--gold)}
       <input type="file" accept=".pdf,.docx" style="display:none" onchange="uploadResumeFile(this)">
     </label>
     <span id="upload-msg" style="font-size:12px;color:var(--muted)"></span>
+    <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+      <span style="font-size:11px;color:var(--muted)">Target length:</span>
+      <div class="page-toggle" id="page-toggle">
+        <button class="page-toggle-btn active" data-pages="1" onclick="setPageTarget(1)">1 Page</button>
+        <button class="page-toggle-btn" data-pages="2" onclick="setPageTarget(2)">2 Pages</button>
+      </div>
+    </div>
   </div>
 
   <div class="resume-split">
@@ -2723,6 +2753,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   </div>
 
   <div id="tailor-result" style="display:none;margin-top:24px">
+    <div id="tailor-analysis-inline" style="display:none" class="tailor-analysis"></div>
     <div class="resume-split">
       <div class="resume-col">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
@@ -2959,17 +2990,26 @@ textarea:focus,input:focus{border-color:var(--gold)}
 
 <!-- Tailor Resume Modal -->
 <div class="modal-overlay" id="tailor-modal">
-  <div class="modal">
+  <div class="modal" style="max-width:800px">
     <div class="modal-header">
       <div>
         <div style="font-size:16px;font-weight:600" id="tailor-title"></div>
         <div style="font-size:13px;color:var(--gold)" id="tailor-company"></div>
       </div>
-      <button class="modal-close" onclick="closeTailorModal()">&times;</button>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:11px;color:var(--muted)">Target:</span>
+        <div class="page-toggle" id="modal-page-toggle">
+          <button class="page-toggle-btn active" data-pages="1" onclick="setModalPageTarget(1)">1 Page</button>
+          <button class="page-toggle-btn" data-pages="2" onclick="setModalPageTarget(2)">2 Pages</button>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="retailor-btn" style="display:none" onclick="retailorResume()">↻ Re-tailor</button>
+        <button class="modal-close" onclick="closeTailorModal()">&times;</button>
+      </div>
     </div>
-    <div id="tailor-loading" style="text-align:center;padding:32px;color:var(--muted)">Generating tailored resume &amp; cover letter with Claude...</div>
+    <div id="tailor-loading" style="text-align:center;padding:32px;color:var(--muted)">Analyzing job description and tailoring resume with Claude Sonnet...</div>
     <div id="tailor-content" style="display:none">
       <div class="modal-section">
+        <div id="tailor-analysis-modal" style="display:none" class="tailor-analysis"></div>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
           <h3 style="margin:0">Tailored Resume</h3>
           <div style="display:flex;gap:6px">
@@ -3682,21 +3722,72 @@ async function uploadResumeFile(input) {
   input.value = '';
 }
 
+// ── page target state ──────────────────────────────────────────────────────
+var _inlinePageTarget = 1;
+var _modalPageTarget = 1;
+var _currentTailorJobId = null;
+
+function setPageTarget(n) {
+  _inlinePageTarget = n;
+  document.querySelectorAll('#page-toggle .page-toggle-btn').forEach(function(b) {
+    b.classList.toggle('active', Number(b.dataset.pages) === n);
+  });
+}
+function setModalPageTarget(n) {
+  _modalPageTarget = n;
+  document.querySelectorAll('#modal-page-toggle .page-toggle-btn').forEach(function(b) {
+    b.classList.toggle('active', Number(b.dataset.pages) === n);
+  });
+}
+
+// ── analysis display ──────────────────────────────────────────────────────
+function renderAnalysis(containerId, analysis) {
+  var el = document.getElementById(containerId);
+  if (!el || !analysis) return;
+  var req = (analysis.requiredSkills || []).map(function(k) {
+    return '<span class="tailor-kw">' + k + '</span>';
+  }).join('');
+  var pref = (analysis.preferredSkills || []).map(function(k) {
+    return '<span class="tailor-kw pref">' + k + '</span>';
+  }).join('');
+  var meth = (analysis.methodologies || []).map(function(k) {
+    return '<span class="tailor-kw method">' + k + '</span>';
+  }).join('');
+  var sigs = (analysis.keySignals || []).map(function(k) {
+    return '<span class="tailor-kw signal">' + k + '</span>';
+  }).join('');
+  var placed = (analysis.keywordsPlaced || []).map(function(k) {
+    return '<span class="tailor-kw">' + k + '</span>';
+  }).join('');
+  var html = '<div class="tailor-analysis-title">AI Tailoring Analysis</div>';
+  if (req) html += '<div style="margin-bottom:6px"><span style="font-size:10px;color:var(--muted);display:block;margin-bottom:3px">REQUIRED SKILLS MATCHED</span><div class="tailor-kw-list">' + req + '</div></div>';
+  if (pref) html += '<div style="margin-bottom:6px"><span style="font-size:10px;color:var(--muted);display:block;margin-bottom:3px">PREFERRED SKILLS</span><div class="tailor-kw-list">' + pref + '</div></div>';
+  if (meth) html += '<div style="margin-bottom:6px"><span style="font-size:10px;color:var(--muted);display:block;margin-bottom:3px">METHODOLOGIES DETECTED</span><div class="tailor-kw-list">' + meth + '</div></div>';
+  if (sigs) html += '<div style="margin-bottom:6px"><span style="font-size:10px;color:var(--muted);display:block;margin-bottom:3px">NUANCE SIGNALS</span><div class="tailor-kw-list">' + sigs + '</div></div>';
+  if (placed && placed !== req) html += '<div style="margin-bottom:4px"><span style="font-size:10px;color:var(--muted);display:block;margin-bottom:3px">KEYWORDS WOVEN IN</span><div class="tailor-kw-list">' + placed + '</div></div>';
+  if (analysis.pageEstimate) html += '<div class="tailor-page-badge">📄 ' + analysis.pageEstimate + '</div>';
+  el.innerHTML = html;
+  el.style.display = '';
+}
+
 async function tailorFromDesc() {
   var resume = document.getElementById('resume-text').value.trim();
   var jobDesc = document.getElementById('job-desc-text').value.trim();
   var msg = document.getElementById('tailor-inline-msg');
   if (!resume) { msg.textContent = 'Please paste your resume first.'; msg.style.color = 'var(--red)'; return; }
   if (!jobDesc) { msg.textContent = 'Please paste a job description.'; msg.style.color = 'var(--red)'; return; }
-  msg.textContent = 'Generating tailored resume with Claude...';
+  msg.textContent = 'Analyzing JD and tailoring with Claude Sonnet (' + _inlinePageTarget + '-page target)...';
   msg.style.color = 'var(--gold)';
   document.getElementById('tailor-result').style.display = 'none';
+  document.getElementById('tailor-analysis-inline').style.display = 'none';
   try {
-    var res = await fetch('/api/tailor-freeform', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({resume:resume, jobDescription:jobDesc}) });
+    var payload = { resume: resume, jobDescription: jobDesc, targetPages: _inlinePageTarget };
+    var res = await fetch('/api/tailor-freeform', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
     var data = await res.json();
     if (data.error) { msg.textContent = 'Error: ' + data.error; msg.style.color = 'var(--red)'; return; }
     setRendered('tailor-result-resume', data.resume_text || '');
     setRendered('tailor-result-cover', data.cover_letter || '');
+    if (data.analysis) renderAnalysis('tailor-analysis-inline', data.analysis);
     document.getElementById('tailor-result').style.display = '';
     msg.textContent = '';
   } catch(e) { msg.textContent = 'Error: ' + e.message; msg.style.color = 'var(--red)'; }
@@ -3705,24 +3796,22 @@ async function tailorFromDesc() {
 // ── tailor resume modal ───────────────────────────────────────────────────
 function closeTailorModal() {
   document.getElementById('tailor-modal').classList.remove('show');
+  _currentTailorJobId = null;
 }
 function copyText(id) {
   var text = document.getElementById(id).innerText;
   navigator.clipboard.writeText(text);
 }
-async function tailorResume(jobId) {
-  var j = _jobsById[jobId] || {};
-  var title = j.title || '';
-  var company = j.company || '';
-  var modal = document.getElementById('tailor-modal');
-  document.getElementById('tailor-title').textContent = title;
-  document.getElementById('tailor-company').textContent = company;
-  document.getElementById('tailor-loading').style.display = '';
-  document.getElementById('tailor-content').style.display = 'none';
-  modal.classList.add('show');
 
+async function doTailorJob(jobId, force) {
+  document.getElementById('tailor-loading').style.display = '';
+  document.getElementById('tailor-loading').textContent = 'Analyzing job description and tailoring resume with Claude Sonnet (' + _modalPageTarget + '-page target)...';
+  document.getElementById('tailor-content').style.display = 'none';
+  document.getElementById('tailor-analysis-modal').style.display = 'none';
+  document.getElementById('retailor-btn').style.display = 'none';
   try {
-    var res = await fetch('/api/tailor/' + jobId, { method: 'POST' });
+    var payload = { targetPages: _modalPageTarget, force: !!force };
+    var res = await fetch('/api/tailor/' + jobId, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
     var data = await res.json();
     if (data.error) {
       document.getElementById('tailor-loading').textContent = 'Error: ' + data.error;
@@ -3730,11 +3819,27 @@ async function tailorResume(jobId) {
     }
     setRendered('tailor-resume', data.resume_text || '');
     setRendered('tailor-cover', data.cover_letter || '');
+    if (data.analysis) renderAnalysis('tailor-analysis-modal', data.analysis);
     document.getElementById('tailor-loading').style.display = 'none';
     document.getElementById('tailor-content').style.display = '';
+    document.getElementById('retailor-btn').style.display = '';
   } catch(e) {
     document.getElementById('tailor-loading').textContent = 'Error: ' + e.message;
   }
+}
+
+async function tailorResume(jobId) {
+  _currentTailorJobId = jobId;
+  var j = _jobsById[jobId] || {};
+  document.getElementById('tailor-title').textContent = j.title || '';
+  document.getElementById('tailor-company').textContent = j.company || '';
+  document.getElementById('tailor-modal').classList.add('show');
+  await doTailorJob(jobId, false);
+}
+
+async function retailorResume() {
+  if (!_currentTailorJobId) return;
+  await doTailorJob(_currentTailorJobId, true);
 }
 
 // ── gmail ──────────────────────────────────────────────────────────────────

@@ -10,7 +10,7 @@ A full-stack automated job search agent that discovers job listings across Green
 - **Package manager**: pnpm (monorepo)
 - **Backend**: Express 5 + raw `pg` Pool (no Drizzle ORM in actual use)
 - **Database**: PostgreSQL (Replit built-in)
-- **AI**: Anthropic Claude claude-haiku-4-5 (via Replit AI Integrations)
+- **AI**: Anthropic Claude — `claude-haiku-4-5` (scoring/research/salary), `claude-sonnet-4-5` (resume tailoring)
 - **Frontend**: Server-rendered HTML templates embedded in index.ts (single-file approach)
 - **Job scraping**: Direct API calls to Greenhouse, Lever, Workday REST APIs; JobSpy Python script for Indeed
 

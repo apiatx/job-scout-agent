@@ -570,42 +570,102 @@ export async function researchCompanyWithClaude(companyName: string): Promise<Re
   throw new Error(`Failed to parse research JSON from Claude response. Text blocks preview: ${preview}`);
 }
 
+export interface TailoringAnalysis {
+  targetPageCount: 1 | 2;
+  wordTarget: string;
+  requiredSkills: string[];
+  preferredSkills: string[];
+  methodologies: string[];
+  keySignals: string[];
+  keywordsPlaced: string[];
+  pageEstimate: string;
+}
+
 export async function tailorResumeWithClaude(
   job: { title: string; company: string; location: string; description?: string; why_good_fit?: string; apply_url?: string },
-  baseResume: string
-): Promise<{ resume: string; coverLetter: string }> {
-  const systemPrompt = `You are an elite executive resume writer and career strategist who has helped thousands of senior sales professionals land roles at top-tier technology companies. You specialize in crafting ATS-optimized resumes and compelling cover letters that highlight quantifiable achievements and strategic impact.
+  baseResume: string,
+  options?: { targetPages?: 1 | 2 }
+): Promise<{ resume: string; coverLetter: string; analysis?: TailoringAnalysis }> {
 
-Your approach:
-- Lead every bullet point with a strong action verb and quantifiable result (revenue generated, deals closed, % quota attainment, team size, territory growth)
-- Mirror the exact language, keywords, and qualifications from the job description throughout the resume
-- Position the candidate as a strategic revenue driver, not just a salesperson
-- Highlight enterprise/strategic selling methodology experience (MEDDPICC, Challenger, Solution Selling, etc.) when relevant
-- Emphasize relationships with C-suite buyers and complex deal cycles
-- For the cover letter: open with a compelling hook, connect the candidate's track record directly to the company's mission and the role's requirements, and close with confidence and a clear call to action
-- Keep the resume to 2 pages max, well-structured with clear sections: Summary, Experience, Key Skills, Education
-- Never fabricate information — only reframe and optimize what's in the base resume`;
+  // Estimate base resume word count to calibrate page target
+  const baseWordCount = baseResume.trim().split(/\s+/).length;
+  const targetPages = options?.targetPages ?? (baseWordCount > 600 ? 2 : 1);
+  const wordMin = targetPages === 1 ? 480 : 850;
+  const wordMax = targetPages === 1 ? 680 : 1150;
 
-  const prompt = `Tailor this candidate's resume and write a cover letter for the following role.
+  const systemPrompt = `You are the world's foremost ATS-optimization specialist and executive resume strategist. Your resumes have a 94% interview callback rate because you follow an ironclad process:
 
-JOB DETAILS:
+PHASE 1 — JD DECONSTRUCTION (before writing a single word):
+You read the job description and extract with surgical precision:
+- REQUIRED skills: the exact words/phrases the employer will search for in ATS (use VERBATIM terminology from the JD, never synonyms — if they say "Salesforce CRM" don't write "CRM tools")
+- PREFERRED skills: nice-to-haves that give the candidate an edge
+- METHODOLOGY SIGNALS: any sales/management frameworks mentioned (MEDDPICC, MEDDIC, Challenger, SPIN, Command of the Message, Force Management, etc.)
+- VERTICAL SIGNALS: specific industries, customer types, or deal profiles (Enterprise, Mid-Market, SMB, Channel, Federal, SaaS, etc.)
+- SENIORITY SIGNALS: IC vs manager, quota size, team size, deal size expectations
+- NUANCE SIGNALS: subtle requirements often missed (e.g. "cross-functional alignment" means stakeholder management matters, "new logo acquisition" means hunter mentality, "expansion revenue" means land-and-expand motion)
+
+PHASE 2 — SKILLS SURGERY:
+You completely rebuild the candidate's Skills section:
+- Lead with the top 6-10 skills that EXACTLY match the JD's required/preferred list (verbatim keywords)
+- Every JD keyword must appear at least once in context (bullet points), not just the skills list
+- Remove or demote skills that aren't relevant to this specific role
+
+PHASE 3 — BULLET RECONSTRUCTION:
+Every experience bullet must:
+1. Start with a strong, specific action verb (Orchestrated, Negotiated, Expanded, Converted — not "Responsible for")
+2. Include the quantifiable result (ARR, %, headcount, deal size, quota %, timeline)
+3. Mirror the JD's language naturally within the bullet
+
+PHASE 4 — PAGE LENGTH DISCIPLINE:
+The resume MUST fit the target page count. This is non-negotiable.
+- 1-page target: ${wordMin}-${wordMax} words in the body. Cut ruthlessly — one role gets 2-3 bullets max, older roles may be collapsed.
+- 2-page target: ${wordMin}-${wordMax} words. Expand bullets with context and achievements.
+Count your words before finalizing. If over limit, edit down. If under, enrich.
+
+ABSOLUTE RULES:
+- Never fabricate data, companies, titles, or achievements not in the base resume
+- Only reframe, optimize, and reorder existing information
+- Use EXACT keywords from the JD — ATS systems match strings, not concepts`;
+
+  const prompt = `Complete a full 4-phase tailoring analysis and produce the tailored documents.
+
+═══════════════════════════════
+JOB DETAILS
+═══════════════════════════════
 Title: ${job.title}
 Company: ${job.company}
 Location: ${job.location}
-${job.description ? `Description:\n${job.description.slice(0, 3000)}` : ''}
-${job.why_good_fit ? `Why it's a good fit: ${job.why_good_fit}` : ''}
+${job.description ? `Job Description:\n${job.description.slice(0, 4000)}` : ''}
+${job.why_good_fit ? `\nStrategic fit notes: ${job.why_good_fit}` : ''}
 
-CANDIDATE'S BASE RESUME:
+═══════════════════════════════
+CANDIDATE BASE RESUME (~${baseWordCount} words)
+═══════════════════════════════
 ${baseResume}
 
-Respond ONLY with a JSON object (no extra text outside the JSON):
+═══════════════════════════════
+TARGET
+═══════════════════════════════
+Page count: ${targetPages} page${targetPages > 1 ? 's' : ''} (${wordMin}–${wordMax} words in resume body)
+
+Respond ONLY with a valid JSON object — no markdown fences, no text outside the JSON:
 {
-  "resume": "<the full tailored resume in Markdown format — use # for name, ## for section headers (Summary, Experience, Skills, Education), **bold** for job titles and company names, and - bullet points for achievements>",
-  "coverLetter": "<the full cover letter in Markdown format — use ## for greeting/opening/closing headers, paragraphs separated by blank lines>"
+  "analysis": {
+    "targetPageCount": ${targetPages},
+    "wordTarget": "${wordMin}–${wordMax}",
+    "requiredSkills": ["exact phrase from JD", "...up to 10"],
+    "preferredSkills": ["...", "...up to 6"],
+    "methodologies": ["MEDDPICC", "...any found"],
+    "keySignals": ["Enterprise hunter", "...3-5 nuance signals you detected"],
+    "keywordsPlaced": ["list every JD keyword you successfully wove into the resume"],
+    "pageEstimate": "~X words → fits Y page(s)"
+  },
+  "resume": "# Full Name\\n\\n## Summary\\n[2-3 sentence power summary mirroring JD language]\\n\\n## Experience\\n**Job Title** — **Company Name** | Location | Dates\\n- [Strong verb] + [achievement] + [metric]\\n...\\n\\n## Key Skills\\n[JD-matched skills first, comma-separated]\\n\\n## Education\\n...",
+  "coverLetter": "# Cover Letter\\n\\n[Recipient info]\\n\\n[Opening hook — reference company by name and why this role specifically]\\n\\n[Body — connect 2-3 specific achievements to the role's requirements using JD language]\\n\\n[Closing — confident call to action]\\n\\n[Sign-off]"
 }`;
 
   const message = await anthropic.messages.create({
-    model: 'claude-haiku-4-5',
+    model: 'claude-sonnet-4-5',
     max_tokens: 8096,
     system: systemPrompt,
     messages: [{ role: 'user', content: prompt }],
@@ -617,11 +677,14 @@ Respond ONLY with a JSON object (no extra text outside the JSON):
   }
 
   try {
-    const text = block.text.trim().replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(text) as { resume: string; coverLetter: string };
-    return parsed;
+    const text = block.text.trim().replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
+    const parsed = JSON.parse(text) as { resume: string; coverLetter: string; analysis?: TailoringAnalysis };
+    return {
+      resume: parsed.resume ?? '',
+      coverLetter: parsed.coverLetter ?? '',
+      analysis: parsed.analysis,
+    };
   } catch {
-    // If JSON parsing fails, try to extract the text content
     return { resume: block.text, coverLetter: '' };
   }
 }
