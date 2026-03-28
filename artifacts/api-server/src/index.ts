@@ -7,7 +7,7 @@ import mammoth from 'mammoth';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, UnderlineType } from 'docx';
 import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, runJobSpyScraper, proxyConfigured } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
-import { runGeminiJobDiscovery, deduplicateJobLists } from './gemini_discovery.js';
+import { runGeminiJobDiscovery, deduplicateJobLists, isDirectCompanyUrl, normalizeUrl as normalizeJobUrl } from './gemini_discovery.js';
 import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier } from './agent.js';
 import type { SubScores, OpportunityTier, TierSettings, TailoringAnalysis } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
@@ -843,7 +843,7 @@ async function validateAtsCandidate(candidate: {
         { signal: AbortSignal.timeout(8000), headers: { 'User-Agent': 'Mozilla/5.0' } }
       );
       if (!r.ok) return false;
-      const data = await r.json();
+      const data = await r.json() as { jobPostings?: unknown; jobs?: unknown };
       return !!(data && (data.jobPostings || data.jobs));
     }
     if (candidate.ats_type === 'workday' && candidate.careers_url) {
@@ -923,20 +923,165 @@ app.post('/api/companies/detect', async (req: Request, res: Response) => {
   }
 });
 
+// ── Job report enrichment ──────────────────────────────────────────────────────
+// Adds computed explanation fields to each job row served from the API.
+// These fields implement the "Jobs Report" spec layer (Part 9) without
+// extra DB columns — everything is derived at serve time.
+
+interface CriteriaForReport {
+  target_roles: string[];
+  must_have: string[];
+  nice_to_have: string[];
+  locations: string[];
+  work_type: string;
+  min_salary: number | null;
+  avoid: string[];
+}
+
+/**
+ * Deterministic score (0–100) computed purely from data, with no LLM involvement.
+ * Evaluates: title match, keyword match, location match, salary match,
+ * source quality (direct company page > aggregator), and description completeness.
+ */
+function computeDeterministicScore(job: Record<string, unknown>, criteria: CriteriaForReport): number {
+  let score = 0;
+
+  const titleLower = (job.title as string ?? '').toLowerCase();
+  const descLower  = ((job.description as string ?? '') + ' ' + (job.why_good_fit as string ?? '')).toLowerCase();
+  const loc        = (job.location as string ?? '').toLowerCase();
+  const applyUrl   = job.apply_url as string ?? '';
+
+  // 1. Title match strength (up to 35 pts)
+  const titleMatches = criteria.target_roles.filter(r => titleLower.includes(r.toLowerCase()));
+  score += Math.min(35, titleMatches.length * 12 + (titleMatches.length > 0 ? 5 : 0));
+
+  // 2. Must-have keyword match in title or description (up to 25 pts)
+  const mustHaveHits = criteria.must_have.filter(k => titleLower.includes(k.toLowerCase()) || descLower.includes(k.toLowerCase()));
+  const mustHaveRatio = criteria.must_have.length > 0 ? mustHaveHits.length / criteria.must_have.length : 0;
+  score += Math.round(mustHaveRatio * 25);
+
+  // 3. Location / work-type match (up to 20 pts)
+  const isRemote = loc.includes('remote') || loc === '';
+  if (criteria.work_type === 'remote' && isRemote) score += 20;
+  else if (criteria.work_type === 'remote' && !isRemote) score += 0;
+  else if (criteria.locations.some(l => loc.includes(l.toLowerCase()))) score += 20;
+  else score += 8; // partial credit for unknown locations
+
+  // 4. Salary match (up to 10 pts)
+  const salaryStr = job.salary as string ?? '';
+  if (salaryStr && criteria.min_salary) {
+    const nums = salaryStr.match(/[\d,]+/g);
+    if (nums) {
+      const highest = Math.max(...nums.map(n => parseInt(n.replace(/,/g, ''), 10)));
+      if (!isNaN(highest) && highest >= 1000) {
+        score += highest >= criteria.min_salary ? 10 : 0;
+      }
+    }
+  } else if (!criteria.min_salary) {
+    score += 5; // no salary filter → partial credit
+  }
+
+  // 5. Direct company page boost (up to 10 pts)
+  if (isDirectCompanyUrl(applyUrl)) score += 10;
+
+  return Math.min(100, Math.max(0, score));
+}
+
+/**
+ * Derives a human-readable explanation of why a job ranked where it did.
+ */
+function buildRankExplanation(job: Record<string, unknown>, detScore: number): string {
+  const tier  = job.opportunity_tier as string ?? '';
+  const score = job.match_score as number ?? 0;
+  const parts: string[] = [];
+
+  if (score >= 75) parts.push(`Strong AI match (${score}/100)`);
+  else if (score >= 60) parts.push(`Good AI match (${score}/100)`);
+  else parts.push(`Moderate match (${score}/100)`);
+
+  if (detScore >= 60) parts.push(`high deterministic fit score (${detScore}/100)`);
+
+  if (tier === 'Top Target')    parts.push('classified Top Target based on role fit + company quality');
+  else if (tier === 'Fast Win') parts.push('classified Fast Win — achievable with current experience');
+  else if (tier === 'Stretch Role') parts.push('classified Stretch Role — ambitious but relevant');
+  else if (tier === 'Probably Skip') parts.push('de-prioritised by scoring engine');
+
+  const src = job.source as string ?? '';
+  if (['Greenhouse','Lever','Workday'].includes(src)) parts.push(`found via direct ${src} ATS`);
+  else if (src === 'Gemini') parts.push('discovered via Gemini + Google Search grounding');
+
+  return parts.join('; ');
+}
+
+/**
+ * Adds computed report fields to a raw job DB row.
+ * No extra DB queries — all derived from existing columns + criteria.
+ */
+function enrichJobRecord(job: Record<string, unknown>, criteria: CriteriaForReport): Record<string, unknown> {
+  const applyUrl    = job.apply_url as string ?? '';
+  const detScore    = computeDeterministicScore(job, criteria);
+
+  // Extract Gemini grounding metadata for surfacing in the API
+  const groundingRaw = job.gemini_grounding_metadata as Record<string, unknown> | null;
+  const geminiWebSearchQueries: string[] = groundingRaw?.webSearchQueries as string[] ?? [];
+  const geminiSources = ((groundingRaw?.groundingChunks as Array<{web?: {uri?: string; title?: string}}> | undefined) ?? [])
+    .filter(c => c?.web?.uri)
+    .map(c => ({ uri: c.web!.uri!, title: c.web!.title }));
+
+  // Matched settings: which of the user's criteria does this job satisfy?
+  const titleLower = (job.title as string ?? '').toLowerCase();
+  const descLower  = ((job.description as string ?? '') + ' ' + (job.why_good_fit as string ?? '')).toLowerCase();
+  const matchedSettings: Record<string, unknown> = {
+    matched_roles:     criteria.target_roles.filter(r => titleLower.includes(r.toLowerCase())),
+    matched_must_have: criteria.must_have.filter(k => titleLower.includes(k.toLowerCase()) || descLower.includes(k.toLowerCase())),
+    matched_nice_to_have: criteria.nice_to_have.filter(k => descLower.includes(k.toLowerCase())),
+    location_match:    criteria.locations.length === 0 || criteria.locations.some(l => (job.location as string ?? '').toLowerCase().includes(l.toLowerCase())) || (job.location as string ?? '').toLowerCase().includes('remote'),
+  };
+
+  return {
+    ...job,
+    // Deterministic score (separate from LLM match_score)
+    deterministic_score: detScore,
+    // Source provenance
+    source_found_from:          job.source,
+    direct_company_page_found:  isDirectCompanyUrl(applyUrl),
+    // Explanation fields
+    explanation_for_rank:  buildRankExplanation(job, detScore),
+    matched_settings:      matchedSettings,
+    // Gemini grounding data (null for non-Gemini jobs)
+    gemini_web_search_queries: geminiWebSearchQueries,
+    gemini_sources:            geminiSources.length > 0 ? geminiSources : undefined,
+    // is_live: we don't have real-time liveness checks yet; null = unknown
+    is_live: null,
+  };
+}
+
 // Jobs
 app.get('/api/jobs', async (req: Request, res: Response) => {
   try {
     const minScore = Number(req.query.min_score) || 0;
     const sort = req.query.sort === 'score' ? 'match_score DESC, found_at DESC' : 'found_at DESC, match_score DESC';
+
+    // Load criteria once for enrichment (deterministic score + explanation fields)
+    const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
+    const criteriaForReport: CriteriaForReport = cRows.length > 0 ? {
+      target_roles: cRows[0].target_roles ?? [],
+      must_have:    cRows[0].must_have    ?? [],
+      nice_to_have: cRows[0].nice_to_have ?? [],
+      locations:    cRows[0].locations    ?? [],
+      work_type:    cRows[0].work_type    ?? 'any',
+      min_salary:   cRows[0].min_salary   ?? null,
+      avoid:        cRows[0].avoid        ?? [],
+    } : { target_roles: [], must_have: [], nice_to_have: [], locations: [], work_type: 'any', min_salary: null, avoid: [] };
+
     const { rows } = await pool.query(
       `SELECT * FROM jobs WHERE match_score >= $1 ORDER BY ${sort}`,
       [minScore]
     );
 
     // Attach salary estimates for jobs missing salary
-    const jobsNeedingEstimate = rows.filter((j: Record<string, unknown>) => !j.salary || j.salary === 'Unknown' || j.salary === 'N/A' || (j.salary as string).trim() === '');
-    if (jobsNeedingEstimate.length > 0) {
-      for (const j of jobsNeedingEstimate) {
+    for (const j of rows) {
+      if (!j.salary || j.salary === 'Unknown' || j.salary === 'N/A' || (j.salary as string).trim() === '') {
         const { rows: est } = await pool.query(
           `SELECT estimate_json FROM salary_estimates WHERE LOWER(job_title) = LOWER($1) AND LOWER(company_name) = LOWER($2) AND created_at > NOW() - INTERVAL '7 days' ORDER BY created_at DESC LIMIT 1`,
           [j.title, j.company]
@@ -947,7 +1092,12 @@ app.get('/api/jobs', async (req: Request, res: Response) => {
       }
     }
 
-    res.json(rows);
+    // Enrich every job record with computed explanation fields:
+    // deterministic_score, direct_company_page_found, explanation_for_rank,
+    // matched_settings, gemini_web_search_queries, gemini_sources, source_found_from, is_live
+    const enriched = rows.map((j: Record<string, unknown>) => enrichJobRecord(j, criteriaForReport));
+
+    res.json(enriched);
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 

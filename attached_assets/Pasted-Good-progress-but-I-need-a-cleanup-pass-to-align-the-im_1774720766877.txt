@@ -1,0 +1,52 @@
+Good progress, but I need a cleanup pass to align the implementation with the intended spec.
+
+Please make the following corrections and then summarize exactly what changed:
+
+1. Update the Gemini integration to use the current recommended Google GenAI SDK / API pattern if the current implementation is using the older `@google/generative-ai` client. Migrate only if safe and straightforward within the existing codebase.
+
+   * Prefer the currently recommended JavaScript SDK for Gemini.
+   * Use the current Google Search grounding tool naming for current models (`google_search` semantics for current Gemini models).
+   * Keep the integration backward-safe and modular.
+
+2. Change the default Gemini model selection to match the intended architecture:
+
+   * default quality model: `gemini-3.1-pro-preview`
+   * optional lower-cost model: `gemini-3-flash-preview`
+   * do not default to Gemini 2.0 unless there is a specific compatibility reason, and if so explain why.
+
+3. Audit the actual pipeline against the original spec and explicitly confirm whether each of these is implemented:
+
+   * deterministic hard filtering from saved user settings
+   * normalization into a shared schema
+   * deduplication
+   * deterministic score
+   * optional LLM score
+   * final ranking logic
+   * jobs report / explanation fields
+   * Claude handoff payload boundaries
+
+4. If any of the above are missing or only partially implemented, complete them now.
+
+5. Add or confirm structured explanation fields in the jobs response for top-ranked jobs, such as:
+
+   * matched_settings
+   * fit_reasons
+   * missing_requirements or stretch flags
+   * source_found_from
+   * direct_company_page_found
+   * is_live
+   * explanation_for_rank
+   * gemini_web_search_queries
+   * gemini_sources / citations where available
+
+6. Keep the architecture strict:
+
+   * Gemini = discovery/enrichment only
+   * backend deterministic logic = gatekeeper
+   * Claude = resume tailoring / writing only
+
+7. When done, provide a checklist showing:
+
+   * what was already implemented correctly
+   * what you changed in this cleanup pass
+   * any remaining limitations or TODOs

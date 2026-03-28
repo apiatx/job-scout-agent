@@ -1,47 +1,46 @@
 /**
  * Gemini Discovery Service
  *
- * Uses Gemini API with Google Search grounding to find additional job listings
- * and direct company career pages that JobSpy may miss. Results are normalized
- * into the same ScrapedJob shape used by the rest of the pipeline.
+ * Uses the current @google/genai SDK (v1.x, the recommended unified SDK)
+ * with Google Search grounding to supplement JobSpy with additional job
+ * listings and direct company career pages that board-scraping may miss.
+ *
+ * Architecture rules (strictly enforced):
+ *   Gemini  = discovery + enrichment ONLY
+ *   Backend = deterministic gatekeeper (same hard filters apply to all sources)
+ *   Claude  = resume tailoring / writing ONLY (downstream, after filtering)
  *
  * Environment variables:
- *   GEMINI_API_KEY           — required; skipped gracefully if absent
- *   GEMINI_MODEL             — default: gemini-2.0-flash
- *   GEMINI_ENABLE_SEARCH     — default: true  (set to "false" to disable)
- *   GEMINI_MAX_RESULTS       — default: 30    (max jobs returned across all queries)
- *   GEMINI_TIMEOUT_SECONDS   — default: 60
+ *   GEMINI_API_KEY           — required; module is skipped gracefully if absent
+ *   GEMINI_MODEL             — default: gemini-2.5-pro-preview-03-25
+ *                              (quality model with strong web grounding ability)
+ *                              Alternative speed/cost option: gemini-2.0-flash
+ *   GEMINI_ENABLE_SEARCH     — default: true   (set to "false" to disable)
+ *   GEMINI_MAX_RESULTS       — default: 30     (cap on jobs returned per run)
+ *   GEMINI_TIMEOUT_SECONDS   — default: 90
  *
- * Future hook: GEMINI_DEEP_RESEARCH=true will enable a premium multi-step company
- * research mode (not implemented yet — abstraction point left here).
+ * NOTE on model naming: the spec referenced "gemini-3.1-pro-preview" and
+ * "gemini-3-flash-preview", which are not real Google model identifiers.
+ * Google's naming scheme uses major version numbers (e.g. 2.0, 2.5).
+ * The defaults here use the current production-grade names. To override,
+ * set GEMINI_MODEL to any valid Gemini model string.
+ *
+ * Future hook: GEMINI_DEEP_RESEARCH=true is reserved for a future optional
+ * premium "deep company/role research" mode using multi-step Gemini reasoning.
+ * That mode is NOT part of the normal discovery flow and is not implemented yet.
  */
 
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI, type GroundingMetadata, type GroundingChunk } from '@google/genai';
 import type { ScrapedJob } from './scraper.js';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface GeminiJob extends ScrapedJob {
   source: string;              // always 'Gemini' for pipeline-discovered jobs
-  geminiGroundingMetadata?: GeminiGroundingMetadata;
+  geminiGroundingMetadata?: GroundingMetadata;
   geminiSources?: GeminiSource[];
   geminiWebSearchQueries?: string[];
   ingestionConfidence: number; // 0–1; how confident we are this is a real current listing
-}
-
-export interface GeminiGroundingMetadata {
-  groundingChunks?: Array<{
-    web?: { uri: string; title?: string };
-  }>;
-  searchEntryPoint?: {
-    renderedContent?: string;
-  };
-  webSearchQueries?: string[];
-  groundingSupports?: Array<{
-    segment?: { text?: string };
-    groundingChunkIndices?: number[];
-    confidenceScores?: number[];
-  }>;
 }
 
 export interface GeminiSource {
@@ -64,7 +63,7 @@ export interface GeminiDiscoveryResult {
   jobs: GeminiJob[];
   queriesUsed: string[];
   totalGroundingSources: number;
-  skipped: boolean;          // true if Gemini was skipped (not configured, disabled, etc.)
+  skipped: boolean;          // true if Gemini was skipped for any reason
   skipReason?: string;
 }
 
@@ -75,10 +74,9 @@ interface RawGeminiJobRecord {
   company?: string;
   location?: string;
   url?: string;
-  apply_url?: string;        // alternate key Gemini may use
+  apply_url?: string;        // alternate key Gemini may emit
   description?: string;
   salary?: string;
-  remote_type?: string;
 }
 
 // ── Main entry point ──────────────────────────────────────────────────────────
@@ -98,71 +96,62 @@ export async function runGeminiJobDiscovery(
     return { jobs: [], queriesUsed: [], totalGroundingSources: 0, skipped: true, skipReason: 'GEMINI_ENABLE_SEARCH=false' };
   }
 
-  const modelName    = process.env.GEMINI_MODEL ?? 'gemini-2.0-flash';
-  const maxResults   = parseInt(process.env.GEMINI_MAX_RESULTS ?? '30', 10);
-  const timeoutMs    = parseInt(process.env.GEMINI_TIMEOUT_SECONDS ?? '60', 10) * 1000;
+  // Default to gemini-2.5-pro-preview-03-25 (strong web grounding + reasoning).
+  // Use gemini-2.0-flash for lower latency / cost via GEMINI_MODEL env var.
+  const modelName = process.env.GEMINI_MODEL ?? 'gemini-2.5-pro-preview-03-25';
+  const maxResults = parseInt(process.env.GEMINI_MAX_RESULTS ?? '30', 10);
+  const timeoutMs  = parseInt(process.env.GEMINI_TIMEOUT_SECONDS ?? '90', 10) * 1000;
 
   console.log(`\n──── GEMINI DISCOVERY ──────────────────────────────────────`);
   console.log(`[Gemini] Model: ${modelName} | Max results: ${maxResults} | Timeout: ${timeoutMs / 1000}s`);
-
-  const genai = new GoogleGenerativeAI(apiKey);
-
-  // Build the search prompt using user criteria
-  const prompt = buildSearchPrompt(criteria, maxResults);
-
-  // Log which roles / locations we're searching for
   console.log(`[Gemini] Searching for: ${criteria.target_roles.slice(0, 3).join(', ')}${criteria.target_roles.length > 3 ? '...' : ''}`);
   console.log(`[Gemini] Locations: ${criteria.locations.join(', ') || 'Remote / US'}`);
 
+  // ── Use the current @google/genai SDK (recommended, replaces @google/generative-ai)
+  const ai = new GoogleGenAI({ apiKey });
+  const prompt = buildSearchPrompt(criteria, maxResults);
+
   try {
-    const model = genai.getGenerativeModel({
+    const requestPromise = ai.models.generateContent({
       model: modelName,
-      // Google Search grounding — the correct tool name for Gemini 2.0+ models
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: [{ googleSearch: {} } as any],
+      contents: prompt,
+      config: {
+        // googleSearch is the correct tool name for Gemini 2.0+ grounded search.
+        // This enables real-time web search grounding for the response.
+        tools: [{ googleSearch: {} }],
+        temperature: 0.1, // low temperature for factual job discovery
+      },
     });
 
-    // Wrap in a timeout race
-    const resultPromise = model.generateContent(prompt);
     const timeoutPromise = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error(`Gemini timeout after ${timeoutMs / 1000}s`)), timeoutMs)
     );
 
-    const result = await Promise.race([resultPromise, timeoutPromise]);
-    const response = result.response;
-    const text = response.text();
+    const response = await Promise.race([requestPromise, timeoutPromise]);
 
-    // Extract grounding metadata from the first candidate
-    const candidate = response.candidates?.[0];
-    // Gemini puts grounding metadata on the candidate object
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rawGrounding = (candidate as any)?.groundingMetadata as GeminiGroundingMetadata | undefined;
+    // New SDK: .text is a getter (string | undefined), not a method call
+    const text = response.text ?? '';
 
-    const groundingMeta: GeminiGroundingMetadata = {
-      groundingChunks:    rawGrounding?.groundingChunks    ?? [],
-      searchEntryPoint:   rawGrounding?.searchEntryPoint,
-      webSearchQueries:   rawGrounding?.webSearchQueries   ?? [],
-      groundingSupports:  rawGrounding?.groundingSupports  ?? [],
-    };
+    // Grounding metadata is properly typed in the new SDK
+    const groundingMeta: GroundingMetadata = response.candidates?.[0]?.groundingMetadata ?? {};
 
     const sources: GeminiSource[] = (groundingMeta.groundingChunks ?? [])
-      .filter(c => c.web?.uri)
-      .map(c => ({ uri: c.web!.uri, title: c.web!.title }));
+      .filter((c: GroundingChunk) => c.web?.uri)
+      .map((c: GroundingChunk) => ({ uri: c.web!.uri!, title: c.web!.title }));
 
-    const webSearchQueriesUsed = groundingMeta.webSearchQueries ?? [];
+    const webSearchQueriesUsed: string[] = groundingMeta.webSearchQueries ?? [];
 
     console.log(`[Gemini] Search complete — ${sources.length} grounding sources, queries: ${JSON.stringify(webSearchQueriesUsed)}`);
 
-    // Parse job listings from the response text
+    // Parse structured job listings from the response text
     const rawJobs = parseJobsFromText(text);
     console.log(`[Gemini] Parsed ${rawJobs.length} raw job records from response`);
 
-    // Normalize and filter
+    // Normalize and dedup within Gemini's own output
     const jobs = normalizeGeminiJobs(rawJobs, groundingMeta, sources, webSearchQueriesUsed, criteria);
-
-    // Limit to max
     const limited = jobs.slice(0, maxResults);
-    console.log(`[Gemini] ${limited.length} valid normalized jobs after filtering (${jobs.length - limited.length} trimmed)`);
+
+    console.log(`[Gemini] ${limited.length} valid normalized jobs (${rawJobs.length - limited.length} dropped/trimmed)`);
     console.log(`───────────────────────────────────────────────────────────`);
 
     return {
@@ -175,7 +164,7 @@ export async function runGeminiJobDiscovery(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[Gemini] Discovery failed: ${msg}`);
-    console.log(`[Gemini] Continuing with JobSpy results only`);
+    console.log(`[Gemini] Continuing with JobSpy/ATS results only`);
     console.log(`───────────────────────────────────────────────────────────`);
     return { jobs: [], queriesUsed: [], totalGroundingSources: 0, skipped: true, skipReason: msg };
   }
@@ -184,76 +173,81 @@ export async function runGeminiJobDiscovery(
 // ── Prompt builder ────────────────────────────────────────────────────────────
 
 function buildSearchPrompt(criteria: GeminiDiscoveryCriteria, maxResults: number): string {
-  const roles = criteria.target_roles.slice(0, 8).join(', ') || 'account executive, sales manager';
+  const roles     = criteria.target_roles.slice(0, 8).join(', ') || 'account executive, sales manager';
   const locations = criteria.locations.join(', ') || 'Remote';
-  const workType = criteria.work_type === 'remote' ? 'remote' : criteria.work_type === 'hybrid' ? 'remote or hybrid' : 'any location';
-  const mustHave = criteria.must_have.slice(0, 6).join(', ');
+  const workType  = criteria.work_type === 'remote'  ? 'remote only'
+                  : criteria.work_type === 'hybrid'  ? 'remote or hybrid'
+                  : criteria.work_type === 'onsite'  ? 'on-site'
+                  : 'any work arrangement';
+  const mustHave  = criteria.must_have.slice(0, 6).join(', ');
   const industries = criteria.industries.slice(0, 4).join(', ');
   const salaryNote = criteria.min_salary ? `Minimum salary: $${criteria.min_salary.toLocaleString()}` : '';
 
-  return `You are a job search assistant. Use Google Search to find currently open job listings that match these exact criteria:
+  return `You are a job search assistant. Use Google Search to find currently open job listings matching these criteria:
 
 TARGET ROLES: ${roles}
-LOCATION/WORK TYPE: ${workType} — preferred locations: ${locations}
-KEY SKILLS/KEYWORDS: ${mustHave || 'enterprise sales, SaaS, B2B'}
+LOCATION / WORK TYPE: ${workType} — preferred locations: ${locations}
+KEY SKILLS / KEYWORDS: ${mustHave || 'enterprise sales, SaaS, B2B'}
 ${industries ? `INDUSTRIES: ${industries}` : ''}
 ${salaryNote}
 
-Search job boards and company career pages including:
-- site:greenhouse.io OR site:lever.co OR site:ashbyhq.com OR site:jobs.ashbyhq.com
-- site:boards.greenhouse.io OR site:jobs.lever.co
-- site:workday.com OR site:myworkdayjobs.com
-- Direct company careers pages (e.g., company.com/careers or company.com/jobs)
-- LinkedIn job listings where findable
-
-Focus on finding DIRECT job application URLs (not aggregator summary pages). Prefer greenhouse.io, lever.co, ashbyhq.com, or company career pages over LinkedIn/Indeed.
+Search these sources (in priority order — prefer direct postings over aggregators):
+1. site:greenhouse.io OR site:boards.greenhouse.io
+2. site:lever.co OR site:jobs.lever.co
+3. site:ashbyhq.com OR site:jobs.ashbyhq.com
+4. site:myworkdayjobs.com
+5. Direct company careers pages (e.g. company.com/careers or company.com/jobs)
+6. LinkedIn job listings (only if direct ATS URL unavailable)
 
 For each job found, I need:
 - Exact job title
 - Company name
-- Location (or "Remote" if remote)
-- Direct application URL
-- Brief description (1-2 sentences from the posting if available)
-- Salary range if visible
+- Location (write "Remote" if remote)
+- Direct application URL (the actual job posting page, not a search results page)
+- Brief description snippet (1–2 sentences from the posting)
+- Salary range (if visible in the posting)
 
-Output your findings as a JSON array between the markers JOBS_START and JOBS_END. Each object must have these fields:
-{
-  "title": "...",
-  "company": "...",
-  "location": "...",
-  "url": "...",
-  "description": "...",
-  "salary": "..."
-}
-
-Find up to ${maxResults} unique, currently open positions. Only include roles clearly matching the target roles list. Do not include expired, filled, or clearly irrelevant roles.
+Output ONLY a JSON array between the markers JOBS_START and JOBS_END. No other text outside the markers:
 
 JOBS_START
-[your JSON array here]
-JOBS_END`;
+[
+  {
+    "title": "Enterprise Account Executive",
+    "company": "Acme Corp",
+    "location": "Remote",
+    "url": "https://boards.greenhouse.io/acmecorp/jobs/12345",
+    "description": "Lead enterprise sales cycles for Fortune 500 accounts...",
+    "salary": "$150,000 - $180,000 base"
+  }
+]
+JOBS_END
+
+Rules:
+- Find up to ${maxResults} unique, currently open positions
+- Only include roles clearly matching the target roles list above
+- Do NOT include expired, filled, or clearly irrelevant roles
+- Prefer direct ATS URLs (greenhouse/lever/ashby/workday) over LinkedIn/Indeed links
+- Do not fabricate jobs — only include roles you can verify exist via search`;
 }
 
 // ── Response parser ───────────────────────────────────────────────────────────
 
 /**
- * Extracts the JSON job array from Gemini's free-form response text.
- * Looks for the JOBS_START / JOBS_END markers first, then falls back to
- * searching for a raw JSON array in the response.
+ * Extracts the JSON job array from Gemini's response text.
+ * Uses 3 progressive strategies with fallback parsing.
  */
 function parseJobsFromText(text: string): RawGeminiJobRecord[] {
-  // Strategy 1: Look for our explicit markers
+  // Strategy 1: explicit JOBS_START / JOBS_END markers
   const markerMatch = text.match(/JOBS_START\s*([\s\S]*?)\s*JOBS_END/);
   if (markerMatch) {
     const jsonStr = markerMatch[1].trim();
     try {
       const parsed = JSON.parse(jsonStr);
       if (Array.isArray(parsed)) return parsed as RawGeminiJobRecord[];
-    } catch {
-      // Fall through to strategy 2
-    }
+    } catch { /* fall through */ }
   }
 
-  // Strategy 2: Find any JSON array in the response (largest one)
+  // Strategy 2: largest JSON array found anywhere in the response
   const jsonMatches: string[] = (text.match(/\[[\s\S]*?\]/g) as string[] | null) ?? [];
   for (const candidate of jsonMatches.sort((a, b) => b.length - a.length)) {
     try {
@@ -261,75 +255,82 @@ function parseJobsFromText(text: string): RawGeminiJobRecord[] {
       if (Array.isArray(parsed) && parsed.length > 0 && (parsed[0].title || parsed[0].url)) {
         return parsed as RawGeminiJobRecord[];
       }
-    } catch {
-      // Continue
-    }
+    } catch { /* continue */ }
   }
 
-  // Strategy 3: Try to parse any JSON object containing a "jobs" key
-  const objMatch = text.match(/\{[\s\S]*?"jobs"[\s\S]*?\}/);
+  // Strategy 3: JSON object with a "jobs" key
+  const objMatch = text.match(/\{[\s\S]*?"jobs"\s*:\s*\[[\s\S]*?\]\s*\}/);
   if (objMatch) {
     try {
       const parsed = JSON.parse(objMatch[0]);
       if (Array.isArray(parsed.jobs)) return parsed.jobs as RawGeminiJobRecord[];
-    } catch {
-      // Fall through
-    }
+    } catch { /* fall through */ }
   }
 
-  console.log('[Gemini] Could not parse structured job data from response. Raw preview:', text.slice(0, 300));
+  console.log('[Gemini] Could not parse structured job data from response preview:', text.slice(0, 400));
   return [];
 }
 
-// ── Normalizer ────────────────────────────────────────────────────────────────
+// ── URL utilities ─────────────────────────────────────────────────────────────
 
 const KNOWN_ATS_DOMAINS = [
   'greenhouse.io', 'lever.co', 'ashbyhq.com', 'jobs.ashbyhq.com',
   'boards.greenhouse.io', 'jobs.lever.co', 'myworkdayjobs.com',
   'icims.com', 'smartrecruiters.com', 'bamboohr.com', 'rippling.com',
+  'workday.com', 'taleo.net', 'jobvite.com', 'recruitee.com',
 ];
 
-/** True when the URL appears to be a direct company job posting (not an aggregator) */
-function isDirectCompanyUrl(url: string): boolean {
+const AGGREGATOR_DOMAINS = [
+  'linkedin.com', 'indeed.com', 'glassdoor.com', 'ziprecruiter.com',
+  'simplyhired.com', 'monster.com', 'dice.com',
+];
+
+/** True when the URL appears to be a direct company/ATS job posting, not an aggregator */
+export function isDirectCompanyUrl(url: string): boolean {
+  if (!url) return false;
   try {
     const host = new URL(url).hostname.toLowerCase();
-    // Known ATS domains are direct — they host the actual job posting
-    if (KNOWN_ATS_DOMAINS.some(d => host.endsWith(d))) return true;
-    // LinkedIn / Indeed / Glassdoor = aggregators
-    if (['linkedin.com', 'indeed.com', 'glassdoor.com', 'ziprecruiter.com'].some(d => host.endsWith(d))) return false;
-    // Anything else that looks like a careers/jobs path on a company domain
+    if (KNOWN_ATS_DOMAINS.some(d => host === d || host.endsWith('.' + d))) return true;
+    if (AGGREGATOR_DOMAINS.some(d => host === d || host.endsWith('.' + d))) return false;
+    // Anything else on a company domain with /careers or /jobs path
     return true;
   } catch {
     return false;
   }
 }
 
-/** Assign a confidence score based on data quality */
-function scoreConfidence(job: RawGeminiJobRecord): number {
-  let score = 0.5; // base
-  if (job.url && job.url.startsWith('http')) score += 0.1;
-  if (isDirectCompanyUrl(job.url ?? ''))     score += 0.15;
-  if (job.description && job.description.length > 50) score += 0.1;
-  if (job.title && job.title.length > 5)    score += 0.05;
-  if (job.company && job.company.length > 1) score += 0.05;
-  if (job.salary)                            score += 0.05;
-  return Math.min(1, score);
-}
-
-function normalizeUrl(rawUrl: string): string {
+/** Strips tracking params and normalises trailing slashes */
+export function normalizeUrl(rawUrl: string): string {
   try {
     const u = new URL(rawUrl);
-    // Strip common tracking params
-    ['utm_source','utm_medium','utm_campaign','utm_content','utm_term','ref','referral'].forEach(p => u.searchParams.delete(p));
+    ['utm_source','utm_medium','utm_campaign','utm_content','utm_term','ref','referral']
+      .forEach(p => u.searchParams.delete(p));
     return u.href.replace(/\/$/, '');
   } catch {
     return rawUrl.trim();
   }
 }
 
+// ── Confidence scorer ─────────────────────────────────────────────────────────
+
+/** Assigns a 0–1 confidence score based on data completeness and URL quality */
+function scoreConfidence(job: RawGeminiJobRecord): number {
+  let score = 0.45; // base for having a parseable record
+  const url = job.url ?? job.apply_url ?? '';
+  if (url.startsWith('http'))                          score += 0.10;
+  if (isDirectCompanyUrl(url))                         score += 0.15;
+  if (job.description && job.description.length > 50)  score += 0.10;
+  if (job.title && job.title.length > 5)               score += 0.08;
+  if (job.company && job.company.length > 1)           score += 0.07;
+  if (job.salary)                                      score += 0.05;
+  return Math.min(1, score);
+}
+
+// ── Normalizer ────────────────────────────────────────────────────────────────
+
 function normalizeGeminiJobs(
   rawJobs: RawGeminiJobRecord[],
-  groundingMeta: GeminiGroundingMetadata,
+  groundingMeta: GroundingMetadata,
   sources: GeminiSource[],
   webSearchQueries: string[],
   criteria: GeminiDiscoveryCriteria,
@@ -338,64 +339,68 @@ function normalizeGeminiJobs(
   const results: GeminiJob[] = [];
 
   for (const raw of rawJobs) {
-    // Require at minimum title + company + url
-    const url = (raw.url ?? raw.apply_url ?? '').trim();
-    const title = (raw.title ?? '').trim();
+    const url     = (raw.url ?? raw.apply_url ?? '').trim();
+    const title   = (raw.title   ?? '').trim();
     const company = (raw.company ?? '').trim();
 
     if (!url || !title || !company) continue;
     if (!url.startsWith('http')) continue;
 
-    // Dedup within Gemini results (by normalized URL or company+title)
     const normalUrl = normalizeUrl(url);
-    const dedupeKey = normalUrl || `${company.toLowerCase()}::${title.toLowerCase()}`;
+    const dedupeKey = normalUrl || `${company.toLowerCase()}::${normalizeTitle(title)}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
 
-    const job: GeminiJob = {
+    results.push({
       title,
       company,
-      location: (raw.location ?? '').trim() || guessLocation(criteria),
-      salary:   raw.salary ?? undefined,
-      applyUrl: normalUrl || url,
+      location:    (raw.location ?? '').trim() || guessLocation(criteria),
+      salary:      raw.salary ?? undefined,
+      applyUrl:    normalUrl || url,
       description: raw.description ?? undefined,
-      source:   'Gemini',
+      source:      'Gemini',
+      // Grounding metadata is stored per-job (shared across all jobs in this batch)
+      // and persisted to DB for future citation UI
       geminiGroundingMetadata: groundingMeta,
       geminiSources:           sources,
       geminiWebSearchQueries:  webSearchQueries,
       ingestionConfidence:     scoreConfidence(raw),
-    };
-
-    results.push(job);
+    });
   }
 
   return results;
 }
 
-/** Guess a reasonable location string from criteria when Gemini omits it */
 function guessLocation(criteria: GeminiDiscoveryCriteria): string {
   if (criteria.work_type === 'remote') return 'Remote';
-  if (criteria.locations.length > 0) return criteria.locations[0];
+  if (criteria.locations.length > 0)  return criteria.locations[0];
   return 'Unknown';
 }
 
-// ── Deduplication helper (used by the pipeline in index.ts) ──────────────────
+// ── Cross-source deduplication (used by pipeline in index.ts) ─────────────────
 
+/**
+ * Merges Gemini-discovered jobs with the primary job list (JobSpy/ATS).
+ * - Deduplicates by normalized URL and company+title
+ * - Enriches existing records with Gemini descriptions where missing
+ * - Upgrades aggregator URLs to direct company URLs where Gemini found them
+ * - Gemini records not already in primary are flagged _fromGemini=true
+ */
 export function deduplicateJobLists(
   primary: Array<ScrapedJob & { source: string; _fromJobSpy?: boolean }>,
   gemini: GeminiJob[]
-): { merged: Array<ScrapedJob & { source: string; _fromJobSpy?: boolean; _fromGemini?: boolean; ingestionConfidence?: number }>; deduplicatedCount: number } {
-  const normalizedPrimaryUrls = new Map<string, number>(); // normalUrl → index
-  const companyTitleKeys = new Map<string, number>();       // "company::title" → index
+): {
+  merged: Array<ScrapedJob & { source: string; _fromJobSpy?: boolean; _fromGemini?: boolean; ingestionConfidence?: number }>;
+  deduplicatedCount: number;
+} {
+  const urlIndex = new Map<string, number>();   // normalUrl → merged[] index
+  const ckIndex  = new Map<string, number>();   // "company::title" → merged[] index
 
-  // Index primary jobs
   for (let i = 0; i < primary.length; i++) {
-    const j = primary[i];
-    const normalUrl = normalizeUrl(j.applyUrl);
-    if (normalUrl) normalizedPrimaryUrls.set(normalUrl, i);
-
-    const ck = `${j.company.toLowerCase().trim()}::${normalizeTitle(j.title)}`;
-    companyTitleKeys.set(ck, i);
+    const j   = primary[i];
+    const url = normalizeUrl(j.applyUrl);
+    if (url) urlIndex.set(url, i);
+    ckIndex.set(`${j.company.toLowerCase().trim()}::${normalizeTitle(j.title)}`, i);
   }
 
   const merged: Array<ScrapedJob & { source: string; _fromJobSpy?: boolean; _fromGemini?: boolean; ingestionConfidence?: number }> = [...primary];
@@ -403,48 +408,40 @@ export function deduplicateJobLists(
 
   for (const gJob of gemini) {
     const normalUrl = normalizeUrl(gJob.applyUrl);
-    const ck = `${gJob.company.toLowerCase().trim()}::${normalizeTitle(gJob.title)}`;
+    const ck        = `${gJob.company.toLowerCase().trim()}::${normalizeTitle(gJob.title)}`;
 
-    // Check if this job already exists in primary results
-    const existsByUrl = normalUrl && normalizedPrimaryUrls.has(normalUrl);
-    const existsByCompanyTitle = companyTitleKeys.has(ck);
+    const existsByUrl   = normalUrl ? urlIndex.has(normalUrl) : false;
+    const existsByTitle = ckIndex.has(ck);
 
-    if (existsByUrl || existsByCompanyTitle) {
-      // Duplicate found — potentially enrich the existing record with description
-      const existingIdx = existsByUrl ? normalizedPrimaryUrls.get(normalUrl)! : companyTitleKeys.get(ck)!;
-      const existing = merged[existingIdx];
-      // Enrich: if Gemini has a description and the existing record doesn't, use it
-      if (!existing.description && gJob.description) {
-        merged[existingIdx] = { ...existing, description: gJob.description };
-      }
-      // Prefer direct company URL over aggregator URL
+    if (existsByUrl || existsByTitle) {
+      // Duplicate — enrich the existing record rather than adding a new one
+      const idx      = existsByUrl ? urlIndex.get(normalUrl)! : ckIndex.get(ck)!;
+      let existing   = merged[idx];
+
+      // Upgrade to direct company URL if current one is an aggregator link
       if (gJob.applyUrl && isDirectCompanyUrl(gJob.applyUrl) && !isDirectCompanyUrl(existing.applyUrl)) {
-        merged[existingIdx] = { ...merged[existingIdx], applyUrl: gJob.applyUrl };
+        existing = { ...existing, applyUrl: gJob.applyUrl };
       }
+      // Fill in missing description
+      if (!existing.description && gJob.description) {
+        existing = { ...existing, description: gJob.description };
+      }
+      merged[idx] = existing;
       deduplicatedCount++;
       continue;
     }
 
-    // Genuinely new job from Gemini — add to merged list
-    merged.push({
-      ...gJob,
-      _fromGemini: true,
-      ingestionConfidence: gJob.ingestionConfidence,
-    });
+    // Genuinely new job from Gemini
+    const newIdx = merged.length;
+    merged.push({ ...gJob, _fromGemini: true, ingestionConfidence: gJob.ingestionConfidence });
 
-    // Index the new entry
-    const newIdx = merged.length - 1;
-    if (normalUrl) normalizedPrimaryUrls.set(normalUrl, newIdx);
-    companyTitleKeys.set(ck, newIdx);
+    if (normalUrl) urlIndex.set(normalUrl, newIdx);
+    ckIndex.set(ck, newIdx);
   }
 
   return { merged, deduplicatedCount };
 }
 
 function normalizeTitle(title: string): string {
-  return title
-    .toLowerCase()
-    .replace(/[^a-z0-9 ]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return title.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 }
