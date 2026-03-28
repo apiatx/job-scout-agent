@@ -1460,12 +1460,15 @@ app.post('/api/tailor/:jobId', async (req: Request, res: Response) => {
     const { rows: jobRows } = await pool.query('SELECT * FROM jobs WHERE id=$1', [jobId]);
     if (jobRows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
     const job = jobRows[0];
-    // Get resume
-    const { rows: resRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
-    const resume = resRows[0]?.value ?? '';
+    // Get resume and model preference
+    const { rows: resRows } = await pool.query("SELECT key, value FROM settings WHERE key IN ('resume', 'tailor_model')");
+    const byKey: Record<string, string> = {};
+    resRows.forEach((r: { key: string; value: string }) => { byKey[r.key] = r.value; });
+    const resume = byKey['resume'] ?? '';
     if (!resume) { res.status(400).json({ error: 'No base resume saved. Please save your resume first.' }); return; }
+    const tailorModel = byKey['tailor_model'] || 'claude-sonnet-4-5';
 
-    const result = await tailorResumeWithClaude(job, resume, { targetPages });
+    const result = await tailorResumeWithClaude(job, resume, { targetPages, model: tailorModel });
     const { rows: inserted } = await pool.query(
       `INSERT INTO tailored_docs (job_id, resume_text, cover_letter) VALUES ($1, $2, $3) RETURNING *`,
       [jobId, result.resume, result.coverLetter]
@@ -1490,7 +1493,9 @@ app.post('/api/tailor-freeform', async (req: Request, res: Response) => {
       location: '',
       description: jobDescription,
     };
-    const result = await tailorResumeWithClaude(fakeJob, resume, { targetPages });
+    const { rows: modelRows } = await pool.query("SELECT value FROM settings WHERE key='tailor_model'");
+    const tailorModel = modelRows[0]?.value || 'claude-sonnet-4-5';
+    const result = await tailorResumeWithClaude(fakeJob, resume, { targetPages, model: tailorModel });
     res.json({ resume_text: result.resume, cover_letter: result.coverLetter, suggested_edits: result.suggestedEdits ?? '', analysis: result.analysis });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
@@ -2636,6 +2641,9 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .tailor-kw.signal{background:rgba(74,222,128,.1);border-color:rgba(74,222,128,.3);color:#4ade80}
 .tailor-signal-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 .tailor-page-badge{display:inline-flex;align-items:center;gap:4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-size:11px;color:var(--muted);margin-top:8px}
+.model-pick-btn{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 18px;cursor:pointer;text-align:left;transition:border-color .15s,background .15s;color:var(--text);min-width:200px}
+.model-pick-btn:hover{border-color:var(--gold);background:#1c1608}
+.model-pick-btn.active{border-color:var(--gold);background:#1c1608;box-shadow:0 0 0 1px var(--gold)}
 @media print{body *{visibility:hidden}.print-target,.print-target *{visibility:visible}.print-target{position:fixed;top:0;left:0;width:100%;background:#fff;color:#000;padding:40px;font-size:13px;line-height:1.7}.print-target h1{font-size:22px;font-weight:700;margin-bottom:4px}.print-target h2{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin:16px 0 6px;border-bottom:1px solid #ccc;padding-bottom:4px}.print-target h3{font-size:13px;font-weight:600;margin:10px 0 4px}.print-target ul{padding-left:20px}.print-target li{margin-bottom:3px}}
 
 /* email tab */
@@ -3032,7 +3040,21 @@ textarea:focus,input:focus{border-color:var(--gold)}
     </div>
   </div>
 
-  <div class="save-row">
+  <div class="sec-title" style="margin:24px 0 12px">Resume AI Model</div>
+  <div style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.6">Choose which Claude model powers resume tailoring and cover letter writing. Opus produces higher-quality, more nuanced output — Sonnet is faster and still excellent.</div>
+  <div style="display:flex;gap:12px;flex-wrap:wrap" id="tailor-model-btns">
+    <button class="model-pick-btn" id="mpb-sonnet" onclick="setTailorModel('claude-sonnet-4-5')">
+      <div style="font-size:13px;font-weight:700">Claude Sonnet</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:3px">Fast · Great quality · Default</div>
+    </button>
+    <button class="model-pick-btn" id="mpb-opus" onclick="setTailorModel('claude-opus-4-5')">
+      <div style="font-size:13px;font-weight:700">Claude Opus</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:3px">Slower · Best quality · Recommended for final applications</div>
+    </button>
+  </div>
+  <div id="tailor-model-msg" style="font-size:11px;color:#4ade80;margin-top:8px;display:none">Model saved.</div>
+
+  <div class="save-row" style="margin-top:24px">
     <button class="btn btn-gold" onclick="saveCriteria()">Save Settings</button>
     <span class="ok-msg" id="settings-msg" style="display:none">Saved!</span>
   </div>
@@ -4156,6 +4178,17 @@ function setTags(stateKey, tagsId, arr) {
 }
 
 var _criteriaInitialized = false;
+async function setTailorModel(model) {
+  await fetch('/api/settings/tailor_model', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:model}) });
+  document.querySelectorAll('.model-pick-btn').forEach(function(b){ b.classList.remove('active'); });
+  var id = model === 'claude-opus-4-5' ? 'mpb-opus' : 'mpb-sonnet';
+  var btn = document.getElementById(id);
+  if (btn) btn.classList.add('active');
+  var msg = document.getElementById('tailor-model-msg');
+  msg.style.display = '';
+  setTimeout(function(){ msg.style.display = 'none'; }, 2000);
+}
+
 async function loadCriteria() {
   try {
     var c;
@@ -4212,6 +4245,19 @@ async function loadCriteria() {
       initTagInput('set-avoid-input', 'set-avoid-tags', 'avoid');
       initTagInput('set-niches-input', 'set-niches-tags', 'vertical_niches');
       _criteriaInitialized = true;
+    }
+    // Load saved tailor model and highlight the correct button
+    try {
+      var mr = await fetch('/api/settings/tailor_model');
+      var md = await mr.json();
+      var savedModel = md.value || 'claude-sonnet-4-5';
+      document.querySelectorAll('.model-pick-btn').forEach(function(b){ b.classList.remove('active'); });
+      var activeId = savedModel === 'claude-opus-4-5' ? 'mpb-opus' : 'mpb-sonnet';
+      var activeBtn = document.getElementById(activeId);
+      if (activeBtn) activeBtn.classList.add('active');
+    } catch(e2) {
+      var fb = document.getElementById('mpb-sonnet');
+      if (fb) fb.classList.add('active');
     }
   } catch(e) {
     console.error('loadCriteria failed:', e);

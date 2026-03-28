@@ -634,7 +634,7 @@ export interface TailoringAnalysis {
 export async function tailorResumeWithClaude(
   job: { title: string; company: string; location: string; description?: string; why_good_fit?: string; apply_url?: string },
   baseResume: string,
-  options?: { targetPages?: 1 | 2 }
+  options?: { targetPages?: 1 | 2; model?: string }
 ): Promise<{ resume: string; coverLetter: string; suggestedEdits?: string; analysis?: TailoringAnalysis }> {
 
   // Estimate base resume word count to calibrate page target
@@ -743,8 +743,9 @@ Respond ONLY with a valid JSON object — no markdown fences, no text outside th
   "suggestedEdits": "## What Changed & Why\\n\\nHere's the reasoning behind every major move made in the tailored resume:\\n\\n### Summary\\n[1-2 sentences on how the summary was repositioned and what JD signals drove it]\\n\\n### Skills Section\\n- **Added**: [keyword] — [why: required in JD / ATS must-match]\\n- **Moved up**: [skill] — [why: JD lists it as primary requirement]\\n- **Removed**: [skill] — [why: not mentioned in JD, used the space for higher-signal terms]\\n\\n### [Company Name] ([years])\\n- **Bullet X rewritten** — original focused on [X]; new version leads with [stronger verb + JD-matched outcome] because the JD signals [specific requirement]\\n- **New bullet added** — covers [topic] because JD explicitly calls out [signal]\\n\\n### [Next Company / Role]\\n- [reasoning for changes made to that role]\\n\\n### What was NOT changed and why\\n[Brief note on anything deliberately kept as-is and the rationale]"
 }`;
 
+  const model = options?.model || 'claude-sonnet-4-5';
   const message = await anthropic.messages.create({
-    model: 'claude-sonnet-4-5',
+    model,
     max_tokens: 8096,
     system: systemPrompt,
     messages: [{ role: 'user', content: prompt }],
