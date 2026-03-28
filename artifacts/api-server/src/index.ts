@@ -2653,7 +2653,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
 <body>
 
 <header>
-  <span class="logo">&#x2B21; Job Scout Agent</span>
+  <span class="logo">&#x2B21; JSOS.ai</span>
   <div class="hdr-right">
     <span class="hdr-status" id="hdr-status"></span>
     <span class="gmail-badge off" id="gmail-badge">Gmail: ---</span>
