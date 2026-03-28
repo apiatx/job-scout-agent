@@ -289,6 +289,7 @@ async function initDb(): Promise<void> {
   await safeAddColumn('criteria', 'allowed_work_modes', "TEXT[] NOT NULL DEFAULT '{}'");
   await safeAddColumn('criteria', 'experience_levels', "TEXT[] NOT NULL DEFAULT '{}'");
   await safeAddColumn('criteria', 'min_ote', 'INT');
+  await safeAddColumn('saved_resumes', 'content_html', 'TEXT NOT NULL DEFAULT \'\'');
   // Migrate remote_strict → allowed_work_modes for existing rows
   await pool.query(`
     UPDATE criteria
@@ -1202,19 +1203,26 @@ app.put('/api/settings/:key', async (req: Request, res: Response) => {
 // Resume
 app.get('/api/resume', async (_req, res: Response) => {
   try {
-    const { rows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
-    res.json({ resume: rows[0]?.value ?? '' });
+    const { rows } = await pool.query("SELECT key, value FROM settings WHERE key IN ('resume', 'resume_html')");
+    const byKey: Record<string, string> = {};
+    rows.forEach((r: any) => { byKey[r.key] = r.value; });
+    res.json({ resume: byKey['resume'] ?? '', resume_html: byKey['resume_html'] ?? '' });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 app.put('/api/resume', async (req: Request, res: Response) => {
   try {
-    const { resume } = req.body;
+    const { resume, resume_html } = req.body;
     await pool.query(
-      `INSERT INTO settings (key, value) VALUES ('resume', $1)
-       ON CONFLICT (key) DO UPDATE SET value=$1`,
+      `INSERT INTO settings (key, value) VALUES ('resume', $1) ON CONFLICT (key) DO UPDATE SET value=$1`,
       [resume ?? '']
     );
+    if (resume_html !== undefined) {
+      await pool.query(
+        `INSERT INTO settings (key, value) VALUES ('resume_html', $1) ON CONFLICT (key) DO UPDATE SET value=$1`,
+        [resume_html ?? '']
+      );
+    }
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
@@ -1222,7 +1230,7 @@ app.put('/api/resume', async (req: Request, res: Response) => {
 // Saved resumes — list
 app.get('/api/resumes', async (_req, res: Response) => {
   try {
-    const { rows } = await pool.query('SELECT id, name, LEFT(content, 120) AS preview, created_at FROM saved_resumes ORDER BY created_at DESC');
+    const { rows } = await pool.query('SELECT id, name, content_html, LEFT(content, 120) AS preview, created_at FROM saved_resumes ORDER BY created_at DESC');
     const { rows: active } = await pool.query("SELECT value FROM settings WHERE key='active_resume_id'");
     res.json({ resumes: rows, activeId: active[0]?.value ? Number(active[0].value) : null });
   } catch (e) { res.status(500).json({ error: String(e) }); }
@@ -1240,11 +1248,11 @@ app.get('/api/resumes/:id', async (req: Request, res: Response) => {
 // Saved resumes — create / rename
 app.post('/api/resumes', async (req: Request, res: Response) => {
   try {
-    const { name, content } = req.body;
+    const { name, content, content_html } = req.body;
     if (!name || !content) { res.status(400).json({ error: 'name and content required' }); return; }
     const { rows } = await pool.query(
-      'INSERT INTO saved_resumes (name, content) VALUES ($1, $2) RETURNING *',
-      [name, content]
+      'INSERT INTO saved_resumes (name, content, content_html) VALUES ($1, $2, $3) RETURNING *',
+      [name, content, content_html ?? '']
     );
     res.json({ ok: true, resume: rows[0] });
   } catch (e) { res.status(500).json({ error: String(e) }); }
@@ -1269,6 +1277,10 @@ app.post('/api/resumes/:id/activate', async (req: Request, res: Response) => {
       [r.content]
     );
     await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('resume_html', $1) ON CONFLICT (key) DO UPDATE SET value=$1`,
+      [r.content_html ?? '']
+    );
+    await pool.query(
       `INSERT INTO settings (key, value) VALUES ('active_resume_id', $1) ON CONFLICT (key) DO UPDATE SET value=$1`,
       [String(r.id)]
     );
@@ -1276,22 +1288,36 @@ app.post('/api/resumes/:id/activate', async (req: Request, res: Response) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-// Resume file upload (PDF or DOCX) — extracts text and auto-saves to DB
+// Sanitize mammoth HTML output — keep semantic tags, strip dangerous attributes
+function sanitizeMammothHtml(html: string): string {
+  return html
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+    .replace(/ on\w+="[^"]*"/gi, '')
+    .replace(/ style="[^"]*"/gi, '');
+}
+
+// Resume file upload (PDF or DOCX) — extracts text and stores HTML for display
 app.post('/api/resume/upload', upload.single('file'), async (req: Request, res: Response) => {
   try {
     const mreq = req as any;
     if (!mreq.file) { res.status(400).json({ error: 'No file uploaded' }); return; }
     const { mimetype, buffer, originalname } = mreq.file as { mimetype: string; buffer: Buffer; originalname: string };
     let text = '';
+    let html = ''; // rich HTML for display (DOCX only; PDF/text uses client-side converter)
     if (mimetype === 'application/pdf' || originalname.toLowerCase().endsWith('.pdf')) {
       const parsed = await pdfParse(buffer);
       text = parsed.text;
+      // html left empty — client generates via textToResumeHtml()
     } else if (
       mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
       originalname.toLowerCase().endsWith('.docx')
     ) {
-      const result = await mammoth.extractRawText({ buffer });
-      text = result.value;
+      const [rawResult, htmlResult] = await Promise.all([
+        mammoth.extractRawText({ buffer }),
+        mammoth.convertToHtml({ buffer }),
+      ]);
+      text = rawResult.value;
+      html = sanitizeMammothHtml(htmlResult.value);
     } else {
       res.status(400).json({ error: 'Unsupported file type. Upload a PDF or Word (.docx) file.' });
       return;
@@ -1299,16 +1325,20 @@ app.post('/api/resume/upload', upload.single('file'), async (req: Request, res: 
     // Clean up extracted text
     text = text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 
-    // Auto-save to settings (active resume) and saved_resumes
+    // Auto-save to settings (active resume + html)
     await pool.query(
       `INSERT INTO settings (key, value) VALUES ('resume', $1) ON CONFLICT (key) DO UPDATE SET value=$1`,
       [text]
     );
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('resume_html', $1) ON CONFLICT (key) DO UPDATE SET value=$1`,
+      [html]
+    );
     // Save as named resume using the filename (strip extension)
     const resumeName = originalname.replace(/\.[^.]+$/, '');
     const { rows: inserted } = await pool.query(
-      `INSERT INTO saved_resumes (name, content) VALUES ($1, $2) RETURNING id`,
-      [resumeName, text]
+      `INSERT INTO saved_resumes (name, content, content_html) VALUES ($1, $2, $3) RETURNING id`,
+      [resumeName, text, html]
     );
     const newId = inserted[0].id;
     // Mark as active
@@ -1317,7 +1347,7 @@ app.post('/api/resume/upload', upload.single('file'), async (req: Request, res: 
       [String(newId)]
     );
 
-    res.json({ ok: true, text, savedId: newId, savedName: resumeName });
+    res.json({ ok: true, text, html, savedId: newId, savedName: resumeName });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -2596,6 +2626,22 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .page-toggle{display:flex;gap:0;border:1px solid var(--border);border-radius:6px;overflow:hidden}
 .page-toggle-btn{padding:5px 14px;font-size:12px;font-weight:600;background:transparent;border:none;color:var(--muted);cursor:pointer;transition:all .15s}
 .page-toggle-btn.active{background:var(--gold);color:#000}
+/* resume view toggle */
+.rvt{display:flex;gap:0;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.rvt-btn{background:transparent;border:none;color:var(--muted);font-size:11px;padding:4px 10px;cursor:pointer;transition:background .15s,color .15s;font-family:inherit}
+.rvt-btn:hover{background:rgba(255,255,255,.05);color:var(--text)}
+.rvt-btn.active{background:var(--gold);color:#1a1207;font-weight:600}
+.resume-formatted-view{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px 20px;font-size:13px;line-height:1.75;color:var(--text);max-height:500px;overflow-y:auto}
+.resume-formatted-view h1{font-size:20px;font-weight:700;color:var(--text);margin:0 0 4px}
+.resume-formatted-view h2{font-size:12px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:.1em;margin:18px 0 6px;border-bottom:1px solid var(--border);padding-bottom:4px}
+.resume-formatted-view h3{font-size:13px;font-weight:600;color:var(--text);margin:10px 0 2px}
+.resume-formatted-view p{margin:2px 0;white-space:pre-wrap}
+.resume-formatted-view ul{margin:4px 0 8px;padding-left:18px}
+.resume-formatted-view li{margin-bottom:2px}
+.resume-formatted-view strong,.resume-formatted-view b{color:var(--text);font-weight:700}
+.resume-formatted-view em,.resume-formatted-view i{font-style:italic}
+.resume-formatted-view a{color:var(--gold);text-decoration:none}
+.resume-formatted-view .empty-hint{color:var(--muted);font-size:12px;text-align:center;padding:40px 0}
 /* tailoring analysis panel */
 .tailor-analysis{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:16px;font-size:12px}
 .tailor-analysis-title{font-size:11px;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px}
@@ -2746,8 +2792,15 @@ textarea:focus,input:focus{border-color:var(--gold)}
 
   <div class="resume-split">
     <div class="resume-col">
-      <div class="sec-title" style="margin-bottom:8px">Base Resume <span id="active-resume-label" style="color:var(--gold);font-weight:400;font-size:11px"></span></div>
-      <textarea id="resume-text" rows="20" placeholder="Paste your full resume here, or upload a PDF/Word file above…"></textarea>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div class="sec-title">Base Resume <span id="active-resume-label" style="color:var(--gold);font-weight:400;font-size:11px"></span></div>
+        <div class="rvt" id="resume-view-toggle">
+          <button class="rvt-btn active" id="rvt-formatted" onclick="setResumeView('formatted')">Formatted</button>
+          <button class="rvt-btn" id="rvt-edit" onclick="setResumeView('edit')">Edit Text</button>
+        </div>
+      </div>
+      <div class="resume-formatted-view" id="resume-formatted-view"><div class="empty-hint">Upload a PDF or Word doc above, or switch to Edit Text to paste your resume.</div></div>
+      <textarea id="resume-text" rows="20" placeholder="Paste your full resume here, or upload a PDF/Word file above…" style="display:none" oninput="_resumeHtmlDirty=true"></textarea>
       <div class="save-row">
         <button class="btn btn-gold btn-sm" onclick="saveResume()">Save as Active</button>
         <span class="ok-msg" id="resume-msg" style="display:none">Saved!</span>
@@ -3619,11 +3672,99 @@ async function _postDocxDownload(md, filename) {
 // ── resume ────────────────────────────────────────────────────────────────
 var _savedResumes = [];
 var _activeResumeId = null;
+var _resumeCurrentHtml = ''; // tracks the HTML currently in the formatted view
+var _resumeHtmlDirty = false; // true when textarea was edited without refreshing formatted view
+
+// Convert plain text resume to HTML for the formatted view
+function textToResumeHtml(text) {
+  if (!text || !text.trim()) return '<div class="empty-hint">No resume content yet \u2014 upload a file or switch to Edit Text to paste.</div>';
+  function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  var lines = text.split('\\n');
+  var out = [];
+  var inList = false;
+  var firstNonEmpty = -1;
+  for (var k = 0; k < lines.length; k++) { if (lines[k].trim()) { firstNonEmpty = k; break; } }
+  function endList() { if (inList) { out.push('</ul>'); inList = false; } }
+  function isSectionHeader(s) {
+    if (s.length < 3 || s.length > 60) return false;
+    if (/^#{1,3} /.test(s)) return true;
+    // ALL CAPS: no lowercase letters, at least one uppercase, no 4-digit years, no @ or .
+    var up = s.toUpperCase();
+    return up === s && /[A-Z]/.test(s) && !/[0-9]{4}/.test(s) && !/[@.]/.test(s);
+  }
+  function isContactLine(s) {
+    if (s.indexOf('@') > 0 && s.indexOf('.') > s.indexOf('@')) return true;
+    if (s.replace(/[^0-9]/g,'').length >= 10) return true;
+    if (s.indexOf('linkedin.com') >= 0 || s.indexOf('github.com') >= 0) return true;
+    return false;
+  }
+  function isBullet(s) {
+    if (s.length < 2) return false;
+    var c = s.charCodeAt(0);
+    // ASCII: - (45) * (42) + (43); Unicode: bullet (8226) en-dash (8211) white-bullet (9702) middle-dot (183)
+    return (c === 45 || c === 42 || c === 43 || c === 8226 || c === 8211 || c === 9702 || c === 183) && s.charAt(1) === ' ';
+  }
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    var trim = line.trim();
+    if (!trim) { endList(); out.push('<div style="height:5px"></div>'); continue; }
+    if (i === firstNonEmpty) {
+      endList();
+      out.push('<h1>' + esc(trim) + '</h1>');
+      continue;
+    }
+    if (/^# /.test(trim)) { endList(); out.push('<h1>' + esc(trim.slice(2)) + '</h1>'); continue; }
+    if (/^## /.test(trim)) { endList(); out.push('<h2>' + esc(trim.slice(3)) + '</h2>'); continue; }
+    if (/^### /.test(trim)) { endList(); out.push('<h3>' + esc(trim.slice(4)) + '</h3>'); continue; }
+    if (isBullet(trim)) {
+      if (!inList) { out.push('<ul>'); inList = true; }
+      out.push('<li>' + esc(trim.slice(2).trim()) + '</li>');
+      continue;
+    }
+    if (isSectionHeader(trim)) { endList(); out.push('<h2>' + esc(trim) + '</h2>'); continue; }
+    if (isContactLine(trim)) { endList(); out.push('<p style="color:#94a3b8;font-size:12px;margin:2px 0">' + esc(trim) + '</p>'); continue; }
+    endList();
+    out.push('<p>' + esc(trim) + '</p>');
+  }
+  endList();
+  return out.join('');
+}
+
+function setResumeFormattedContent(htmlOrEmpty, fallbackText) {
+  var html = htmlOrEmpty || '';
+  if (!html && fallbackText) html = textToResumeHtml(fallbackText);
+  if (!html) html = '<div class="empty-hint">Upload a PDF or Word doc, or switch to Edit Text to paste.</div>';
+  _resumeCurrentHtml = html;
+  _resumeHtmlDirty = false;
+  document.getElementById('resume-formatted-view').innerHTML = html;
+}
+
+function setResumeView(mode) {
+  var fv = document.getElementById('resume-formatted-view');
+  var ta = document.getElementById('resume-text');
+  var btnF = document.getElementById('rvt-formatted');
+  var btnE = document.getElementById('rvt-edit');
+  if (mode === 'formatted') {
+    // Sync formatted view from textarea if user edited it
+    if (_resumeHtmlDirty) { setResumeFormattedContent('', ta.value); }
+    fv.style.display = '';
+    ta.style.display = 'none';
+    btnF.classList.add('active');
+    btnE.classList.remove('active');
+  } else {
+    fv.style.display = 'none';
+    ta.style.display = '';
+    ta.focus();
+    btnE.classList.add('active');
+    btnF.classList.remove('active');
+  }
+}
 
 async function loadResume() {
   var res = await fetch('/api/resume');
   var data = await res.json();
   document.getElementById('resume-text').value = data.resume || '';
+  setResumeFormattedContent(data.resume_html || '', data.resume || '');
   await loadSavedResumes();
 }
 
@@ -3680,6 +3821,8 @@ async function activateResume(id) {
   var data = await res.json();
   if (data.ok) {
     document.getElementById('resume-text').value = data.resume.content;
+    setResumeFormattedContent(data.resume.content_html || '', data.resume.content || '');
+    setResumeView('formatted');
     document.getElementById('resume-dropdown').style.display = 'none';
     _activeResumeId = id;
     await loadSavedResumes();
@@ -3691,7 +3834,8 @@ async function saveNamedResume() {
   var content = document.getElementById('resume-text').value.trim();
   if (!name) { alert('Please enter a name for this resume.'); return; }
   if (!content) { alert('Please paste or upload your resume text first.'); return; }
-  var res = await fetch('/api/resumes', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, content}) });
+  var content_html = _resumeCurrentHtml || textToResumeHtml(content);
+  var res = await fetch('/api/resumes', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, content, content_html}) });
   var data = await res.json();
   if (data.ok) {
     document.getElementById('resume-save-name').value = '';
@@ -3709,7 +3853,10 @@ async function deleteResume(id, e) {
 
 async function saveResume() {
   var text = document.getElementById('resume-text').value;
-  await fetch('/api/resume', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({resume:text}) });
+  var resume_html = _resumeCurrentHtml || textToResumeHtml(text);
+  // Sync formatted view if textarea was edited
+  if (_resumeHtmlDirty) { setResumeFormattedContent('', text); }
+  await fetch('/api/resume', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({resume:text, resume_html}) });
   var msg = document.getElementById('resume-msg');
   msg.style.display = '';
   setTimeout(function(){ msg.style.display = 'none'; }, 2500);
@@ -3719,7 +3866,7 @@ async function uploadResumeFile(input) {
   var file = input.files[0];
   if (!file) return;
   var msg = document.getElementById('upload-msg');
-  msg.textContent = 'Uploading and saving ' + file.name + '…';
+  msg.textContent = 'Uploading and parsing ' + file.name + '…';
   msg.style.color = 'var(--gold)';
   var form = new FormData();
   form.append('file', file);
@@ -3728,7 +3875,10 @@ async function uploadResumeFile(input) {
     var data = await res.json();
     if (data.error) { msg.textContent = 'Error: ' + data.error; msg.style.color = 'var(--red)'; return; }
     document.getElementById('resume-text').value = data.text;
-    msg.textContent = '✓ Saved as "' + data.savedName + '" — ready to use';
+    // Use rich mammoth HTML for DOCX, or auto-convert PDF text
+    setResumeFormattedContent(data.html || '', data.text || '');
+    setResumeView('formatted');
+    msg.textContent = '✓ Saved as "' + data.savedName + '" — formatting preserved';
     msg.style.color = '#4ade80';
     _activeResumeId = data.savedId;
     await loadSavedResumes();
