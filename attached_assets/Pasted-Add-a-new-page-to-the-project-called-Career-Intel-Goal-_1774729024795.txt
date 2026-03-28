@@ -1,0 +1,209 @@
+Add a new page to the project called **Career Intel**.
+
+Goal:
+Create a daily-refreshing page powered by our existing Gemini API + Google Search grounding integration that surfaces high-signal news and company intelligence relevant to the user’s job search. This page should help the user discover companies that may be strong places to work based on current momentum, hiring signals, company strength, and fit to the user’s saved settings.
+
+Important:
+This is NOT a generic news feed.
+It should be a curated, job-search-oriented intelligence page that answers:
+
+* what companies are hot right now
+* why they matter
+* why they may be attractive places to work
+* how they relate to the user’s saved job-search settings
+* what actions the user should consider
+
+Use the existing Gemini setup we already implemented:
+
+* current `@google/genai` SDK integration
+* Google Search grounding
+* model waterfall / env override logic
+* structured grounded response handling
+* citations / grounding metadata preservation where available
+
+Product requirements:
+
+1. Create a new page in the frontend navigation called **Career Intel**
+2. Add a backend route/service that refreshes this data daily
+3. Use saved user settings to shape the search and ranking
+4. Use Gemini grounded search to discover and synthesize relevant company/news/job-market signals
+5. Return structured, cited, user-relevant company opportunity cards
+6. Keep the output actionable, not just informational
+
+What the page should surface:
+For each company/opportunity card, include fields like:
+
+* company_name
+* company_url (if available)
+* summary
+* why_it_is_hot_now
+* why_it_could_be_a_good_place_to_work
+* likely_hiring_signal
+* likely_relevant_roles
+* fit_to_user_settings
+* action_recommendation (watch / target now / network in / low priority)
+* confidence_score
+* risk_flags
+* source_citations
+* gemini_web_search_queries (optional for debugging/transparency)
+* last_refreshed_at
+
+Signals Gemini should search for:
+
+* funding rounds
+* expansion / growth
+* new office openings
+* product launches
+* executive hires
+* acquisitions
+* earnings strength / growth signals
+* strategic partnerships
+* AI / infra / security / data investment signals
+* competitor weakness creating opportunity
+* hiring momentum
+* “careers” / “we’re hiring” / role expansion signals
+
+Use the user’s saved settings to personalize discovery:
+
+* target roles / titles
+* preferred industries
+* preferred company size / stage
+* preferred location / remote preferences
+* target keywords
+* excluded companies / industries
+* any other relevant stored settings already in the app
+
+Model usage:
+
+* Default model for daily refresh: `gemini-3-flash-preview`
+* Optional deeper-quality mode later: `gemini-3.1-pro-preview`
+* Keep `GEMINI_MODEL` env override support if the existing Gemini service already supports it
+* Use the same Google Search grounding approach already in the project
+
+Architecture requirements:
+
+1. Reuse existing Gemini discovery/search infrastructure where possible
+2. Do not duplicate Gemini client setup if a clean shared service already exists
+3. Create a clean new backend service/module for Career Intel generation if needed
+4. Keep this separate from the main jobs pipeline, but allow reuse of:
+
+   * settings loading
+   * Gemini grounding utilities
+   * structured parsing helpers
+   * source/citation handling
+5. Make this page additive and safe; do not break existing jobs functionality
+
+Daily refresh behavior:
+Implement one of these cleanly based on the current app architecture:
+
+* scheduled daily refresh job
+* cached daily refresh on first page load after cache expiration
+* or a persisted refresh timestamp with “refresh if older than 24h” logic
+
+Requirements:
+
+* Avoid regenerating constantly on every request
+* Persist results if there is already a DB pattern for storing refreshable data
+* Include `last_refreshed_at`
+* Add a manual “Refresh Intel” hook/API if easy and safe
+
+Structured output:
+Have Gemini return structured JSON-like output for a list of company intelligence cards plus optional market themes.
+
+Suggested top-level response shape:
+{
+"generated_at": "datetime",
+"market_summary": "string",
+"themes": [
+{
+"theme": "string",
+"summary": "string",
+"why_it_matters_for_job_search": "string"
+}
+],
+"companies": [
+{
+"company_name": "string",
+"company_url": "string | null",
+"summary": "string",
+"why_it_is_hot_now": "string",
+"why_it_could_be_a_good_place_to_work": "string",
+"likely_hiring_signal": "string",
+"likely_relevant_roles": ["string"],
+"fit_to_user_settings": "string",
+"action_recommendation": "watch | target_now | network_in | low_priority",
+"confidence_score": "number",
+"risk_flags": ["string"],
+"source_citations": [
+{
+"title": "string",
+"url": "string"
+}
+],
+"gemini_web_search_queries": ["string"]
+}
+]
+}
+
+Frontend expectations:
+Build a clean new page that includes:
+
+* page title: Career Intel
+* last refreshed timestamp
+* market summary section
+* emerging themes section
+* ranked company cards
+* source/citation display where available
+* action recommendation badge
+* optional fit/confidence display
+* loading / empty / error states
+
+UX direction:
+This should feel like a smart, curated opportunity radar for a job seeker — not like Google News.
+Prioritize signal density, clarity, and actionability.
+
+Ranking logic:
+After Gemini returns company cards, apply lightweight backend ranking that boosts:
+
+* fit to saved settings
+* relevance to target roles/industries
+* stronger hiring/growth signals
+* stronger confidence / source quality
+* stronger “why this matters” usefulness
+
+Do not rely only on Gemini ordering if a simple backend ranking layer can improve consistency.
+
+Implementation details:
+Please inspect the current codebase and integrate this cleanly.
+I expect you to:
+
+* find the current frontend navigation/page structure
+* find the existing Gemini integration
+* find settings storage/access
+* create the new backend service + route(s)
+* create the new page/component(s)
+* add caching/persistence/refresh logic
+* expose structured response data cleanly to the frontend
+
+Environment/config:
+Reuse existing Gemini env vars where possible.
+Only add new env vars if actually needed.
+
+When done, provide:
+
+1. summary of what you changed
+2. files modified
+3. any new routes added
+4. refresh/caching behavior
+5. any new storage/migration steps
+6. recommended next improvements
+
+Additional instruction:
+Before changing code, first inspect and summarize the relevant current architecture for:
+
+* frontend page/nav structure
+* existing Gemini service/integration
+* settings persistence
+* background refresh or caching patterns
+
+Then implement against the actual architecture safely.

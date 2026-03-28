@@ -8,6 +8,8 @@ import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, Unde
 import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, runJobSpyScraper, proxyConfigured } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
 import { runGeminiJobDiscovery, deduplicateJobLists, isDirectCompanyUrl, normalizeUrl as normalizeJobUrl } from './gemini_discovery.js';
+import { generateCareerIntel } from './career_intel.js';
+import type { CareerIntelCriteria } from './career_intel.js';
 import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier } from './agent.js';
 import type { SubScores, OpportunityTier, TierSettings, TailoringAnalysis } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
@@ -269,6 +271,12 @@ async function initDb(): Promise<void> {
       name       TEXT NOT NULL,
       content    TEXT NOT NULL DEFAULT '',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS career_intel (
+      id           SERIAL PRIMARY KEY,
+      result_json  JSONB NOT NULL,
+      generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
 
@@ -1117,6 +1125,64 @@ app.get('/api/jobs/source-breakdown', async (_req, res: Response) => {
     const total = rows.reduce((sum: number, r: Record<string, unknown>) => sum + (r.count as number), 0);
     res.json({ breakdown: rows, total });
   } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Career Intel routes ───────────────────────────────────────────────────────
+// GET  /api/career-intel        — return cached result (stale flag if >24h)
+// POST /api/career-intel/refresh — regenerate synchronously and persist
+
+app.get('/api/career-intel', async (_req, res: Response) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT result_json, generated_at FROM career_intel ORDER BY generated_at DESC LIMIT 1`
+    );
+    if (rows.length === 0) {
+      res.json({ data: null, stale: true, message: 'No intel generated yet. Click Refresh Intel to generate.' }); return;
+    }
+    const row = rows[0];
+    const age = Date.now() - new Date(row.generated_at).getTime();
+    const stale = age > 24 * 60 * 60 * 1000; // 24 hours
+    res.json({ data: row.result_json, generated_at: row.generated_at, stale });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/career-intel/refresh', async (_req, res: Response) => {
+  try {
+    const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
+    if (cRows.length === 0) {
+      res.status(400).json({ error: 'No search criteria configured. Set your preferences in Settings first.' }); return;
+    }
+    const c = cRows[0];
+    const criteria: CareerIntelCriteria = {
+      target_roles:     c.target_roles     ?? [],
+      industries:       c.industries       ?? [],
+      locations:        c.locations        ?? [],
+      work_type:        c.work_type        ?? 'any',
+      must_have:        c.must_have        ?? [],
+      nice_to_have:     c.nice_to_have     ?? [],
+      avoid:            c.avoid            ?? [],
+      min_salary:       c.min_salary       ?? null,
+      experience_levels: c.experience_levels ?? [],
+      vertical_niches:  c.vertical_niches  ?? [],
+    };
+
+    console.log('[CareerIntel] Manual refresh triggered via API');
+    const result = await generateCareerIntel(criteria);
+
+    // Persist result (keep only last 5 records to avoid unbounded growth)
+    await pool.query(
+      `INSERT INTO career_intel (result_json, generated_at) VALUES ($1, NOW())`,
+      [JSON.stringify(result)]
+    );
+    await pool.query(
+      `DELETE FROM career_intel WHERE id NOT IN (SELECT id FROM career_intel ORDER BY generated_at DESC LIMIT 5)`
+    );
+
+    res.json({ data: result, generated_at: result.generated_at, stale: false });
+  } catch (e) {
+    console.error('[CareerIntel] Refresh failed:', e);
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 app.get('/api/jobs/saved', async (_req, res: Response) => {
@@ -2890,6 +2956,51 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .model-pick-btn.active{border-color:var(--gold);background:#1c1608;box-shadow:0 0 0 1px var(--gold)}
 @media print{body *{visibility:hidden}.print-target,.print-target *{visibility:visible}.print-target{position:fixed;top:0;left:0;width:100%;background:#fff;color:#000;padding:40px;font-size:13px;line-height:1.7}.print-target h1{font-size:22px;font-weight:700;margin-bottom:4px}.print-target h2{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin:16px 0 6px;border-bottom:1px solid #ccc;padding-bottom:4px}.print-target h3{font-size:13px;font-weight:600;margin:10px 0 4px}.print-target ul{padding-left:20px}.print-target li{margin-bottom:3px}}
 
+/* career intel */
+.intel-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+.intel-meta{font-size:11px;color:var(--muted);margin-top:2px}
+.intel-section-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin:24px 0 10px}
+.intel-market-summary{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px 18px;font-size:13px;line-height:1.7;color:var(--text);margin-bottom:4px}
+.intel-themes-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:4px}
+.intel-theme-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
+.intel-theme-name{font-size:12px;font-weight:700;color:var(--gold);margin-bottom:6px}
+.intel-theme-body{font-size:12px;color:var(--text);line-height:1.6;margin-bottom:6px}
+.intel-theme-why{font-size:11px;color:var(--muted);line-height:1.5}
+.intel-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}
+.intel-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px;transition:border-color .15s}
+.intel-card:hover{border-color:var(--gold)}
+.intel-card-header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.intel-company-name{font-size:14px;font-weight:700;color:var(--text)}
+.intel-company-url{font-size:11px;color:var(--muted);text-decoration:none;display:block;margin-top:2px}
+.intel-company-url:hover{color:var(--gold)}
+.intel-action-badge{flex-shrink:0;padding:3px 9px;border-radius:5px;font-size:11px;font-weight:700;white-space:nowrap}
+.intel-action-target{background:#f5c84222;color:#f5c842;border:1px solid #f5c84244}
+.intel-action-network{background:#7c8dff22;color:#7c8dff;border:1px solid #7c8dff44}
+.intel-action-watch{background:#00c86e22;color:#00c86e;border:1px solid #00c86e44}
+.intel-action-skip{background:#88888822;color:#888;border:1px solid #88888844}
+.intel-card-section{display:flex;flex-direction:column;gap:3px}
+.intel-card-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.intel-card-value{font-size:12px;color:var(--text);line-height:1.6}
+.intel-roles-list{display:flex;flex-wrap:wrap;gap:5px;margin-top:2px}
+.intel-role-chip{font-size:11px;background:#ffffff0d;border:1px solid var(--border);border-radius:4px;padding:2px 8px;color:var(--muted)}
+.intel-confidence{display:flex;align-items:center;gap:8px;margin-top:2px}
+.intel-confidence-bar{flex:1;height:4px;background:#ffffff15;border-radius:2px;overflow:hidden}
+.intel-confidence-fill{height:100%;background:var(--gold);border-radius:2px;transition:width .3s}
+.intel-confidence-val{font-size:11px;color:var(--muted);white-space:nowrap}
+.intel-risk-flags{display:flex;flex-direction:column;gap:3px}
+.intel-risk-flag{font-size:11px;color:#ff6b6b;padding-left:12px;position:relative;line-height:1.5}
+.intel-risk-flag::before{content:'!';position:absolute;left:0;color:#ff6b6b;font-weight:700}
+.intel-citations{display:flex;flex-direction:column;gap:4px}
+.intel-citation-link{font-size:11px;color:var(--muted);text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;display:block}
+.intel-citation-link:hover{color:var(--gold)}
+.intel-card-divider{height:1px;background:var(--border);margin:2px 0}
+.intel-loading-wrap{display:flex;align-items:center;gap:16px;padding:48px 0;justify-content:center}
+.intel-spinner{width:22px;height:22px;border:2px solid var(--border);border-top-color:var(--gold);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0}
+.intel-loading-msg{font-size:13px;color:var(--muted);line-height:1.6}
+.intel-error-box{background:#ff6b6b18;border:1px solid #ff6b6b44;border-radius:8px;padding:14px 16px;font-size:13px;color:#ff6b6b;margin-bottom:16px}
+.intel-footer{font-size:11px;color:var(--muted);margin-top:20px;padding-top:14px;border-top:1px solid var(--border)}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(max-width:700px){.intel-cards{grid-template-columns:1fr}.intel-themes-grid{grid-template-columns:1fr}}
 /* email tab */
 .email-section{max-width:100%}
 .email-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;font-size:12px}
@@ -2960,6 +3071,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="tab active" id="tab-jobs" onclick="showTab('jobs')">Jobs</div>
   <div class="tab sub-tab" id="tab-saved" onclick="showTab('saved')">&nbsp;&nbsp;Saved Jobs</div>
   <div class="tab" id="tab-research" onclick="showTab('research')">Research</div>
+  <div class="tab" id="tab-intel" onclick="showTab('intel')">Career Intel</div>
   <div class="tab" id="tab-companies" onclick="showTab('companies')">Companies</div>
   <div class="tab" id="tab-resume" onclick="showTab('resume')">Resume</div>
   <div class="tab" id="tab-email" onclick="showTab('email')">Daily Jobs Report</div>
@@ -3109,6 +3221,43 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <tbody id="runs-body"></tbody>
   </table>
   <div class="empty" id="runs-empty" style="display:none">No scout runs yet.</div>
+</div>
+
+<div class="panel" id="panel-intel">
+  <div class="intel-header">
+    <div>
+      <div class="sec-title" style="margin-bottom:4px">Career Intel</div>
+      <div class="intel-meta" id="intel-meta">Powered by Gemini + Google Search grounding &mdash; refreshes daily</div>
+    </div>
+    <button class="btn btn-gold btn-sm" id="intel-refresh-btn" onclick="refreshCareerIntel()">Refresh Intel</button>
+  </div>
+
+  <div id="intel-loading" style="display:none">
+    <div class="intel-loading-wrap">
+      <div class="intel-spinner"></div>
+      <div class="intel-loading-msg">Gemini is searching and synthesising company signals&hellip;<br><span style="font-size:11px;color:var(--muted)">This typically takes 30&ndash;60 seconds</span></div>
+    </div>
+  </div>
+
+  <div id="intel-empty" style="display:none">
+    <div class="empty">No Career Intel generated yet. Click &ldquo;Refresh Intel&rdquo; to generate your personalised company opportunity radar.</div>
+  </div>
+
+  <div id="intel-error" style="display:none" class="intel-error-box"></div>
+
+  <div id="intel-content" style="display:none">
+    <div class="intel-market-summary" id="intel-market-summary"></div>
+
+    <div id="intel-themes-section" style="display:none">
+      <div class="intel-section-label">Emerging Themes</div>
+      <div class="intel-themes-grid" id="intel-themes"></div>
+    </div>
+
+    <div class="intel-section-label" id="intel-companies-label">Company Opportunity Radar</div>
+    <div class="intel-cards" id="intel-cards"></div>
+
+    <div class="intel-footer" id="intel-footer"></div>
+  </div>
 </div>
 
 <div class="panel" id="panel-companies">
@@ -3418,7 +3567,7 @@ function lines(id) {
 }
 
 // ── tabs ─────────────────────────────────────────────────────────────────
-var TABS = ['jobs','saved','research','companies','resume','email','runs','settings'];
+var TABS = ['jobs','saved','research','intel','companies','resume','email','runs','settings'];
 function showTab(name) {
   TABS.forEach(function(t) {
     document.getElementById('tab-' + t).classList.toggle('active', t === name);
@@ -3432,6 +3581,7 @@ function showTab(name) {
   if (name === 'resume')    loadResume();
   if (name === 'email')     { loadGmailStatus(); loadEmailPreview(); loadDigestTime(); }
   if (name === 'settings')  loadCriteria();
+  if (name === 'intel')     loadCareerIntel();
 }
 
 // ── stats ─────────────────────────────────────────────────────────────────
@@ -4906,6 +5056,161 @@ async function deleteSavedBrief(briefId) {
     await fetch('/api/research/' + briefId, { method: 'DELETE' });
     loadSavedResearch();
   } catch(e) {}
+}
+
+// ── Career Intel ──────────────────────────────────────────────────────────
+var intelLoaded = false;
+
+function intelEl(id) { return document.getElementById(id); }
+
+function setIntelState(state) {
+  intelEl('intel-loading').style.display  = state === 'loading'  ? 'flex' : 'none';
+  intelEl('intel-empty').style.display    = state === 'empty'    ? ''     : 'none';
+  intelEl('intel-error').style.display    = state === 'error'    ? ''     : 'none';
+  intelEl('intel-content').style.display  = state === 'content'  ? ''     : 'none';
+}
+
+function actionBadge(action) {
+  var labels = { target_now: 'Target Now', network_in: 'Network In', watch: 'Watch', low_priority: 'Low Priority' };
+  var cls    = { target_now: 'intel-action-target', network_in: 'intel-action-network', watch: 'intel-action-watch', low_priority: 'intel-action-skip' };
+  return '<span class="intel-action-badge ' + (cls[action] || 'intel-action-watch') + '">' + (labels[action] || action) + '</span>';
+}
+
+function renderCareerIntel(data, generatedAt, stale) {
+  // Market summary
+  if (data.market_summary) {
+    intelEl('intel-market-summary').innerHTML = '<div class="intel-section-label">Market Summary</div><div class="intel-market-summary">' + esc(data.market_summary) + '</div>';
+  }
+
+  // Themes
+  var themes = data.themes || [];
+  if (themes.length > 0) {
+    intelEl('intel-themes-section').style.display = '';
+    intelEl('intel-themes').innerHTML = themes.map(function(t) {
+      return '<div class="intel-theme-card">' +
+        '<div class="intel-theme-name">' + esc(t.theme) + '</div>' +
+        '<div class="intel-theme-body">' + esc(t.summary) + '</div>' +
+        (t.why_it_matters_for_job_search ? '<div class="intel-theme-why">Why it matters: ' + esc(t.why_it_matters_for_job_search) + '</div>' : '') +
+      '</div>';
+    }).join('');
+  } else {
+    intelEl('intel-themes-section').style.display = 'none';
+  }
+
+  // Company count label
+  var companies = data.companies || [];
+  intelEl('intel-companies-label').textContent = 'Company Opportunity Radar (' + companies.length + ' companies)';
+
+  // Company cards
+  intelEl('intel-cards').innerHTML = companies.map(function(c) {
+    var conf = Math.round((c.confidence_score || 0) * 100);
+    var confW = Math.min(100, conf);
+
+    var citations = (c.source_citations || []).slice(0, 4).map(function(s) {
+      return '<a class="intel-citation-link" href="' + esc(s.url) + '" target="_blank" rel="noopener">' + esc(s.title || s.url) + '</a>';
+    }).join('');
+
+    var roles = (c.likely_relevant_roles || []).map(function(r) {
+      return '<span class="intel-role-chip">' + esc(r) + '</span>';
+    }).join('');
+
+    var riskHtml = '';
+    if ((c.risk_flags || []).length > 0) {
+      riskHtml = '<div class="intel-card-section">' +
+        '<div class="intel-card-label">Risk Flags</div>' +
+        '<div class="intel-risk-flags">' + c.risk_flags.map(function(f) { return '<div class="intel-risk-flag">' + esc(f) + '</div>'; }).join('') + '</div>' +
+      '</div>';
+    }
+
+    var urlHtml = c.company_url
+      ? '<a class="intel-company-url" href="' + esc(c.company_url) + '" target="_blank" rel="noopener">' + esc(c.company_url.replace(/^https?:\\/\\//, '')) + '</a>'
+      : '';
+
+    return '<div class="intel-card">' +
+      '<div class="intel-card-header">' +
+        '<div>' +
+          '<div class="intel-company-name">' + esc(c.company_name) + '</div>' +
+          urlHtml +
+        '</div>' +
+        actionBadge(c.action_recommendation) +
+      '</div>' +
+
+      '<div class="intel-card-divider"></div>' +
+
+      '<div class="intel-card-section"><div class="intel-card-label">Why Hot Now</div><div class="intel-card-value">' + esc(c.why_it_is_hot_now) + '</div></div>' +
+      '<div class="intel-card-section"><div class="intel-card-label">Good Place to Work</div><div class="intel-card-value">' + esc(c.why_it_could_be_a_good_place_to_work) + '</div></div>' +
+      '<div class="intel-card-section"><div class="intel-card-label">Hiring Signal</div><div class="intel-card-value">' + esc(c.likely_hiring_signal) + '</div></div>' +
+      '<div class="intel-card-section"><div class="intel-card-label">Fit to Your Settings</div><div class="intel-card-value">' + esc(c.fit_to_user_settings) + '</div></div>' +
+
+      (roles ? '<div class="intel-card-section"><div class="intel-card-label">Likely Roles</div><div class="intel-roles-list">' + roles + '</div></div>' : '') +
+
+      '<div class="intel-card-section"><div class="intel-card-label">Confidence</div>' +
+        '<div class="intel-confidence">' +
+          '<div class="intel-confidence-bar"><div class="intel-confidence-fill" style="width:' + confW + '%"></div></div>' +
+          '<span class="intel-confidence-val">' + conf + '%</span>' +
+        '</div>' +
+      '</div>' +
+
+      riskHtml +
+
+      (citations ? '<div class="intel-card-section"><div class="intel-card-label">Sources</div><div class="intel-citations">' + citations + '</div></div>' : '') +
+    '</div>';
+  }).join('');
+
+  // Footer: last refreshed, model, stale notice
+  var ts = generatedAt ? new Date(generatedAt).toLocaleString() : 'Unknown';
+  var staleNotice = stale ? ' &nbsp;&middot;&nbsp; <span style="color:#f5c842">Data may be outdated &mdash; click Refresh Intel</span>' : '';
+  var modelNote = data.model_used ? ' &nbsp;&middot;&nbsp; Model: ' + esc(data.model_used) : '';
+  intelEl('intel-footer').innerHTML = 'Last refreshed: ' + ts + modelNote + ' &nbsp;&middot;&nbsp; ' + (data.grounding_sources_count || 0) + ' grounding sources' + staleNotice;
+
+  // Update meta line
+  intelEl('intel-meta').innerHTML = 'Powered by Gemini + Google Search grounding &mdash; refreshes daily';
+
+  setIntelState('content');
+}
+
+async function loadCareerIntel() {
+  if (intelLoaded) return;
+  setIntelState('loading');
+  try {
+    var res = await fetch('/api/career-intel');
+    var json = await res.json();
+    if (!res.ok) { throw new Error(json.error || 'Failed to load Career Intel'); }
+    if (!json.data) {
+      setIntelState('empty');
+      return;
+    }
+    intelLoaded = true;
+    renderCareerIntel(json.data, json.generated_at, json.stale);
+    if (json.stale) {
+      // Auto-refresh if data is stale
+      intelEl('intel-meta').innerHTML += ' &nbsp;<span style="color:#f5c842">(stale &mdash; refreshing&hellip;)</span>';
+      refreshCareerIntel(true);
+    }
+  } catch(e) {
+    intelEl('intel-error').textContent = 'Error loading Career Intel: ' + e.message;
+    setIntelState('error');
+  }
+}
+
+async function refreshCareerIntel(silent) {
+  var btn = intelEl('intel-refresh-btn');
+  if (!silent) setIntelState('loading');
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing\u2026'; }
+  try {
+    var res = await fetch('/api/career-intel/refresh', { method: 'POST' });
+    var json = await res.json();
+    if (!res.ok) { throw new Error(json.error || 'Refresh failed'); }
+    intelLoaded = true;
+    renderCareerIntel(json.data, json.generated_at, false);
+  } catch(e) {
+    if (!silent) {
+      intelEl('intel-error').textContent = 'Refresh failed: ' + e.message;
+      setIntelState('error');
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Refresh Intel'; }
+  }
 }
 
 // ── init ──────────────────────────────────────────────────────────────────
