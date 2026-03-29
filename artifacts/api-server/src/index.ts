@@ -10,6 +10,11 @@ import type { ScrapedJob } from './scraper.js';
 import { runGeminiJobDiscovery, deduplicateJobLists, isDirectCompanyUrl, normalizeUrl as normalizeJobUrl } from './gemini_discovery.js';
 import { generateCareerIntel } from './career_intel.js';
 import type { CareerIntelCriteria } from './career_intel.js';
+import {
+  initPositioningDB, getProfile, saveProfile, getStories, saveStory, deleteStory,
+  getOutputs, generateOutputs, getObjections, generateObjections,
+  getNarrative, saveNarrative, draftNarrative
+} from './positioning.js';
 import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier } from './agent.js';
 import type { SubScores, OpportunityTier, TierSettings, TailoringAnalysis } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
@@ -279,6 +284,8 @@ async function initDb(): Promise<void> {
       generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+
+  await initPositioningDB(pool);
 
   // Add columns if they don't exist (for existing installs)
   const safeAddColumn = async (table: string, col: string, type: string) => {
@@ -1183,6 +1190,73 @@ app.post('/api/career-intel/refresh', async (_req, res: Response) => {
     console.error('[CareerIntel] Refresh failed:', e);
     res.status(500).json({ error: String(e) });
   }
+});
+
+// ── Positioning Engine Routes ──────────────────────────────────────────────────
+app.get('/api/positioning/profile', async (_req, res: Response) => {
+  try { res.json(await getProfile(pool) || {}); } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/positioning/profile', async (req, res: Response) => {
+  try { await saveProfile(pool, req.body); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.get('/api/positioning/stories', async (_req, res: Response) => {
+  try { res.json(await getStories(pool)); } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/positioning/stories', async (req, res: Response) => {
+  try { res.json(await saveStory(pool, req.body)); } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.delete('/api/positioning/stories/:id', async (req, res: Response) => {
+  try { await deleteStory(pool, parseInt(req.params.id)); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.get('/api/positioning/outputs', async (_req, res: Response) => {
+  try { res.json(await getOutputs(pool) || {}); } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/positioning/generate', async (_req, res: Response) => {
+  try {
+    const profile = await getProfile(pool);
+    if (!profile || !profile.target_role) { res.status(400).json({ error: 'Complete the intake form first.' }); return; }
+    const stories = await getStories(pool);
+    const outputs = await generateOutputs(pool, profile, stories);
+    res.json(outputs);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.get('/api/positioning/objections', async (_req, res: Response) => {
+  try { res.json(await getObjections(pool) || {}); } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/positioning/generate-objections', async (_req, res: Response) => {
+  try {
+    const profile = await getProfile(pool);
+    if (!profile || !profile.target_role) { res.status(400).json({ error: 'Complete the intake form first.' }); return; }
+    const stories = await getStories(pool);
+    const result = await generateObjections(pool, profile, stories);
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.get('/api/positioning/narrative', async (_req, res: Response) => {
+  try { res.json(await getNarrative(pool) || {}); } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/positioning/narrative', async (req, res: Response) => {
+  try { await saveNarrative(pool, req.body); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/positioning/draft-narrative', async (_req, res: Response) => {
+  try {
+    const profile = await getProfile(pool);
+    if (!profile || !profile.target_role) { res.status(400).json({ error: 'Complete the intake form first.' }); return; }
+    const stories = await getStories(pool);
+    const draft = await draftNarrative(pool, profile, stories);
+    res.json(draft);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 app.get('/api/jobs/saved', async (_req, res: Response) => {
@@ -3001,6 +3075,57 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .intel-footer{font-size:11px;color:var(--muted);margin-top:20px;padding-top:14px;border-top:1px solid var(--border)}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media(max-width:700px){.intel-cards{grid-template-columns:1fr}.intel-themes-grid{grid-template-columns:1fr}}
+/* ── Positioning Engine ────────────────────────────────────────────────────── */
+.pos-layout{display:flex;flex-direction:column;height:100%;padding:24px;gap:20px;max-width:1100px}
+.pos-steps{display:flex;gap:6px;flex-wrap:wrap}
+.pos-step-btn{padding:8px 16px;border-radius:20px;border:1px solid var(--border);background:var(--surface);color:var(--muted);font-size:13px;cursor:pointer;transition:all .15s}
+.pos-step-btn:hover{color:var(--text);border-color:var(--gold)}
+.pos-step-btn.active{background:var(--gold);color:#000;border-color:var(--gold);font-weight:600}
+.pos-section{display:none;flex-direction:column;gap:20px}
+.pos-section.active{display:flex}
+.pos-section-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.pos-title{font-size:20px;font-weight:700;margin:0 0 4px}
+.pos-sub{font-size:13px;color:var(--muted);margin:0}
+.pos-req{color:var(--gold)}
+.pos-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pos-field{display:flex;flex-direction:column;gap:6px}
+.pos-full{grid-column:1/-1}
+.pos-label{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.pos-input{background:var(--surface);border:1px solid var(--border);border-radius:7px;color:var(--text);padding:10px 12px;font-size:14px;outline:none;width:100%;box-sizing:border-box}
+.pos-input:focus,.pos-textarea:focus{border-color:var(--gold)}
+.pos-textarea{background:var(--surface);border:1px solid var(--border);border-radius:7px;color:var(--text);padding:10px 12px;font-size:13px;outline:none;width:100%;box-sizing:border-box;resize:vertical;font-family:inherit;line-height:1.5}
+.pos-gen-status{padding:12px 16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted)}
+.pos-outputs-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pos-output-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px}
+.pos-output-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--gold)}
+.pos-output-text{font-size:13px;line-height:1.6;color:var(--text);white-space:pre-wrap;flex:1}
+.pos-output-copy{align-self:flex-end;padding:4px 12px;font-size:11px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer}
+.pos-output-copy:hover{color:var(--text);border-color:var(--gold)}
+.pos-story-list{display:flex;flex-direction:column;gap:10px}
+.pos-story-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;display:flex;gap:14px;align-items:flex-start}
+.pos-story-body{flex:1;min-width:0}
+.pos-story-title{font-size:14px;font-weight:600;margin-bottom:4px}
+.pos-story-car{font-size:12px;color:var(--muted);line-height:1.5}
+.pos-story-tags{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}
+.pos-story-tag{background:var(--gold)22;border:1px solid var(--gold)44;color:var(--gold);border-radius:10px;padding:2px 8px;font-size:11px}
+.pos-story-conf{font-size:11px;color:var(--muted);margin-top:4px}
+.pos-story-actions{display:flex;gap:6px;flex-shrink:0}
+.pos-theme-pills{display:flex;gap:8px;flex-wrap:wrap}
+.pos-theme-pill{display:flex;align-items:center;gap:5px;padding:5px 10px;border:1px solid var(--border);border-radius:12px;cursor:pointer;font-size:12px;color:var(--muted);user-select:none}
+.pos-theme-pill input{accent-color:var(--gold)}
+.pos-theme-pill:hover{border-color:var(--gold);color:var(--text)}
+.pos-obj-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px 18px;display:flex;flex-direction:column;gap:10px;margin-bottom:12px}
+.pos-obj-title{font-size:15px;font-weight:600;color:var(--text)}
+.pos-obj-row{display:flex;gap:10px}
+.pos-obj-key{font-size:11px;font-weight:700;text-transform:uppercase;color:var(--gold);min-width:110px;padding-top:1px}
+.pos-obj-val{font-size:13px;color:var(--text);line-height:1.5;flex:1}
+.pos-narr-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pos-narr-field{display:flex;flex-direction:column;gap:6px}
+.pos-narr-full{grid-column:1/-1}
+.pos-approved-badge{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;background:#22c55e22;border:1px solid #22c55e55;border-radius:20px;color:#22c55e;font-size:12px;font-weight:600}
+.pos-empty{color:var(--muted);font-size:13px;padding:20px;text-align:center;border:1px dashed var(--border);border-radius:8px}
+@media(max-width:700px){.pos-form-grid,.pos-outputs-grid,.pos-narr-grid{grid-template-columns:1fr}.pos-full,.pos-narr-full{grid-column:1}}
+
 /* clawd iframe panel */
 #panel-clawd{padding:0!important}
 #panel-clawd.active{display:block}
@@ -3080,6 +3205,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="tab" id="tab-resume" onclick="showTab('resume')">Resume</div>
   <div class="tab" id="tab-email" onclick="showTab('email')">Daily Jobs Report</div>
   <div class="tab" id="tab-runs" onclick="showTab('runs')">Run History</div>
+  <div class="tab" id="tab-positioning" onclick="showTab('positioning')">Positioning</div>
   <div class="tab" id="tab-settings" onclick="showTab('settings')">Settings</div>
   <div class="tab" id="tab-clawd" onclick="showTab('clawd')">DeathByClawd</div>
 </nav>
@@ -3458,6 +3584,216 @@ textarea:focus,input:focus{border-color:var(--gold)}
   </div>
 </div>
 
+<div class="panel" id="panel-positioning">
+<div class="pos-layout">
+
+  <!-- Step nav -->
+  <div class="pos-steps">
+    <button class="pos-step-btn active" data-step="intake" onclick="posShowStep('intake')">1. Intake</button>
+    <button class="pos-step-btn" data-step="stories" onclick="posShowStep('stories')">2. Story Bank</button>
+    <button class="pos-step-btn" data-step="outputs" onclick="posShowStep('outputs')">3. Outputs</button>
+    <button class="pos-step-btn" data-step="objections" onclick="posShowStep('objections')">4. Objections</button>
+    <button class="pos-step-btn" data-step="narrative" onclick="posShowStep('narrative')">5. Core Narrative</button>
+  </div>
+
+  <!-- Step 1: Intake -->
+  <div class="pos-section active" id="pos-intake">
+    <div class="pos-section-header">
+      <div>
+        <h2 class="pos-title">Career Positioning Intake</h2>
+        <p class="pos-sub">Your answers become the single source of truth for every output Claude generates.</p>
+      </div>
+      <button class="btn btn-gold" onclick="saveIntake()">Save Intake</button>
+    </div>
+    <div class="pos-form-grid">
+      <div class="pos-field">
+        <label class="pos-label">Target Role <span class="pos-req">*</span></label>
+        <input class="pos-input" id="pi-target-role" placeholder="e.g. Enterprise Account Executive, VP of Sales">
+      </div>
+      <div class="pos-field">
+        <label class="pos-label">Target Industry <span class="pos-req">*</span></label>
+        <input class="pos-input" id="pi-target-industry" placeholder="e.g. SaaS, Cybersecurity, Data Infrastructure">
+      </div>
+      <div class="pos-field pos-full">
+        <label class="pos-label">Past Roles <span class="pos-req">*</span></label>
+        <textarea class="pos-textarea" id="pi-past-roles" rows="3" placeholder="List your last 3-5 roles with company and tenure. e.g. Sr. AE @ Salesforce (2019-2022), AE @ HubSpot (2016-2019)..."></textarea>
+      </div>
+      <div class="pos-field pos-full">
+        <label class="pos-label">Top 5 Measurable Wins <span class="pos-req">*</span></label>
+        <textarea class="pos-textarea" id="pi-top-wins" rows="5" placeholder="Be specific with numbers. e.g.&#10;1. Closed $4.2M in enterprise deals in FY2023, 148% of quota&#10;2. Grew territory from $800K to $2.1M ARR in 18 months&#10;3. Won 3 competitive displacements of Salesforce at Fortune 500 accounts..."></textarea>
+      </div>
+      <div class="pos-field pos-full">
+        <label class="pos-label">Strengths</label>
+        <textarea class="pos-textarea" id="pi-strengths" rows="3" placeholder="What do you do better than most people at your level? Be honest and specific."></textarea>
+      </div>
+      <div class="pos-field">
+        <label class="pos-label">What You Want Next</label>
+        <textarea class="pos-textarea" id="pi-want-next" rows="3" placeholder="Type of company, stage, culture, scope of role, comp expectations..."></textarea>
+      </div>
+      <div class="pos-field">
+        <label class="pos-label">What You Don't Want</label>
+        <textarea class="pos-textarea" id="pi-dont-want" rows="3" placeholder="Hard nos: industries, company types, travel, management style, anything non-negotiable..."></textarea>
+      </div>
+      <div class="pos-field">
+        <label class="pos-label">Career Pivot Concerns</label>
+        <textarea class="pos-textarea" id="pi-pivot-concerns" rows="3" placeholder="If you're making any kind of shift — what are you worried about being asked or challenged on?"></textarea>
+      </div>
+      <div class="pos-field">
+        <label class="pos-label">Why Now</label>
+        <textarea class="pos-textarea" id="pi-why-now" rows="3" placeholder="What's driving the move? Be honest — Claude will use this to create authentic messaging."></textarea>
+      </div>
+      <div class="pos-field pos-full">
+        <label class="pos-label">Biggest Objection You Expect</label>
+        <textarea class="pos-textarea" id="pi-biggest-objection" rows="3" placeholder="What do you expect a recruiter or hiring manager to push back on most?"></textarea>
+      </div>
+    </div>
+    <div style="margin-top:20px;display:flex;gap:10px;align-items:center">
+      <button class="btn btn-gold" onclick="saveIntake()">Save Intake</button>
+      <span class="ok-msg" id="intake-msg" style="display:none">Saved!</span>
+    </div>
+  </div>
+
+  <!-- Step 2: Story Bank -->
+  <div class="pos-section" id="pos-stories">
+    <div class="pos-section-header">
+      <div>
+        <h2 class="pos-title">Story Bank</h2>
+        <p class="pos-sub">CAR-format stories that Claude pulls from when generating outputs. More stories = better outputs.</p>
+      </div>
+      <button class="btn btn-gold" onclick="openStoryModal()">+ Add Story</button>
+    </div>
+    <div id="story-list" class="pos-story-list">
+      <div class="pos-empty">No stories yet. Add your first one.</div>
+    </div>
+  </div>
+
+  <!-- Step 3: Outputs -->
+  <div class="pos-section" id="pos-outputs">
+    <div class="pos-section-header">
+      <div>
+        <h2 class="pos-title">Generated Outputs</h2>
+        <p class="pos-sub">All 8 assets generated from your intake + story bank. One source of truth, consistent voice.</p>
+      </div>
+      <button class="btn btn-gold" onclick="generateOutputs()">&#9889; Generate All</button>
+    </div>
+    <div id="pos-outputs-status" class="pos-gen-status" style="display:none"></div>
+    <div id="pos-outputs-container" class="pos-outputs-grid"></div>
+  </div>
+
+  <!-- Step 4: Objection Handling -->
+  <div class="pos-section" id="pos-objections">
+    <div class="pos-section-header">
+      <div>
+        <h2 class="pos-title">Objection Handling</h2>
+        <p class="pos-sub">The real concerns recruiters and hiring managers will raise — and exactly how to address them.</p>
+      </div>
+      <button class="btn btn-gold" onclick="generateObjections()">&#9889; Generate Objections</button>
+    </div>
+    <div id="pos-obj-status" class="pos-gen-status" style="display:none"></div>
+    <div id="pos-obj-container"></div>
+  </div>
+
+  <!-- Step 5: Core Narrative -->
+  <div class="pos-section" id="pos-narrative">
+    <div class="pos-section-header">
+      <div>
+        <h2 class="pos-title">Core Narrative</h2>
+        <p class="pos-sub">Once approved, this drives resume tailoring, cover letters, and interview prep across the platform.</p>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" style="background:var(--surface);color:var(--text)" onclick="draftNarrative()">&#9889; Draft with AI</button>
+        <button class="btn btn-gold" onclick="approveNarrative()">&#10003; Approve &amp; Save</button>
+      </div>
+    </div>
+    <div id="pos-narr-status" class="pos-gen-status" style="display:none"></div>
+    <div id="pos-narr-approved-badge" style="display:none" class="pos-approved-badge">&#10003; Narrative Approved</div>
+    <div class="pos-narr-grid">
+      <div class="pos-narr-field">
+        <label class="pos-label">Target Narrative <span style="color:var(--muted);font-size:11px">— who you are, what you do best, where you're going</span></label>
+        <textarea class="pos-textarea" id="pn-target-narrative" rows="4" placeholder="Claude will draft this from your intake. You can edit before approving."></textarea>
+      </div>
+      <div class="pos-narr-field">
+        <label class="pos-label">Why Me <span style="color:var(--muted);font-size:11px">— your unique differentiator</span></label>
+        <textarea class="pos-textarea" id="pn-why-me" rows="4" placeholder="What you bring that few others can. Specific to your actual background."></textarea>
+      </div>
+      <div class="pos-narr-field">
+        <label class="pos-label">Why Now <span style="color:var(--muted);font-size:11px">— market timing + career readiness</span></label>
+        <textarea class="pos-textarea" id="pn-why-now" rows="3" placeholder="Why this is the right moment for your move."></textarea>
+      </div>
+      <div class="pos-narr-field">
+        <label class="pos-label">Category Positioning <span style="color:var(--muted);font-size:11px">— how recruiters should bucket you</span></label>
+        <textarea class="pos-textarea" id="pn-category" rows="3" placeholder="What category do you own in a recruiter's mind?"></textarea>
+      </div>
+      <div class="pos-narr-field pos-narr-full">
+        <label class="pos-label">Ideal Role Thesis <span style="color:var(--muted);font-size:11px">— specific enough to guide outreach and tailoring</span></label>
+        <textarea class="pos-textarea" id="pn-ideal-role" rows="3" placeholder="Exactly what role you should be targeting and why."></textarea>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /pos-layout -->
+</div><!-- /panel-positioning -->
+
+<!-- Story Modal -->
+<div class="modal-overlay" id="story-modal" onclick="if(event.target===this)closeStoryModal()">
+  <div class="modal" style="max-width:700px">
+    <div class="modal-header">
+      <span id="story-modal-title" style="font-size:16px;font-weight:600">Add Story</span>
+      <button class="btn" style="padding:4px 10px;font-size:12px" onclick="closeStoryModal()">&#x2715;</button>
+    </div>
+    <input type="hidden" id="story-edit-id">
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div>
+        <label class="pos-label">Story Title</label>
+        <input class="pos-input" id="sm-title" placeholder="e.g. Largest deal close in company history">
+      </div>
+      <div>
+        <label class="pos-label">Context <span style="color:var(--muted);font-size:11px">— situation, stakes, your role</span></label>
+        <textarea class="pos-textarea" id="sm-context" rows="2" placeholder="What was the situation? What were the stakes?"></textarea>
+      </div>
+      <div>
+        <label class="pos-label">Action <span style="color:var(--muted);font-size:11px">— specifically what YOU did</span></label>
+        <textarea class="pos-textarea" id="sm-action" rows="2" placeholder="What did you do specifically? Be precise about your contribution."></textarea>
+      </div>
+      <div>
+        <label class="pos-label">Result <span style="color:var(--muted);font-size:11px">— measurable outcome</span></label>
+        <textarea class="pos-textarea" id="sm-result" rows="2" placeholder="What happened? Use numbers wherever possible."></textarea>
+      </div>
+      <div>
+        <label class="pos-label">Key Metrics</label>
+        <input class="pos-input" id="sm-metrics" placeholder="e.g. $2.4M deal, 6-month sales cycle, 3 competitors displaced">
+      </div>
+      <div>
+        <label class="pos-label">Themes <span style="color:var(--muted);font-size:11px">— select all that apply</span></label>
+        <div class="pos-theme-pills" id="sm-themes">
+          <label class="pos-theme-pill"><input type="checkbox" value="leadership"> Leadership</label>
+          <label class="pos-theme-pill"><input type="checkbox" value="ownership"> Ownership</label>
+          <label class="pos-theme-pill"><input type="checkbox" value="conflict"> Conflict</label>
+          <label class="pos-theme-pill"><input type="checkbox" value="quota"> Quota</label>
+          <label class="pos-theme-pill"><input type="checkbox" value="cross-functional"> Cross-functional</label>
+          <label class="pos-theme-pill"><input type="checkbox" value="strategy"> Strategy</label>
+          <label class="pos-theme-pill"><input type="checkbox" value="execution"> Execution</label>
+          <label class="pos-theme-pill"><input type="checkbox" value="resilience"> Resilience</label>
+        </div>
+      </div>
+      <div>
+        <label class="pos-label">Confidence Level</label>
+        <div style="display:flex;gap:8px">
+          <label class="pos-theme-pill"><input type="radio" name="sm-conf" value="1"> 1 – Weak</label>
+          <label class="pos-theme-pill"><input type="radio" name="sm-conf" value="2"> 2 – OK</label>
+          <label class="pos-theme-pill"><input type="radio" name="sm-conf" value="3" checked> 3 – Good</label>
+          <label class="pos-theme-pill"><input type="radio" name="sm-conf" value="4"> 4 – Strong</label>
+          <label class="pos-theme-pill"><input type="radio" name="sm-conf" value="5"> 5 – Best</label>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:20px;display:flex;gap:10px">
+      <button class="btn btn-gold" onclick="saveStoryModal()">Save Story</button>
+      <button class="btn" style="background:var(--surface);color:var(--text)" onclick="closeStoryModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <div class="panel" id="panel-clawd">
   <iframe class="clawd-frame" src="https://deathbyclawd.com/" allow="fullscreen" loading="lazy"></iframe>
 </div>
@@ -3588,7 +3924,7 @@ function sizeClawd() {
 window.addEventListener('resize', sizeClawd);
 
 // ── tabs ─────────────────────────────────────────────────────────────────
-var TABS = ['jobs','saved','research','intel','companies','resume','email','runs','settings','clawd'];
+var TABS = ['jobs','saved','research','intel','companies','resume','email','runs','positioning','settings','clawd'];
 function showTab(name) {
   TABS.forEach(function(t) {
     document.getElementById('tab-' + t).classList.toggle('active', t === name);
@@ -3604,6 +3940,7 @@ function showTab(name) {
   if (name === 'email')     { loadGmailStatus(); loadEmailPreview(); loadDigestTime(); }
   if (name === 'settings')  loadCriteria();
   if (name === 'intel')     loadCareerIntel();
+  if (name === 'positioning') loadPositioning();
 }
 
 // ── stats ─────────────────────────────────────────────────────────────────
@@ -5233,6 +5570,283 @@ async function refreshCareerIntel(silent) {
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Refresh Intel'; }
   }
+}
+
+// ── Positioning Engine ────────────────────────────────────────────────────
+var posStories = [];
+
+function posShowStep(step) {
+  document.querySelectorAll('.pos-step-btn').forEach(function(b) {
+    b.classList.toggle('active', b.getAttribute('data-step') === step);
+  });
+  document.querySelectorAll('.pos-section').forEach(function(s) {
+    s.classList.toggle('active', s.id === 'pos-' + step);
+  });
+}
+
+async function loadPositioning() {
+  try {
+    var p = await fetch('/api/positioning/profile').then(function(r){return r.json();});
+    if (p && p.target_role) {
+      document.getElementById('pi-target-role').value = p.target_role || '';
+      document.getElementById('pi-target-industry').value = p.target_industry || '';
+      document.getElementById('pi-past-roles').value = p.past_roles || '';
+      document.getElementById('pi-top-wins').value = p.top_wins || '';
+      document.getElementById('pi-strengths').value = p.strengths || '';
+      document.getElementById('pi-want-next').value = p.want_next || '';
+      document.getElementById('pi-dont-want').value = p.dont_want || '';
+      document.getElementById('pi-pivot-concerns').value = p.pivot_concerns || '';
+      document.getElementById('pi-why-now').value = p.why_now || '';
+      document.getElementById('pi-biggest-objection').value = p.biggest_objection || '';
+    }
+    await loadStories();
+    await loadOutputs();
+    await loadObjections();
+    await loadNarrative();
+  } catch(e) { console.error('loadPositioning', e); }
+}
+
+async function saveIntake() {
+  var body = {
+    target_role: document.getElementById('pi-target-role').value,
+    target_industry: document.getElementById('pi-target-industry').value,
+    past_roles: document.getElementById('pi-past-roles').value,
+    top_wins: document.getElementById('pi-top-wins').value,
+    strengths: document.getElementById('pi-strengths').value,
+    want_next: document.getElementById('pi-want-next').value,
+    dont_want: document.getElementById('pi-dont-want').value,
+    pivot_concerns: document.getElementById('pi-pivot-concerns').value,
+    why_now: document.getElementById('pi-why-now').value,
+    biggest_objection: document.getElementById('pi-biggest-objection').value
+  };
+  if (!body.target_role.trim()) { alert('Target Role is required.'); return; }
+  var r = await fetch('/api/positioning/profile', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+  if (r.ok) {
+    var m = document.getElementById('intake-msg');
+    m.style.display = 'inline';
+    setTimeout(function(){ m.style.display = 'none'; }, 2000);
+  }
+}
+
+// Story Bank
+async function loadStories() {
+  posStories = await fetch('/api/positioning/stories').then(function(r){return r.json();});
+  renderStories();
+}
+
+function renderStories() {
+  var el = document.getElementById('story-list');
+  if (!posStories.length) { el.innerHTML = '<div class="pos-empty">No stories yet. Add your first one.</div>'; return; }
+  var conf = ['','★','★★','★★★','★★★★','★★★★★'];
+  el.innerHTML = posStories.map(function(s) {
+    var tags = (s.themes||[]).map(function(t){ return '<span class="pos-story-tag">'+t+'</span>'; }).join('');
+    return '<div class="pos-story-card">' +
+      '<div class="pos-story-body">' +
+        '<div class="pos-story-title">'+esc(s.title)+'</div>' +
+        '<div class="pos-story-car"><b>Context:</b> '+esc(s.context)+'<br><b>Action:</b> '+esc(s.action)+'<br><b>Result:</b> '+esc(s.result)+'</div>' +
+        (s.metrics ? '<div class="pos-story-car" style="margin-top:4px"><b>Metrics:</b> '+esc(s.metrics)+'</div>' : '') +
+        '<div class="pos-story-tags">'+tags+'</div>' +
+        '<div class="pos-story-conf">Confidence: '+conf[s.confidence||3]+'</div>' +
+      '</div>' +
+      '<div class="pos-story-actions">' +
+        '<button class="btn" style="padding:4px 10px;font-size:12px" onclick="editStory('+s.id+')">Edit</button>' +
+        '<button class="btn" style="padding:4px 10px;font-size:12px;color:#ff6b6b" onclick="deleteStory('+s.id+')">Delete</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function openStoryModal(story) {
+  document.getElementById('story-modal-title').textContent = story ? 'Edit Story' : 'Add Story';
+  document.getElementById('story-edit-id').value = story ? story.id : '';
+  document.getElementById('sm-title').value = story ? story.title : '';
+  document.getElementById('sm-context').value = story ? story.context : '';
+  document.getElementById('sm-action').value = story ? story.action : '';
+  document.getElementById('sm-result').value = story ? story.result : '';
+  document.getElementById('sm-metrics').value = story ? story.metrics : '';
+  document.querySelectorAll('#sm-themes input[type=checkbox]').forEach(function(cb) {
+    cb.checked = story && story.themes && story.themes.includes(cb.value);
+  });
+  var conf = story ? story.confidence : 3;
+  document.querySelectorAll('input[name=sm-conf]').forEach(function(r) {
+    r.checked = parseInt(r.value) === conf;
+  });
+  document.getElementById('story-modal').style.display = 'flex';
+}
+
+function editStory(id) {
+  var s = posStories.find(function(x){ return x.id === id; });
+  if (s) openStoryModal(s);
+}
+
+function closeStoryModal() { document.getElementById('story-modal').style.display = 'none'; }
+
+async function saveStoryModal() {
+  var themes = [];
+  document.querySelectorAll('#sm-themes input[type=checkbox]:checked').forEach(function(cb){ themes.push(cb.value); });
+  var confEl = document.querySelector('input[name=sm-conf]:checked');
+  var story = {
+    id: document.getElementById('story-edit-id').value ? parseInt(document.getElementById('story-edit-id').value) : undefined,
+    title: document.getElementById('sm-title').value,
+    context: document.getElementById('sm-context').value,
+    action: document.getElementById('sm-action').value,
+    result: document.getElementById('sm-result').value,
+    metrics: document.getElementById('sm-metrics').value,
+    themes: themes,
+    confidence: confEl ? parseInt(confEl.value) : 3
+  };
+  if (!story.title.trim()) { alert('Title is required.'); return; }
+  await fetch('/api/positioning/stories', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(story) });
+  closeStoryModal();
+  await loadStories();
+}
+
+async function deleteStory(id) {
+  if (!confirm('Delete this story?')) return;
+  await fetch('/api/positioning/stories/'+id, { method:'DELETE' });
+  await loadStories();
+}
+
+// Outputs
+var POS_OUTPUT_LABELS = {
+  professional_summary:'Professional Summary',
+  linkedin_headline:'LinkedIn Headline',
+  linkedin_about:'LinkedIn About',
+  elevator_pitch:'Elevator Pitch',
+  recruiter_intro:'Recruiter Intro',
+  tell_me_about_yourself:'Tell Me About Yourself',
+  cover_letter_themes:'Cover Letter Themes',
+  networking_bio:'Networking Bio'
+};
+
+async function loadOutputs() {
+  var data = await fetch('/api/positioning/outputs').then(function(r){return r.json();});
+  renderOutputs(data);
+}
+
+function renderOutputs(data) {
+  var el = document.getElementById('pos-outputs-container');
+  var keys = Object.keys(POS_OUTPUT_LABELS);
+  var hasContent = keys.some(function(k){ return data && data[k]; });
+  if (!hasContent) {
+    el.innerHTML = '<div class="pos-empty">No outputs yet. Save your intake and click Generate All.</div>';
+    return;
+  }
+  el.innerHTML = keys.map(function(k) {
+    var text = data[k] || '';
+    return '<div class="pos-output-card">' +
+      '<div class="pos-output-label">'+POS_OUTPUT_LABELS[k]+'</div>' +
+      '<div class="pos-output-text">'+esc(text)+'</div>' +
+      '<button class="pos-output-copy" onclick="copyText('+JSON.stringify(text)+')">Copy</button>' +
+    '</div>';
+  }).join('');
+  if (data.generated_at) {
+    var st = document.getElementById('pos-outputs-status');
+    st.textContent = 'Generated ' + new Date(data.generated_at).toLocaleString() + (data.model_used ? ' · ' + data.model_used : '');
+    st.style.display = 'block';
+  }
+}
+
+async function generateOutputs() {
+  var st = document.getElementById('pos-outputs-status');
+  st.textContent = 'Generating all outputs with Claude... this may take 30-60 seconds.';
+  st.style.display = 'block';
+  document.getElementById('pos-outputs-container').innerHTML = '';
+  try {
+    var data = await fetch('/api/positioning/generate', { method:'POST' }).then(function(r){return r.json();});
+    if (data.error) { st.textContent = 'Error: ' + data.error; return; }
+    renderOutputs(data);
+  } catch(e) { st.textContent = 'Error: ' + String(e); }
+}
+
+// Objections
+async function loadObjections() {
+  var data = await fetch('/api/positioning/objections').then(function(r){return r.json();});
+  renderObjections(data);
+}
+
+function renderObjections(data) {
+  var el = document.getElementById('pos-obj-container');
+  if (!data || !data.objections || !data.objections.length) {
+    el.innerHTML = '<div class="pos-empty">No objection guide yet. Save your intake and click Generate Objections.</div>';
+    return;
+  }
+  var st = document.getElementById('pos-obj-status');
+  if (data.generated_at) { st.textContent = 'Generated ' + new Date(data.generated_at).toLocaleString(); st.style.display = 'block'; }
+  el.innerHTML = data.objections.map(function(o, i) {
+    return '<div class="pos-obj-card">' +
+      '<div class="pos-obj-title">'+(i+1)+'. '+esc(o.objection)+'</div>' +
+      '<div class="pos-obj-row"><span class="pos-obj-key">Why it arises</span><span class="pos-obj-val">'+esc(o.why_it_arises)+'</span></div>' +
+      '<div class="pos-obj-row"><span class="pos-obj-key">How to address</span><span class="pos-obj-val">'+esc(o.how_to_address)+'</span></div>' +
+      '<div class="pos-obj-row"><span class="pos-obj-key">Best proof points</span><span class="pos-obj-val">'+esc(o.best_proof_points)+'</span></div>' +
+    '</div>';
+  }).join('');
+}
+
+async function generateObjections() {
+  var st = document.getElementById('pos-obj-status');
+  st.textContent = 'Analyzing your profile and generating objection guide...';
+  st.style.display = 'block';
+  document.getElementById('pos-obj-container').innerHTML = '';
+  try {
+    var data = await fetch('/api/positioning/generate-objections', { method:'POST' }).then(function(r){return r.json();});
+    if (data.error) { st.textContent = 'Error: ' + data.error; return; }
+    renderObjections(data);
+  } catch(e) { st.textContent = 'Error: ' + String(e); }
+}
+
+// Core Narrative
+async function loadNarrative() {
+  var data = await fetch('/api/positioning/narrative').then(function(r){return r.json();});
+  if (data && data.target_narrative) {
+    document.getElementById('pn-target-narrative').value = data.target_narrative || '';
+    document.getElementById('pn-why-me').value = data.why_me || '';
+    document.getElementById('pn-why-now').value = data.why_now || '';
+    document.getElementById('pn-category').value = data.category_positioning || '';
+    document.getElementById('pn-ideal-role').value = data.ideal_role_thesis || '';
+    var badge = document.getElementById('pos-narr-approved-badge');
+    badge.style.display = data.approved ? 'inline-flex' : 'none';
+  }
+}
+
+async function draftNarrative() {
+  var st = document.getElementById('pos-narr-status');
+  st.textContent = 'Drafting your core narrative with Claude...';
+  st.style.display = 'block';
+  try {
+    var data = await fetch('/api/positioning/draft-narrative', { method:'POST' }).then(function(r){return r.json();});
+    if (data.error) { st.textContent = 'Error: ' + data.error; return; }
+    document.getElementById('pn-target-narrative').value = data.target_narrative || '';
+    document.getElementById('pn-why-me').value = data.why_me || '';
+    document.getElementById('pn-why-now').value = data.why_now || '';
+    document.getElementById('pn-category').value = data.category_positioning || '';
+    document.getElementById('pn-ideal-role').value = data.ideal_role_thesis || '';
+    document.getElementById('pos-narr-approved-badge').style.display = 'none';
+    st.textContent = 'Draft ready. Review and edit, then click Approve & Save.';
+  } catch(e) { st.textContent = 'Error: ' + String(e); }
+}
+
+async function approveNarrative() {
+  var body = {
+    target_narrative: document.getElementById('pn-target-narrative').value,
+    why_me: document.getElementById('pn-why-me').value,
+    why_now: document.getElementById('pn-why-now').value,
+    category_positioning: document.getElementById('pn-category').value,
+    ideal_role_thesis: document.getElementById('pn-ideal-role').value,
+    approved: true
+  };
+  if (!body.target_narrative.trim()) { alert('Target Narrative is required before approving.'); return; }
+  var r = await fetch('/api/positioning/narrative', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+  if (r.ok) {
+    document.getElementById('pos-narr-approved-badge').style.display = 'inline-flex';
+    var st = document.getElementById('pos-narr-status');
+    st.textContent = 'Core narrative approved and saved.';
+    st.style.display = 'block';
+  }
+}
+
+function copyText(text) {
+  navigator.clipboard.writeText(text).then(function(){}).catch(function(){ console.warn('clipboard copy failed'); });
 }
 
 // ── init ──────────────────────────────────────────────────────────────────
