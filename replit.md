@@ -33,14 +33,20 @@ artifacts/api-server/
 
 - `criteria` — All user-configurable search settings
 - `companies` — Target companies (greenhouse/lever/workday/plain types)
-- `jobs` — Job matches with AI scores, tiers, sub_scores JSONB
-- `settings` — Key/value store (resume text, active_resume_id, schedule, etc.)
+- `jobs` — Job matches with AI scores, tiers, sub_scores JSONB, `user_action`, `user_action_at`, `interview_prep_json`, `interview_prep_at`
+- `settings` — Key/value store (resume text `key='resume'`, schedule, etc.)
 - `saved_resumes` — Named resume versions (id, name, content, created_at)
 - `scout_runs` — Run history (+ `current_stage TEXT`, `jobs_in_pipeline INT` for live progress tracking)
 - `tailored_docs` — Generated resumes/cover letters per job
+- `tailored_resumes` — ATS-tailored resumes with gap analysis per job
+- `cover_letters` — Generated cover letters per job
 - `research_briefs` — Claude company research cache
+- `job_research` — Per-job research results (used by interview prep)
 - `salary_estimates` — Claude salary estimate cache
+- `repvue_cache` — RepVue sales culture data cache
 - `gmail_tokens` — Gmail OAuth tokens
+- `career_intel` — AI career intelligence cache (JSONB)
+- `positioning_outputs` — Career positioning generated outputs (JSONB)
 
 ## Criteria Schema Fields (All User-Configurable)
 

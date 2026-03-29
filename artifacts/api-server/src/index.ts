@@ -261,6 +261,13 @@ async function initDb(): Promise<void> {
       created_at   TIMESTAMP DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS job_research (
+      id           SERIAL PRIMARY KEY,
+      job_id       INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+      result_json  JSONB NOT NULL,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS salary_estimates (
       id           SERIAL PRIMARY KEY,
       job_title    TEXT NOT NULL,
@@ -1554,8 +1561,8 @@ app.post('/api/jobs/:id/interview-prep', async (req: Request, res: Response) => 
 
     const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
     const crit = cRows[0] as any;
-    const { rows: rRows } = await pool.query('SELECT resume_text FROM resumes WHERE is_active=true LIMIT 1');
-    const resumeText = rRows[0]?.resume_text || crit?.resume || '';
+    const { rows: rRows } = await pool.query("SELECT value FROM settings WHERE key='resume' LIMIT 1");
+    const resumeText = rRows[0]?.value || crit?.resume || '';
 
     const { rows: researchRows } = await pool.query(
       `SELECT result_json FROM job_research WHERE job_id=$1 ORDER BY created_at DESC LIMIT 1`, [jobId]
