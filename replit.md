@@ -160,6 +160,29 @@ Logic:
 - Resume tailoring: territory block injected into step 3 — summary and bullets reframed to surface geographic/industry relevance
 - If no territory detected: step skipped entirely, zero performance impact
 
+## Pipeline + Interview Prep + Cross-Page Intelligence (latest)
+
+### My Pipeline Tab
+- New sidebar tab "My Pipeline" (sub-tab under Jobs/Saved Jobs)
+- `GET /api/pipeline` — returns tracked jobs grouped by status (interested/applied/interviewing/rejected), each with `days_in_stage` and `has_docs` count
+- Kanban-style view with 4 columns; shows days in stage, fit score, docs badge, prep badge
+- **Daily Action Card**: `POST /api/pipeline/daily-actions` — Claude Haiku generates 3 prioritized action recommendations based on current pipeline state
+- Auto-refreshes pipeline when `markJobAction` is called while Pipeline tab is active
+
+### Interview Prep Mode (Battle Card)
+- `POST /api/jobs/:id/interview-prep` — generates Claude Haiku battle card: company snapshot, top 5 questions + answer starters, your pitch, watch-outs
+- `GET /api/jobs/:id/interview-prep` — retrieve cached battle card
+- DB columns: `interview_prep_json TEXT`, `interview_prep_at TIMESTAMPTZ` on `jobs` table
+- **Auto-triggers**: When user marks a job as "interviewing" via `markJobAction`, interview prep is auto-generated as fire-and-forget
+- **"🎯 View Prep" / "Gen Prep" button** appears on Pipeline cards in the Interviewing column
+- Rendered in a slide-up modal (`prep-modal-overlay`)
+
+### Cross-Page Intelligence
+- **Company names on job cards are clickable** — calls `filterToCompany(name)` to filter the jobs grid to that company
+- **Companies page shows live job counts** — "N open roles →" button computed from `_allJobs` in-memory, clicking it filters Jobs tab
+- **Career Intel → Positioning sync banner** — "Sync to Positioning" button in Career Intel panel takes user directly to Positioning tab
+- `clearCompanyFilter()` removes company filter; count display restored via `updateJobsCountDisplay()`
+
 ## API Routes
 
 - `GET/PUT /api/criteria` — All search criteria including new tier settings

@@ -391,6 +391,8 @@ async function initDb(): Promise<void> {
   await safeAddColumn('jobs', 'momentum_warning', 'TEXT');
   await safeAddColumn('jobs', 'user_action', 'TEXT');
   await safeAddColumn('jobs', 'user_action_at', 'TIMESTAMPTZ');
+  await safeAddColumn('jobs', 'interview_prep_json', 'TEXT');
+  await safeAddColumn('jobs', 'interview_prep_at', 'TIMESTAMPTZ');
 
   // Index for fast momentum lookups by company name
   try {
@@ -1460,6 +1462,181 @@ Be direct and specific. Use the actual data points. 1-2 sentences per section. U
       skipped:      actions.filter(a => a.user_action === 'skipped').length,
     };
     res.json({ profile, action_count: actions.length, breakdown });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Pipeline — all tracked jobs grouped by status ─────────────────────────
+app.get('/api/pipeline', async (_req, res: Response) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT j.*,
+        EXTRACT(EPOCH FROM (NOW() - j.user_action_at)) / 86400 AS days_in_stage,
+        td.resume_text AS tailored_resume,
+        td.cover_letter AS tailored_cover_letter,
+        (SELECT COUNT(*) FROM tailored_docs WHERE job_id = j.id) AS has_docs
+      FROM jobs j
+      LEFT JOIN tailored_docs td ON td.job_id = j.id
+      WHERE j.user_action IS NOT NULL AND j.user_action NOT IN ('none','skipped')
+      ORDER BY j.user_action_at DESC
+    `);
+    const grouped: Record<string, any[]> = {
+      interested: [], applied: [], interviewing: [], rejected: []
+    };
+    for (const r of rows) {
+      const k = r.user_action as string;
+      if (grouped[k]) grouped[k].push(r);
+    }
+    res.json(grouped);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Pipeline daily actions — Claude recommends top 3 moves ────────────────
+app.post('/api/pipeline/daily-actions', async (_req, res: Response) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT title, company, user_action, user_action_at, match_score, opportunity_tier,
+        EXTRACT(EPOCH FROM (NOW() - user_action_at)) / 86400 AS days_in_stage,
+        interview_prep_at
+      FROM jobs
+      WHERE user_action IS NOT NULL AND user_action NOT IN ('none','skipped')
+      ORDER BY user_action_at DESC LIMIT 20
+    `);
+    if (!rows.length) {
+      res.json({ actions: [], message: 'Start tracking jobs to get daily action recommendations.' }); return;
+    }
+    const pipelineSummary = rows.map(r =>
+      `- ${r.title} @ ${r.company}: ${r.user_action} (${Math.round(r.days_in_stage)}d ago)${r.interview_prep_at ? ' [prep ready]' : ''}`
+    ).join('\n');
+    const prompt = `You are an executive career coach giving a job seeker their most important actions for today.
+
+Current pipeline:
+${pipelineSummary}
+
+Generate exactly 3 specific, actionable recommendations for TODAY. Each action should be:
+- Specific to an actual job/company in the pipeline
+- Clear on WHY it matters now (urgency, timing, next step)
+- One sentence, direct, no fluff
+
+Format as JSON array:
+[
+  {"icon":"📝","action":"Follow up with [Company] — you applied 8 days ago and haven't heard back. A brief email today keeps you top of mind.","urgency":"high"},
+  {"icon":"🎯","action":"...","urgency":"medium"},
+  {"icon":"⚡","action":"...","urgency":"low"}
+]
+
+Return raw JSON only.`;
+    const Asdk = (await import('@anthropic-ai/sdk')).default;
+    const ac = new Asdk({
+      apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '',
+      ...(process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL ? { baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL } : {}),
+    });
+    const msg = await ac.messages.create({
+      model: 'claude-haiku-4-5', max_tokens: 400,
+      messages: [{ role: 'user', content: prompt }]
+    });
+    const raw = msg.content[0]?.type === 'text' ? msg.content[0].text.trim() : '[]';
+    let actions: any[] = [];
+    try {
+      const clean = raw.replace(/^```json\s*/,'').replace(/```$/,'').trim();
+      actions = JSON.parse(clean);
+    } catch { actions = []; }
+    res.json({ actions });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Interview Prep — generate battle card for a job ───────────────────────
+app.post('/api/jobs/:id/interview-prep', async (req: Request, res: Response) => {
+  try {
+    const jobId = Number(req.params.id);
+    const { rows: jRows } = await pool.query('SELECT * FROM jobs WHERE id=$1', [jobId]);
+    if (!jRows.length) { res.status(404).json({ error: 'Job not found' }); return; }
+    const job = jRows[0] as any;
+
+    const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
+    const crit = cRows[0] as any;
+    const { rows: rRows } = await pool.query('SELECT resume_text FROM resumes WHERE is_active=true LIMIT 1');
+    const resumeText = rRows[0]?.resume_text || crit?.resume || '';
+
+    const { rows: researchRows } = await pool.query(
+      `SELECT result_json FROM job_research WHERE job_id=$1 ORDER BY created_at DESC LIMIT 1`, [jobId]
+    );
+    const researchSnippet = researchRows[0]?.result_json
+      ? JSON.stringify(researchRows[0].result_json).slice(0, 800)
+      : 'No prior research available.';
+
+    const jdSnippet = (job.description || job.title + ' at ' + job.company).slice(0, 1200);
+
+    const prompt = `You are an expert interview coach. Generate a concise interview battle card.
+
+Role: ${job.title} at ${job.company}
+Location: ${job.location || 'Remote'}
+Salary: ${job.salary || 'Not listed'}
+
+Job Description (excerpt):
+${jdSnippet}
+
+Candidate Resume (excerpt):
+${resumeText.slice(0, 1000)}
+
+Company Research:
+${researchSnippet}
+
+Generate a battle card with these exact sections. Be specific and practical:
+
+1. COMPANY_SNAPSHOT: 2-3 sentences: what they do, stage, why they're hiring now
+2. TOP_QUESTIONS: 5 likely interview questions for this specific role (numbered list)
+3. YOUR_BEST_ANSWERS: For each question above, 1-2 sentence answer starter leveraging the candidate's actual background
+4. YOUR_PITCH: One-sentence "why I want this role and why I'm the right person" talking point
+5. WATCH_OUT: 1-2 things to be ready for (culture fit, comp negotiation, competitive concern)
+
+Format as JSON:
+{
+  "company_snapshot": "...",
+  "top_questions": ["Q1","Q2","Q3","Q4","Q5"],
+  "answer_starters": ["A1","A2","A3","A4","A5"],
+  "your_pitch": "...",
+  "watch_out": ["W1","W2"]
+}
+
+Return raw JSON only.`;
+
+    const Asdk2 = (await import('@anthropic-ai/sdk')).default;
+    const ac2 = new Asdk2({
+      apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '',
+      ...(process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL ? { baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL } : {}),
+    });
+    const msg2 = await ac2.messages.create({
+      model: 'claude-haiku-4-5', max_tokens: 900,
+      messages: [{ role: 'user', content: prompt }]
+    });
+    const raw2 = msg2.content[0]?.type === 'text' ? msg2.content[0].text.trim() : '{}';
+    let prepData: any = {};
+    try {
+      const clean2 = raw2.replace(/^```json\s*/,'').replace(/```$/,'').trim();
+      prepData = JSON.parse(clean2);
+    } catch { prepData = { error: 'Failed to parse battle card', raw: raw2.slice(0,200) }; }
+
+    await pool.query(
+      `UPDATE jobs SET interview_prep_json=$1, interview_prep_at=NOW() WHERE id=$2`,
+      [JSON.stringify(prepData), jobId]
+    );
+    res.json({ prep: prepData, job_id: jobId });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Interview Prep — get cached battle card ───────────────────────────────
+app.get('/api/jobs/:id/interview-prep', async (req: Request, res: Response) => {
+  try {
+    const jobId = Number(req.params.id);
+    const { rows } = await pool.query(
+      'SELECT interview_prep_json, interview_prep_at, title, company FROM jobs WHERE id=$1', [jobId]
+    );
+    if (!rows.length) { res.status(404).json({ error: 'Job not found' }); return; }
+    const row = rows[0] as any;
+    if (!row.interview_prep_json) { res.json({ prep: null }); return; }
+    let prep: any;
+    try { prep = JSON.parse(row.interview_prep_json); } catch { prep = null; }
+    res.json({ prep, generated_at: row.interview_prep_at, title: row.title, company: row.company });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -4197,6 +4374,50 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .research-loading p{color:var(--muted);font-size:13px}
 .research-loading .elapsed{font-size:11px;color:var(--muted);margin-top:8px}
 .research-error{text-align:center;padding:32px;color:var(--red);font-size:13px}
+/* ── Pipeline ─────────────────────────────────────────────────────────── */
+.daily-action-card{background:linear-gradient(135deg,#0f1a0f 0%,#111 50%,#0d0d0d 100%);border:1px solid rgba(245,200,66,.25);border-radius:12px;padding:20px 22px;margin-bottom:22px}
+.daily-action-title{font-size:13px;font-weight:700;color:var(--gold);letter-spacing:.04em;text-transform:uppercase;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.daily-action-items{display:flex;flex-direction:column;gap:10px}
+.daily-action-item{display:flex;align-items:flex-start;gap:12px;padding:10px 14px;border-radius:8px;background:#0d0d0d;border:1px solid #1e1e1e}
+.daily-action-item.urgency-high{border-left:3px solid #e55353}
+.daily-action-item.urgency-medium{border-left:3px solid #f5c842}
+.daily-action-item.urgency-low{border-left:3px solid #4ade80}
+.daily-action-icon{font-size:18px;line-height:1;flex-shrink:0;margin-top:1px}
+.daily-action-text{font-size:13px;color:var(--text);line-height:1.55}
+.pipeline-columns{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;min-height:300px}
+@media(max-width:900px){.pipeline-columns{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.pipeline-columns{grid-template-columns:1fr}}
+.pipeline-col{background:#0d0d0d;border:1px solid #1e1e1e;border-radius:10px;padding:14px}
+.pipeline-col-header{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;justify-content:space-between}
+.pipeline-col-header.col-interested{color:#f5c842}
+.pipeline-col-header.col-applied{color:#60a5fa}
+.pipeline-col-header.col-interviewing{color:#818cf8}
+.pipeline-col-header.col-rejected{color:#555}
+.pipeline-col-count{background:#1a1a1a;border-radius:10px;padding:1px 7px;font-size:10px}
+.pipeline-card{background:#111;border:1px solid #222;border-radius:8px;padding:12px 14px;margin-bottom:10px;transition:border-color .15s;cursor:default}
+.pipeline-card:hover{border-color:#333}
+.pipeline-card-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:3px;line-height:1.3}
+.pipeline-card-co{font-size:12px;color:var(--gold);font-weight:600;margin-bottom:6px}
+.pipeline-card-meta{font-size:11px;color:var(--muted);margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.pipeline-card-actions{display:flex;gap:6px;flex-wrap:wrap}
+.pipeline-empty{color:var(--muted);font-size:12px;text-align:center;padding:20px 0;font-style:italic}
+.prep-badge{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;background:rgba(129,140,248,.15);color:#818cf8;border:1px solid rgba(129,140,248,.3)}
+/* ── Interview Prep Modal ─────────────────────────────────────────────── */
+.prep-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1100;display:none;align-items:center;justify-content:center;padding:20px}
+.prep-modal-overlay.open{display:flex}
+.prep-modal{background:#111;border:1px solid #333;border-radius:14px;width:100%;max-width:680px;max-height:90vh;overflow:hidden;display:flex;flex-direction:column}
+.prep-modal-header{padding:18px 22px 14px;border-bottom:1px solid #222;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-shrink:0}
+.prep-modal-title{font-size:15px;font-weight:700;color:var(--text)}
+.prep-modal-sub{font-size:12px;color:var(--muted);margin-top:3px}
+.prep-modal-body{padding:20px 22px;overflow-y:auto;flex:1}
+.prep-section{margin-bottom:20px}
+.prep-section-label{font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--gold);margin-bottom:8px}
+.prep-snapshot{background:#0d0d0d;border-left:3px solid var(--gold);padding:10px 14px;border-radius:0 6px 6px 0;font-size:13px;line-height:1.6;color:var(--text)}
+.prep-pitch{background:rgba(245,200,66,.06);border:1px solid rgba(245,200,66,.2);padding:12px 16px;border-radius:8px;font-size:13px;font-weight:600;color:var(--gold);line-height:1.5}
+.prep-qa-item{margin-bottom:14px;padding:12px 14px;background:#0d0d0d;border-radius:8px}
+.prep-q{font-size:13px;font-weight:600;color:var(--text);margin-bottom:6px}
+.prep-a{font-size:12px;color:#aaa;line-height:1.55}
+.prep-watchout{background:rgba(229,83,83,.08);border:1px solid rgba(229,83,83,.2);padding:10px 14px;border-radius:6px;font-size:13px;color:#e55353;line-height:1.55}
 </style>
 </head>
 <body>
@@ -4290,6 +4511,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
 <nav class="sidebar">
   <div class="tab active" id="tab-jobs" onclick="showTab('jobs')" data-tooltip="Your scored job board. Claude rates every listing Top Target / Fast Win / Stretch / Probably Skip against your resume and settings.">Jobs</div>
   <div class="tab sub-tab" id="tab-saved" onclick="showTab('saved')" data-tooltip="Jobs you've starred. Generate tailored resumes and cover letters from each one.">&nbsp;&nbsp;Saved Jobs</div>
+  <div class="tab sub-tab" id="tab-pipeline" onclick="showTab('pipeline')" data-tooltip="Your active application pipeline. Track every job you've applied to, are interviewing for, or are interested in — with daily AI action recommendations.">&nbsp;&nbsp;My Pipeline</div>
   <div class="tab" id="tab-research" onclick="showTab('research')" data-tooltip="Deep-dive company research powered by Claude. Culture, financials, hiring signals, and interview prep before you apply.">Research</div>
   <div class="tab" id="tab-intel" onclick="showTab('intel')" data-tooltip="Gemini scans the web daily for companies actively hiring in your space. Market trends, emerging themes, hot companies to target now.">Career Intel</div>
   <div class="tab" id="tab-preipo" onclick="showTab('preipo')" data-tooltip="Explosive pre-IPO companies worth joining NOW. Series B is the sweet spot — proven PMF, scaling sales motion, meaningful equity. Ranked by momentum score using real funding data.">Pre-IPO</div>
@@ -4324,6 +4546,66 @@ textarea:focus,input:focus{border-color:var(--gold)}
 <div class="panel" id="panel-saved">
   <div class="sec-title" id="saved-count">Loading saved jobs&hellip;</div>
   <div class="jobs-grid" id="saved-grid"></div>
+</div>
+
+<div class="panel" id="panel-pipeline">
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:18px">
+    <div>
+      <div class="sec-title" style="margin-bottom:2px">&#x1F4CB; My Pipeline</div>
+      <div style="font-size:12px;color:var(--muted)">All tracked applications &mdash; moved through stages with AI coaching</div>
+    </div>
+    <button class="btn btn-gold btn-sm" onclick="loadDailyActions()" id="actions-refresh-btn">&#x26A1; Refresh Actions</button>
+  </div>
+
+  <!-- Daily Action Card -->
+  <div class="daily-action-card" id="daily-action-card">
+    <div class="daily-action-title">&#x1F9E0; Today&rsquo;s Top 3 Actions</div>
+    <div id="daily-action-body" class="daily-action-items">
+      <div style="color:var(--muted);font-size:13px;font-style:italic">Click &ldquo;Refresh Actions&rdquo; to generate personalized recommendations from your pipeline.</div>
+    </div>
+  </div>
+
+  <!-- Kanban columns -->
+  <div class="pipeline-columns" id="pipeline-columns">
+    <div class="pipeline-col">
+      <div class="pipeline-col-header col-interested">&#x2605; Interested <span class="pipeline-col-count" id="pipe-count-interested">0</span></div>
+      <div id="pipe-col-interested"></div>
+    </div>
+    <div class="pipeline-col">
+      <div class="pipeline-col-header col-applied">&#x2713; Applied <span class="pipeline-col-count" id="pipe-count-applied">0</span></div>
+      <div id="pipe-col-applied"></div>
+    </div>
+    <div class="pipeline-col">
+      <div class="pipeline-col-header col-interviewing">&#x1F4CB; Interviewing <span class="pipeline-col-count" id="pipe-count-interviewing">0</span></div>
+      <div id="pipe-col-interviewing"></div>
+    </div>
+    <div class="pipeline-col">
+      <div class="pipeline-col-header col-rejected">&#x2715; Rejected <span class="pipeline-col-count" id="pipe-count-rejected">0</span></div>
+      <div id="pipe-col-rejected"></div>
+    </div>
+  </div>
+  <div id="pipeline-empty" style="display:none;text-align:center;padding:48px 24px;color:var(--muted)">
+    <div style="font-size:32px;margin-bottom:12px">&#x1F4CB;</div>
+    <div style="font-size:15px;font-weight:600;margin-bottom:6px">Your pipeline is empty</div>
+    <div style="font-size:13px">Use the Track Status dropdown on any job card to add jobs here.</div>
+    <button class="btn btn-gold btn-sm" style="margin-top:16px" onclick="showTab('jobs')">Browse Jobs &rarr;</button>
+  </div>
+</div>
+
+<!-- Interview Prep Modal -->
+<div class="prep-modal-overlay" id="prep-modal-overlay" onclick="if(event.target===this)closePrepModal()">
+  <div class="prep-modal">
+    <div class="prep-modal-header">
+      <div>
+        <div class="prep-modal-title" id="prep-modal-title">Interview Prep</div>
+        <div class="prep-modal-sub" id="prep-modal-sub"></div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="closePrepModal()" style="flex-shrink:0">&#x2715; Close</button>
+    </div>
+    <div class="prep-modal-body" id="prep-modal-body">
+      <div style="text-align:center;padding:40px;color:var(--muted)">Loading battle card&hellip;</div>
+    </div>
+  </div>
 </div>
 
 <div class="panel" id="panel-research">
@@ -4493,6 +4775,15 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="intel-cards" id="intel-cards"></div>
 
     <div class="intel-footer" id="intel-footer"></div>
+
+    <!-- Cross-page: Sync signals to Positioning -->
+    <div style="margin-top:16px;padding:14px 16px;background:#0d1a0d;border:1px solid rgba(74,222,128,.15);border-radius:8px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div>
+        <div style="font-size:13px;font-weight:600;color:#4ade80">&#x1F9E9; Sync to Positioning</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px">Use these market signals to sharpen your LinkedIn headline, pitch, and narrative</div>
+      </div>
+      <button class="btn btn-sm" style="background:rgba(74,222,128,.1);color:#4ade80;border:1px solid rgba(74,222,128,.3)" onclick="showTab('positioning')">Go to Positioning &rarr;</button>
+    </div>
 
     <div id="intel-scan-section" style="margin-top:24px;border-top:1px solid var(--border);padding-top:20px">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:8px">
@@ -5168,15 +5459,18 @@ function sizeClawd() {
 window.addEventListener('resize', sizeClawd);
 
 // ── tabs ─────────────────────────────────────────────────────────────────
-var TABS = ['jobs','saved','research','intel','preipo','companies','resume','email','runs','positioning','settings','clawd'];
+var TABS = ['jobs','saved','pipeline','research','intel','preipo','companies','resume','email','runs','positioning','settings','clawd'];
 function showTab(name) {
   TABS.forEach(function(t) {
-    document.getElementById('tab-' + t).classList.toggle('active', t === name);
-    document.getElementById('panel-' + t).classList.toggle('active', t === name);
+    var tabEl = document.getElementById('tab-' + t);
+    var panelEl = document.getElementById('panel-' + t);
+    if (tabEl) tabEl.classList.toggle('active', t === name);
+    if (panelEl) panelEl.classList.toggle('active', t === name);
   });
   sizeClawd();
   if (name === 'jobs')      loadJobs();
   if (name === 'saved')     loadSavedJobs();
+  if (name === 'pipeline')  loadPipeline();
   if (name === 'research')  loadSavedResearch();
   if (name === 'runs')      loadRuns();
   if (name === 'companies') loadCompanies();
@@ -5423,7 +5717,7 @@ function renderJobCard(j, opts) {
 
   // Company line: name · location · age
   var ageTxt = jobAge(j);
-  var coLineParts = ['<span class="card-co-name">' + esc(j.company) + '</span>'];
+  var coLineParts = ['<span class="card-co-name" style="cursor:pointer;text-decoration:underline;text-underline-offset:2px;text-decoration-color:rgba(245,200,66,.3)" title="Filter to ' + esc(j.company) + ' jobs" onclick="filterToCompany(' + JSON.stringify(j.company) + ')">' + esc(j.company) + '</span>'];
   if (j.location) coLineParts.push(esc(j.location));
   if (ageTxt) coLineParts.push('<span>' + esc(ageTxt) + '</span>');
   if (opts.showNew && isNew(j)) coLineParts.push('<span class="new-pill">NEW</span>');
@@ -5647,7 +5941,220 @@ async function markJobAction(jobId, action) {
       if (_allJobs[i].id == jobId) { _allJobs[i] = updated; break; }
     }
     renderJobs();
+    // Auto-generate interview prep battle card when moving to interviewing
+    if (action === 'interviewing') {
+      fetch('/api/jobs/' + jobId + '/interview-prep', { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function() { console.log('[PrepAuto] Battle card generated for job', jobId); })
+        .catch(function(e) { console.warn('[PrepAuto] Failed:', e); });
+    }
+    // Refresh pipeline if it's currently visible
+    var pipelinePanel = document.getElementById('panel-pipeline');
+    if (pipelinePanel && pipelinePanel.classList.contains('active')) loadPipeline();
   } catch(e) { console.error('markJobAction failed:', e); }
+}
+
+// ── Pipeline ───────────────────────────────────────────────────────────────
+var _pipelineData = null;
+async function loadPipeline() {
+  try {
+    var res = await fetch('/api/pipeline');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    _pipelineData = await res.json();
+    renderPipeline(_pipelineData);
+  } catch(e) { console.error('loadPipeline failed:', e); }
+}
+
+function renderPipeline(data) {
+  var stages = ['interested','applied','interviewing','rejected'];
+  var total = 0;
+  stages.forEach(function(s) { total += (data[s] || []).length; });
+  var emptyEl = document.getElementById('pipeline-empty');
+  var colsEl = document.getElementById('pipeline-columns');
+  var actionCard = document.getElementById('daily-action-card');
+  if (total === 0) {
+    if (emptyEl) emptyEl.style.display = '';
+    if (colsEl) colsEl.style.display = 'none';
+    if (actionCard) actionCard.style.display = 'none';
+    return;
+  }
+  if (emptyEl) emptyEl.style.display = 'none';
+  if (colsEl) colsEl.style.display = '';
+  if (actionCard) actionCard.style.display = '';
+  stages.forEach(function(stage) {
+    var jobs = data[stage] || [];
+    var countEl = document.getElementById('pipe-count-' + stage);
+    if (countEl) countEl.textContent = jobs.length;
+    var colEl = document.getElementById('pipe-col-' + stage);
+    if (!colEl) return;
+    if (!jobs.length) {
+      colEl.innerHTML = '<div class="pipeline-empty">None yet</div>';
+      return;
+    }
+    colEl.innerHTML = jobs.map(function(j) { return renderPipelineCard(j, stage); }).join('');
+  });
+}
+
+function renderPipelineCard(j, stage) {
+  var days = j.days_in_stage !== null && j.days_in_stage !== undefined ? Math.round(Number(j.days_in_stage)) : 0;
+  var daysLabel = days === 0 ? 'Today' : days === 1 ? '1 day ago' : days + ' days ago';
+  var scoreHtml = j.match_score ? '<span style="color:var(--gold);font-weight:700">' + j.match_score + '</span>' : '';
+  var hasDocs = Number(j.has_docs) > 0;
+  var hasPrep = !!j.interview_prep_at;
+  var prepBadge = hasPrep ? '<span class="prep-badge">&#x1F3AF; Prep Ready</span>' : '';
+  var docsBadge = hasDocs ? '<span style="display:inline-flex;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600;background:rgba(96,165,250,.12);color:#60a5fa;border:1px solid rgba(96,165,250,.25)">&#x1F4C4; Docs</span>' : '';
+  var prepBtn = (stage === 'interviewing')
+    ? '<button class="btn btn-sm" style="background:rgba(129,140,248,.12);color:#818cf8;border:1px solid rgba(129,140,248,.3);font-size:11px" data-jid="' + j.id + '" data-jtit="' + esc(j.title) + '" data-jco="' + esc(j.company) + '" onclick="openInterviewPrep(this.dataset.jid,this.dataset.jtit,this.dataset.jco)">&#x1F3AF; ' + (hasPrep ? 'View Prep' : 'Gen Prep') + '</button>'
+    : '';
+  var viewJobsBtn = '<button class="btn btn-ghost btn-sm" style="font-size:11px" onclick="filterToCompany(' + JSON.stringify(j.company) + ')">All ' + esc(j.company) + ' jobs</button>';
+  var applyBtn = '<a href="' + esc(j.apply_url || '#') + '" target="_blank" class="btn btn-sm" style="background:rgba(245,200,66,.1);color:var(--gold);border:1px solid rgba(245,200,66,.3);font-size:11px">Apply &rarr;</a>';
+  return '<div class="pipeline-card">' +
+    '<div class="pipeline-card-title">' + esc(j.title) + '</div>' +
+    '<div class="pipeline-card-co">' + esc(j.company) + '</div>' +
+    '<div class="pipeline-card-meta">' +
+      '<span>&#x1F552; ' + esc(daysLabel) + '</span>' +
+      (scoreHtml ? '<span>' + scoreHtml + '/100</span>' : '') +
+      prepBadge + docsBadge +
+    '</div>' +
+    '<div class="pipeline-card-actions">' +
+      applyBtn + prepBtn + viewJobsBtn +
+    '</div>' +
+  '</div>';
+}
+
+// ── Daily Actions ──────────────────────────────────────────────────────────
+async function loadDailyActions() {
+  var bodyEl = document.getElementById('daily-action-body');
+  var btn = document.getElementById('actions-refresh-btn');
+  if (btn) btn.disabled = true;
+  if (bodyEl) bodyEl.innerHTML = '<div style="color:var(--muted);font-size:13px">Asking Claude to analyze your pipeline&hellip;</div>';
+  try {
+    var res = await fetch('/api/pipeline/daily-actions', { method: 'POST' });
+    var data = await res.json();
+    if (bodyEl) bodyEl.innerHTML = renderDailyActions(data);
+  } catch(e) {
+    if (bodyEl) bodyEl.innerHTML = '<div style="color:#e55353;font-size:13px">Failed to generate actions. Try again.</div>';
+  }
+  if (btn) btn.disabled = false;
+}
+
+function renderDailyActions(data) {
+  if (!data.actions || !data.actions.length) {
+    return '<div style="color:var(--muted);font-size:13px;font-style:italic">' + esc(data.message || 'No pipeline data yet.') + '</div>';
+  }
+  return data.actions.map(function(a) {
+    return '<div class="daily-action-item urgency-' + esc(a.urgency || 'low') + '">' +
+      '<div class="daily-action-icon">' + esc(a.icon || '•') + '</div>' +
+      '<div class="daily-action-text">' + esc(a.action) + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+// ── Interview Prep Modal ───────────────────────────────────────────────────
+var _prepJobId = null;
+function openInterviewPrep(jobId, title, company) {
+  _prepJobId = jobId;
+  var overlay = document.getElementById('prep-modal-overlay');
+  var titleEl = document.getElementById('prep-modal-title');
+  var subEl = document.getElementById('prep-modal-sub');
+  var bodyEl = document.getElementById('prep-modal-body');
+  if (titleEl) titleEl.textContent = title || 'Interview Prep';
+  if (subEl) subEl.textContent = company || '';
+  if (bodyEl) bodyEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)">Loading battle card&hellip;</div>';
+  if (overlay) overlay.classList.add('open');
+  loadInterviewPrep(jobId);
+}
+
+function closePrepModal() {
+  var overlay = document.getElementById('prep-modal-overlay');
+  if (overlay) overlay.classList.remove('open');
+}
+
+async function loadInterviewPrep(jobId) {
+  var bodyEl = document.getElementById('prep-modal-body');
+  try {
+    var res = await fetch('/api/jobs/' + jobId + '/interview-prep');
+    var data = await res.json();
+    if (!data.prep) {
+      if (bodyEl) bodyEl.innerHTML = '<div style="text-align:center;padding:20px">' +
+        '<div style="color:var(--muted);margin-bottom:16px">No battle card yet. Generate one now?</div>' +
+        '<button class="btn btn-gold" onclick="generateInterviewPrep(' + jobId + ')">&#x1F3AF; Generate Battle Card</button></div>';
+      return;
+    }
+    if (bodyEl) bodyEl.innerHTML = renderBattleCard(data.prep, data.generated_at);
+  } catch(e) {
+    if (bodyEl) bodyEl.innerHTML = '<div style="color:#e55353;padding:20px">Error loading prep: ' + esc(String(e)) + '</div>';
+  }
+}
+
+async function generateInterviewPrep(jobId) {
+  var bodyEl = document.getElementById('prep-modal-body');
+  if (bodyEl) bodyEl.innerHTML = '<div style="text-align:center;padding:40px"><div class="intel-spinner" style="margin:0 auto 12px"></div><div style="color:var(--muted);font-size:13px">Claude is building your battle card&hellip;</div></div>';
+  try {
+    var res = await fetch('/api/jobs/' + jobId + '/interview-prep', { method: 'POST' });
+    var data = await res.json();
+    if (data.prep && bodyEl) bodyEl.innerHTML = renderBattleCard(data.prep, null);
+    else if (bodyEl) bodyEl.innerHTML = '<div style="color:#e55353;padding:20px">Generation failed. Try again.</div>';
+  } catch(e) {
+    if (bodyEl) bodyEl.innerHTML = '<div style="color:#e55353;padding:20px">Error: ' + esc(String(e)) + '</div>';
+  }
+}
+
+function renderBattleCard(prep, generatedAt) {
+  var html = '';
+  if (prep.company_snapshot) {
+    html += '<div class="prep-section"><div class="prep-section-label">Company Snapshot</div><div class="prep-snapshot">' + esc(prep.company_snapshot) + '</div></div>';
+  }
+  if (prep.your_pitch) {
+    html += '<div class="prep-section"><div class="prep-section-label">&#x1F3AF; Your Pitch</div><div class="prep-pitch">' + esc(prep.your_pitch) + '</div></div>';
+  }
+  if (prep.top_questions && prep.top_questions.length) {
+    html += '<div class="prep-section"><div class="prep-section-label">Likely Questions &amp; Your Answers</div>';
+    prep.top_questions.forEach(function(q, i) {
+      var a = (prep.answer_starters || [])[i] || '';
+      html += '<div class="prep-qa-item"><div class="prep-q">Q' + (i+1) + ': ' + esc(q) + '</div>' + (a ? '<div class="prep-a">&#x1F4AC; ' + esc(a) + '</div>' : '') + '</div>';
+    });
+    html += '</div>';
+  }
+  if (prep.watch_out && prep.watch_out.length) {
+    html += '<div class="prep-section"><div class="prep-section-label">&#x26A0; Watch Out For</div><div class="prep-watchout">' +
+      prep.watch_out.map(function(w) { return '\u2022 ' + esc(w); }).join('<br>') + '</div></div>';
+  }
+  if (generatedAt) {
+    html += '<div style="font-size:11px;color:var(--muted);margin-top:12px">Generated ' + new Date(generatedAt).toLocaleDateString() + '</div>';
+  }
+  return html || '<div style="color:var(--muted);padding:20px;text-align:center">Battle card data incomplete. Try regenerating.</div>';
+}
+
+// ── Cross-Page Intelligence ────────────────────────────────────────────────
+function filterToCompany(companyName) {
+  showTab('jobs');
+  setTimeout(function() {
+    var allJobs = document.querySelectorAll('.card');
+    var found = 0;
+    allJobs.forEach(function(card) {
+      var coEl = card.querySelector('.card-co-name');
+      if (!coEl) return;
+      var matches = coEl.textContent.trim().toLowerCase() === companyName.toLowerCase();
+      card.style.display = matches ? '' : 'none';
+      if (matches) found++;
+    });
+    var countEl = document.getElementById('jobs-count');
+    if (countEl) countEl.textContent = found + ' jobs at ' + companyName + ' \u2014 \u200B<button class="btn btn-ghost btn-sm" style="font-size:11px;margin-left:8px" onclick="clearCompanyFilter()">Clear filter</button>';
+  }, 150);
+}
+
+function clearCompanyFilter() {
+  document.querySelectorAll('.card').forEach(function(card) { card.style.display = ''; });
+  updateJobsCountDisplay();
+}
+
+function updateJobsCountDisplay() {
+  var countEl = document.getElementById('jobs-count');
+  if (!countEl || !_allJobs) return;
+  var visible = _allJobs.filter(function(j) { return tierKey(j) === _currentJobsTab || _currentJobsTab === 'all'; });
+  var newLabel = visible.length + ' ' + (_currentJobsTab === 'target' ? 'TOP TARGET' : _currentJobsTab.toUpperCase()) + ' ROLES';
+  countEl.textContent = newLabel;
 }
 
 async function loadPreferenceProfile() {
@@ -6336,23 +6843,37 @@ async function loadCompanies() {
   var cos = await res.json();
   var list = document.getElementById('company-list');
   if (!cos.length) { list.innerHTML = '<div class="empty">No companies yet — add one below.</div>'; return; }
+  // Count open roles per company from in-memory jobs (if loaded)
+  var jobCountsByCompany = {};
+  if (_allJobs && _allJobs.length) {
+    _allJobs.forEach(function(j) {
+      if (!j.company) return;
+      var key = j.company.toLowerCase();
+      jobCountsByCompany[key] = (jobCountsByCompany[key] || 0) + 1;
+    });
+  }
   var html = '';
   cos.forEach(function(c) {
     var detail = c.ats_slug || c.careers_url || '';
     var status = c.detect_status || 'manual';
     var statusColor = status === 'detected' ? 'var(--green)' : status === 'pending' ? '#f5a623' : status === 'failed' ? 'var(--red)' : 'var(--muted)';
-    var statusLabel = status === 'detected' ? '✓ verified' : status === 'pending' ? '⏳ pending' : status === 'failed' ? '✗ failed' : '';
+    var statusLabel = status === 'detected' ? '\u2713 verified' : status === 'pending' ? '\u23F3 pending' : status === 'failed' ? '\u2717 failed' : '';
     var atsLabel = c.ats_type ? c.ats_type.charAt(0).toUpperCase() + c.ats_type.slice(1) : '';
     var errorHtml = (status === 'failed' || status === 'pending') && c.last_scan_error
-      ? '<div style="font-size:11px;color:var(--muted);margin-top:3px;white-space:normal">' + esc(c.last_scan_error.slice(0, 120)) + (c.last_scan_error.length > 120 ? '…' : '') + '</div>'
+      ? '<div style="font-size:11px;color:var(--muted);margin-top:3px;white-space:normal">' + esc(c.last_scan_error.slice(0, 120)) + (c.last_scan_error.length > 120 ? '\u2026' : '') + '</div>'
       : '';
+    var jobCount = jobCountsByCompany[c.name.toLowerCase()] || 0;
+    var jobCountBadge = jobCount > 0
+      ? '<button class="btn btn-sm" style="background:rgba(245,200,66,.1);color:var(--gold);border:1px solid rgba(245,200,66,.25);font-size:11px;margin-left:4px" onclick="filterToCompany(' + JSON.stringify(c.name) + ')">' + jobCount + ' open role' + (jobCount !== 1 ? 's' : '') + ' \u2192</button>'
+      : '<span style="font-size:11px;color:var(--muted);margin-left:4px">0 roles found</span>';
     html +=
       '<div class="company-row" style="flex-wrap:wrap;gap:4px">' +
         '<span class="company-name" style="flex:1;min-width:120px">' + esc(c.name) + '</span>' +
+        jobCountBadge +
         '<span class="source-badge">' + esc(atsLabel) + '</span>' +
         (detail ? '<span class="company-meta" style="font-size:11px">' + esc(detail) + '</span>' : '') +
         (statusLabel ? '<span style="font-size:11px;color:' + statusColor + ';font-weight:600">' + statusLabel + '</span>' : '') +
-        '<button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="retryDetect(' + c.id + ',' + JSON.stringify(c.name) + ')" title="Re-run auto-detection">↻</button>' +
+        '<button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="retryDetect(' + c.id + ',' + JSON.stringify(c.name) + ')" title="Re-run auto-detection">\u21BB</button>' +
         '<button class="btn btn-ghost btn-sm" onclick="deleteCompany(' + c.id + ')">Remove</button>' +
         (errorHtml ? '<div style="width:100%;padding-left:4px">' + errorHtml + '</div>' : '') +
       '</div>';
