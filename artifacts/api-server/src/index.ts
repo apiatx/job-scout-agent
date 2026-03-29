@@ -3578,10 +3578,10 @@ function lines(id) {
 // ── clawd iframe sizing ───────────────────────────────────────────────────
 function sizeClawd() {
   var panel = document.getElementById('panel-clawd');
-  var frame = document.querySelector('.clawd-frame') as HTMLIFrameElement;
+  var frame = document.querySelector('.clawd-frame');
   if (!panel || !frame) return;
   if (!panel.classList.contains('active')) { frame.style.height = ''; return; }
-  var mc = document.querySelector('.main-content') as HTMLElement;
+  var mc = document.querySelector('.main-content');
   var top = mc ? mc.getBoundingClientRect().top : 0;
   frame.style.height = (window.innerHeight - top) + 'px';
 }
