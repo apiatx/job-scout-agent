@@ -1,0 +1,218 @@
+Rebuild the resume tailoring feature from scratch using the same intelligence level as the cover letter feature. The current version produces generic output. I need it to produce tailored resumes that are ATS-optimized, keyword-matched to the specific role and company, and completely human-written looking.
+
+## WHERE IT APPEARS
+The existing "Tailor Resume" button is already on every job card. Keep it there. Replace the current logic behind it entirely with this new implementation.
+
+## HOW IT WORKS
+
+When "Tailor Resume" is clicked:
+
+1. Pull the job description, company name, role title, and job source from the job record
+2. Pull the user's base resume text from the settings/resume table
+3. Pull the company research brief from research_briefs table if it exists — if not, generate one fresh
+4. Use Claude with web search to research ATS keywords and requirements specific to this role and company
+5. Generate the tailored resume
+6. Display in a modal with copy and download options
+
+## BACKEND — Update existing resume tailoring endpoint
+
+Update POST /api/jobs/:id/tailor-resume to use this new logic:
+
+1. Read job record for title, company, description
+2. Read user resume from settings table (key: 'resume')
+3. Read user name, email, phone, location, LinkedIn from settings table
+4. Check research_briefs for company research — regenerate if missing or stale
+5. Run STEP 1 keyword research call
+6. Run STEP 2 resume generation call
+7. Cache in tailored_resumes table
+8. Return result
+
+## DATABASE
+
+CREATE TABLE IF NOT EXISTS tailored_resumes (
+  id SERIAL PRIMARY KEY,
+  job_id INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+  resume_text TEXT NOT NULL,
+  ats_keywords TEXT[],
+  research_context TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+## CLAUDE CALL — Three step process
+
+STEP 1 — ATS keyword research (Claude with web search):
+
+Use model claude-sonnet-4-20250514 with web search tool enabled.
+
+Prompt:
+"I need to tailor a resume for a [JOB TITLE] role at [COMPANY NAME]. Research what ATS systems and recruiters at this type of company scan for.
+
+Search for:
+- '[COMPANY NAME] [JOB TITLE] job requirements'
+- '[COMPANY NAME] sales culture what they look for'
+- 'ATS keywords [JOB TITLE] [industry] resume 2025 2026'
+- '[COMPANY NAME] tech stack products' to understand what terminology to use
+
+Also read this job description carefully: [JOB DESCRIPTION — first 2000 characters]
+
+Return ONLY a JSON object:
+{
+  'mustHaveKeywords': ['keywords that MUST appear in the resume to pass ATS — these are in the job description verbatim or are standard for this role type'],
+  'niceToHaveKeywords': ['keywords that boost score but are not required'],
+  'companySpecificTerms': ['product names, technologies, methodologies specific to this company that show insider knowledge'],
+  'titleVariants': ['all variations of this job title that should appear naturally in the resume'],
+  'avoidTerms': ['terms that signal wrong industry fit for this specific role'],
+  'buyerPersona': 'who this person will be selling to — titles, industries, company sizes',
+  'topRequirements': ['top 5 things this company is actually hiring for based on job description and company research']
+}"
+
+STEP 2 — Gap analysis (Claude, no web search):
+
+Use model claude-sonnet-4-20250514, max_tokens 1000.
+
+Prompt:
+"Compare this resume against the job requirements and identify gaps and opportunities.
+
+RESUME: [RESUME TEXT]
+
+JOB REQUIREMENTS: [topRequirements from Step 1]
+
+MUST-HAVE KEYWORDS: [mustHaveKeywords from Step 1]
+
+COMPANY-SPECIFIC TERMS: [companySpecificTerms from Step 1]
+
+Return ONLY a JSON object:
+{
+  'keywordsPresent': ['keywords from mustHaveKeywords already in resume'],
+  'keywordsMissing': ['keywords from mustHaveKeywords NOT in resume that need to be added'],
+  'experienceToHighlight': ['specific experiences from the resume that map directly to the top requirements — reference exact bullet points'],
+  'experienceToDownplay': ['experiences that signal wrong industry fit for this specific role'],
+  'summaryAngle': 'the specific narrative angle the summary should take for this role and company',
+  'atsScore': 'estimated ATS match score 0-100 before tailoring',
+  'projectedScore': 'estimated ATS match score 0-100 after tailoring'
+}"
+
+STEP 3 — Resume generation (Claude, no web search):
+
+Use model claude-sonnet-4-20250514, max_tokens 3000.
+
+System prompt:
+"You are an expert resume writer who specializes in helping enterprise technology sales professionals land roles at hardware, semiconductor, AI infrastructure, networking, and industrial technology companies. You write resumes that pass ATS screening and impress human recruiters.
+
+CRITICAL RULES:
+- Never fabricate experience, metrics, companies, or achievements — only use what is in the source resume
+- You MAY reframe, reorder, and reword existing experience to better match the target role
+- You MAY add industry-specific keywords naturally into existing bullet points where they accurately describe what the person did
+- You MAY restructure bullet points to lead with the most relevant achievement for this specific role
+- You MAY add a professional summary tailored to this specific role and company
+- Keep all dates, titles, and company names exactly as they appear in the source resume — do not change these
+- Every metric and number must come directly from the source resume — do not invent or inflate
+- The resume must read as written by the candidate, not a robot — vary sentence structure, avoid buzzwords
+- Never use em dashes
+- Never use the word 'leverage' or 'leveraging'
+- Never use 'utilize' — use 'use'
+- Never use 'passionate' or 'passionate about'
+- Never use 'results-driven' or 'dynamic' or 'seasoned'
+- Bullet points should start with strong action verbs
+- Each bullet should lead with the outcome or achievement, not the activity
+- Maximum 5 bullets per role — quality over quantity
+- Total resume length should not exceed 1 page if possible, 2 pages maximum"
+
+User prompt:
+"Tailor this resume for the specific role and company below. Make it pass ATS screening and impress a human recruiter at this company.
+
+TARGET ROLE: [JOB TITLE] at [COMPANY NAME]
+
+JOB DESCRIPTION:
+[JOB DESCRIPTION — first 1500 characters]
+
+SOURCE RESUME:
+[RESUME TEXT]
+
+ATS KEYWORDS TO INCORPORATE (weave these in naturally — do not keyword stuff):
+Must-have: [mustHaveKeywords from Step 1]
+Company-specific: [companySpecificTerms from Step 1]
+
+GAPS TO CLOSE:
+[keywordsMissing from Step 2]
+
+EXPERIENCES TO HIGHLIGHT:
+[experienceToHighlight from Step 2]
+
+EXPERIENCES TO DOWNPLAY:
+[experienceToDownplay from Step 2]
+
+SUMMARY ANGLE:
+[summaryAngle from Step 2]
+
+COMPANY RESEARCH CONTEXT (use this to make the summary and any framing feel specific to this company):
+[companyMoment and productContext from research brief]
+
+BUYER PERSONA FOR THIS ROLE:
+[buyerPersona from Step 1]
+
+INSTRUCTIONS:
+
+1. PROFESSIONAL SUMMARY (add this at the top — 3 sentences max):
+Write a tight summary that speaks directly to this role. Reference the company's specific market position or what they are building right now. Connect the candidate's most relevant experience to what this company needs. Do not be generic. Do not open with 'Results-driven' or any cliche.
+
+2. EXPERIENCE SECTION:
+For each role, reorder and reframe bullets to lead with the achievements most relevant to this target role. Incorporate missing ATS keywords naturally where they accurately describe what the candidate did. Downplay irrelevant experience without removing it entirely. Keep all titles, companies, dates, and metrics exactly as in the source.
+
+3. SKILLS SECTION:
+Reorder skills to put the most relevant ones first. Add any missing must-have keywords as skills where they accurately represent the candidate's abilities. Remove skills that signal wrong industry fit for this specific role.
+
+4. KEYWORD CHECK:
+After writing the resume, verify that every keyword from mustHaveKeywords appears at least once. If any are missing, find a natural place to add them.
+
+Return the complete tailored resume as plain text, formatted cleanly with clear section headers. Return ONLY the resume text, nothing else."
+
+## FRONTEND — Tailored resume modal
+
+When "Tailor Resume" is clicked:
+1. Button shows "Tailoring..." with spinner — takes 30-60 seconds for three Claude calls
+2. Modal opens with close button top right
+
+Modal layout:
+
+HEADER:
+- "Tailored Resume — [Job Title] at [Company Name]"
+- ATS Score badges: "ATS Score Before: [atsScore]% → After: [projectedScore]%" in gold
+- "Generated [timestamp] · Regenerate"
+
+TABS:
+
+Tab 1 — RESUME (default, opens first)
+- The full tailored resume text
+- Clean document-style display — light background within dark modal, readable font, generous spacing
+- Looks like an actual resume document
+
+Tab 2 — WHAT CHANGED
+- Keywords added: list of mustHaveKeywords that were incorporated
+- Keywords already present: list of keywords that were already there
+- Experiences highlighted: which bullets were moved to prominence
+- Experiences downplayed: which were de-emphasized
+- This tab helps the user understand and trust what the AI did
+
+Tab 3 — ATS ANALYSIS
+- Must-have keywords checklist — green checkmark if present, red X if missing
+- Company-specific terms found/missing
+- Overall ATS score with explanation
+
+FOOTER BUTTONS:
+- "Copy Resume Text" — copies plain text
+- "Download as .txt" — downloads as CoverLetter_[Company]_[Date].txt
+- "Regenerate" — forces new generation bypassing cache
+- "Also Write Cover Letter" — one click that opens the cover letter modal for the same job
+
+## IMPORTANT NOTES
+
+- If resume is not uploaded, show "Please add your resume on the Resume page first" with a link
+- The three Claude calls happen sequentially — show progress: "Step 1: Researching role requirements... Step 2: Analyzing your resume... Step 3: Tailoring your resume..."
+- Show a subtle progress indicator during the 30-60 second wait — not just a spinner but actual step labels
+- Never show the raw keywords or JSON from intermediate steps to the user — only the final resume and the clean analysis tabs
+- Cache the result per job ID but allow regeneration on demand
+- The tailored resume must look like a human wrote it — if it reads like AI output, the feature has failed
+- If any Claude call fails, show a friendly error with retry button
+
+Push to main when complete.

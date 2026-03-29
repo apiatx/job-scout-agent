@@ -937,3 +937,244 @@ Write the full cover letter now. Return ONLY the cover letter text — no subjec
 
   return { coverLetter: letterText, research, researchFailed };
 }
+
+// ── Resume Tailoring V2 (3-step: ATS research → Gap analysis → Generation) ──
+
+export interface AtsKeywordResearch {
+  mustHaveKeywords: string[];
+  niceToHaveKeywords: string[];
+  companySpecificTerms: string[];
+  titleVariants: string[];
+  avoidTerms: string[];
+  buyerPersona: string;
+  topRequirements: string[];
+}
+
+export interface GapAnalysis {
+  keywordsPresent: string[];
+  keywordsMissing: string[];
+  experienceToHighlight: string[];
+  experienceToDownplay: string[];
+  summaryAngle: string;
+  atsScore: number;
+  projectedScore: number;
+}
+
+export interface TailoredResumeV2Result {
+  resumeText: string;
+  atsResearch: AtsKeywordResearch;
+  gapAnalysis: GapAnalysis;
+  researchFailed: boolean;
+}
+
+export async function tailorResumeV2WithClaude(params: {
+  jobTitle: string;
+  companyName: string;
+  jobDescription: string;
+  resumeText: string;
+  companyResearchContext?: string | null;
+}): Promise<TailoredResumeV2Result> {
+  const { jobTitle, companyName, jobDescription, resumeText, companyResearchContext } = params;
+  const MODEL = 'claude-sonnet-4-5';
+
+  console.log(`[TailorV2] Starting 3-step tailoring for ${jobTitle} @ ${companyName}`);
+
+  // ── STEP 1: ATS keyword research (Claude with web search) ─────────────────
+  let atsResearch: AtsKeywordResearch = {
+    mustHaveKeywords: [], niceToHaveKeywords: [], companySpecificTerms: [],
+    titleVariants: [], avoidTerms: [], buyerPersona: '', topRequirements: [],
+  };
+  let researchFailed = false;
+
+  try {
+    const step1Prompt = `I need to tailor a resume for a ${jobTitle} role at ${companyName}. Research what ATS systems and recruiters at this type of company scan for.
+
+Search for:
+- "${companyName} ${jobTitle} job requirements"
+- "${companyName} sales culture what they look for"
+- "ATS keywords ${jobTitle} resume 2025 2026"
+- "${companyName} tech stack products" to understand what terminology to use
+
+Also read this job description carefully:
+${jobDescription.slice(0, 2000)}
+
+Return ONLY a JSON object with no other text:
+{
+  "mustHaveKeywords": ["keywords that MUST appear in the resume to pass ATS — these are in the job description verbatim or are standard for this role type"],
+  "niceToHaveKeywords": ["keywords that boost score but are not required"],
+  "companySpecificTerms": ["product names, technologies, methodologies specific to this company that show insider knowledge"],
+  "titleVariants": ["all variations of this job title that should appear naturally in the resume"],
+  "avoidTerms": ["terms that signal wrong industry fit for this specific role"],
+  "buyerPersona": "who this person will be selling to or working with — titles, industries, company sizes",
+  "topRequirements": ["top 5 things this company is actually hiring for based on job description and company research"]
+}`;
+
+    const step1Msg = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: 1200,
+      system: 'You are an ATS and recruiting research specialist. After using web search, respond with ONLY a valid JSON object. No conversational text, no markdown — just raw JSON starting with { and ending with }.',
+      tools: [{ type: 'web_search_20250305', name: 'web_search' }] as unknown as Anthropic.Messages.Tool[],
+      messages: [{ role: 'user', content: step1Prompt }],
+    });
+
+    const textBlocks1 = step1Msg.content.filter(b => b.type === 'text').map(b => (b as any).text as string);
+    for (let i = textBlocks1.length - 1; i >= 0; i--) {
+      const raw = textBlocks1[i].trim().replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed.mustHaveKeywords && Array.isArray(parsed.mustHaveKeywords)) {
+          atsResearch = parsed as AtsKeywordResearch;
+          break;
+        }
+      } catch {
+        const m = raw.match(/\{[\s\S]*"mustHaveKeywords"[\s\S]*\}/);
+        if (m) { try { atsResearch = JSON.parse(m[0]) as AtsKeywordResearch; break; } catch { /* skip */ } }
+      }
+    }
+    console.log(`[TailorV2] Step 1 complete — ${atsResearch.mustHaveKeywords.length} must-have keywords, ${atsResearch.topRequirements.length} top requirements`);
+  } catch (e) {
+    console.error('[TailorV2] Step 1 (ATS research) failed:', e instanceof Error ? e.message : e);
+    researchFailed = true;
+  }
+
+  // ── STEP 2: Gap analysis (Claude, no web search) ──────────────────────────
+  let gapAnalysis: GapAnalysis = {
+    keywordsPresent: [], keywordsMissing: [], experienceToHighlight: [],
+    experienceToDownplay: [], summaryAngle: '', atsScore: 0, projectedScore: 0,
+  };
+
+  try {
+    const step2Prompt = `Compare this resume against the job requirements and identify gaps and opportunities.
+
+RESUME:
+${resumeText.slice(0, 3000)}
+
+JOB REQUIREMENTS:
+${atsResearch.topRequirements.join('\n')}
+
+MUST-HAVE KEYWORDS:
+${atsResearch.mustHaveKeywords.join(', ')}
+
+COMPANY-SPECIFIC TERMS:
+${atsResearch.companySpecificTerms.join(', ')}
+
+Return ONLY a JSON object:
+{
+  "keywordsPresent": ["keywords from mustHaveKeywords already in resume"],
+  "keywordsMissing": ["keywords from mustHaveKeywords NOT in resume that need to be added"],
+  "experienceToHighlight": ["specific experiences from the resume that map directly to the top requirements — reference exact bullet points"],
+  "experienceToDownplay": ["experiences that signal wrong industry fit for this specific role"],
+  "summaryAngle": "the specific narrative angle the summary should take for this role and company",
+  "atsScore": 0,
+  "projectedScore": 0
+}`;
+
+    const step2Msg = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: 1000,
+      system: 'You are a resume gap analyst. Respond with ONLY a valid JSON object. No markdown, no explanation.',
+      messages: [{ role: 'user', content: step2Prompt }],
+    });
+
+    const textBlocks2 = step2Msg.content.filter(b => b.type === 'text').map(b => (b as any).text as string);
+    for (let i = textBlocks2.length - 1; i >= 0; i--) {
+      const raw = textBlocks2[i].trim().replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed.summaryAngle !== undefined) { gapAnalysis = parsed as GapAnalysis; break; }
+      } catch {
+        const m = raw.match(/\{[\s\S]*"summaryAngle"[\s\S]*\}/);
+        if (m) { try { gapAnalysis = JSON.parse(m[0]) as GapAnalysis; break; } catch { /* skip */ } }
+      }
+    }
+    console.log(`[TailorV2] Step 2 complete — ATS before: ${gapAnalysis.atsScore}%, projected: ${gapAnalysis.projectedScore}%, missing: ${gapAnalysis.keywordsMissing.length} keywords`);
+  } catch (e) {
+    console.error('[TailorV2] Step 2 (gap analysis) failed:', e instanceof Error ? e.message : e);
+  }
+
+  // ── STEP 3: Resume generation ─────────────────────────────────────────────
+  const companyMoment = companyResearchContext ? `\n\nCOMPANY RESEARCH CONTEXT (use to make the summary feel specific to this company):\n${companyResearchContext.slice(0, 1000)}` : '';
+
+  const systemPrompt = `You are an expert resume writer who specializes in helping enterprise technology sales professionals land roles at hardware, semiconductor, AI infrastructure, networking, and industrial technology companies. You write resumes that pass ATS screening and impress human recruiters.
+
+CRITICAL RULES:
+- Never fabricate experience, metrics, companies, or achievements — only use what is in the source resume
+- You MAY reframe, reorder, and reword existing experience to better match the target role
+- You MAY add industry-specific keywords naturally into existing bullet points where they accurately describe what the person did
+- You MAY restructure bullet points to lead with the most relevant achievement for this specific role
+- You MAY add a professional summary tailored to this specific role and company
+- Keep all dates, titles, and company names exactly as they appear in the source resume
+- Every metric and number must come directly from the source resume — do not invent or inflate
+- The resume must read as written by the candidate, not a robot — vary sentence structure, avoid buzzwords
+- Never use em dashes
+- Never use the word "leverage" or "leveraging"
+- Never use "utilize" — use "use"
+- Never use "passionate" or "passionate about"
+- Never use "results-driven" or "dynamic" or "seasoned"
+- Bullet points should start with strong action verbs
+- Each bullet should lead with the outcome or achievement, not the activity
+- Maximum 5 bullets per role — quality over quantity
+- Total resume length should not exceed 1 page if possible, 2 pages maximum`;
+
+  const userPrompt = `Tailor this resume for the specific role and company below. Make it pass ATS screening and impress a human recruiter at this company.
+
+TARGET ROLE: ${jobTitle} at ${companyName}
+
+JOB DESCRIPTION:
+${jobDescription.slice(0, 1500)}
+
+SOURCE RESUME:
+${resumeText}
+
+ATS KEYWORDS TO INCORPORATE (weave these in naturally — do not keyword stuff):
+Must-have: ${atsResearch.mustHaveKeywords.join(', ')}
+Company-specific: ${atsResearch.companySpecificTerms.join(', ')}
+
+GAPS TO CLOSE:
+${gapAnalysis.keywordsMissing.join(', ')}
+
+EXPERIENCES TO HIGHLIGHT:
+${gapAnalysis.experienceToHighlight.join('\n')}
+
+EXPERIENCES TO DOWNPLAY:
+${gapAnalysis.experienceToDownplay.join('\n')}
+
+SUMMARY ANGLE:
+${gapAnalysis.summaryAngle}${companyMoment}
+
+BUYER PERSONA FOR THIS ROLE:
+${atsResearch.buyerPersona}
+
+INSTRUCTIONS:
+
+1. PROFESSIONAL SUMMARY (add at the top — 3 sentences max):
+Write a tight summary that speaks directly to this role. Reference the company's specific market position or what they are building right now. Connect the candidate's most relevant experience to what this company needs. Do not be generic. Do not open with "Results-driven" or any cliche.
+
+2. EXPERIENCE SECTION:
+Reorder and reframe bullets to lead with achievements most relevant to this role. Incorporate missing ATS keywords naturally where they accurately describe what the candidate did. Downplay irrelevant experience without removing it entirely. Keep all titles, companies, dates, and metrics exactly as in the source.
+
+3. SKILLS SECTION:
+Reorder skills to put the most relevant ones first. Add any missing must-have keywords as skills where they accurately represent the candidate's abilities.
+
+4. KEYWORD CHECK:
+After writing the resume, verify every keyword from the must-have list appears at least once. If any are missing, find a natural place to add them.
+
+Return the complete tailored resume as plain text, formatted cleanly with clear section headers. Return ONLY the resume text, nothing else.`;
+
+  const step3Msg = await anthropic.messages.create({
+    model: MODEL,
+    max_tokens: 3000,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: userPrompt }],
+  });
+
+  const resumeText2 = step3Msg.content
+    .filter(b => b.type === 'text')
+    .map(b => (b as any).text as string)
+    .join('\n')
+    .trim();
+
+  console.log(`[TailorV2] Step 3 complete — resume ${resumeText2.length} chars`);
+
+  return { resumeText: resumeText2, atsResearch, gapAnalysis, researchFailed };
+}

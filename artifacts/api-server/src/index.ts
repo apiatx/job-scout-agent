@@ -17,7 +17,7 @@ import {
   getOutputs, generateOutputs, getObjections, generateObjections,
   getNarrative, saveNarrative, draftNarrative
 } from './positioning.js';
-import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier, generateCoverLetterWithClaude } from './agent.js';
+import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier, generateCoverLetterWithClaude, tailorResumeV2WithClaude } from './agent.js';
 import type { SubScores, OpportunityTier, TierSettings, TailoringAnalysis } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
 // RepVue: link-out only (no scraping — RepVue blocks automated requests)
@@ -293,6 +293,15 @@ async function initDb(): Promise<void> {
       job_id             INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
       cover_letter_text  TEXT NOT NULL,
       research_context   TEXT,
+      created_at         TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS tailored_resumes (
+      id                 SERIAL PRIMARY KEY,
+      job_id             INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+      resume_text        TEXT NOT NULL,
+      ats_keywords       TEXT[],
+      gap_analysis       TEXT,
+      ats_research       TEXT,
       created_at         TIMESTAMP DEFAULT NOW()
     );
   `);
@@ -1493,6 +1502,98 @@ app.post('/api/jobs/:id/cover-letter', async (req: Request, res: Response) => {
     });
   } catch (e) {
     console.error('[CoverLetter] Error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// ── Resume Tailoring V2 (job-specific, 3-step Claude) ─────────────────────
+// POST /api/jobs/:id/tailor-resume   (force=true to bypass cache)
+app.post('/api/jobs/:id/tailor-resume', async (req: Request, res: Response) => {
+  try {
+    const jobId = Number(req.params.id);
+    const force = req.query.force === 'true' || req.body?.force === true;
+
+    // 1. Load job
+    const { rows: jobRows } = await pool.query('SELECT * FROM jobs WHERE id=$1', [jobId]);
+    if (jobRows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const job = jobRows[0] as any;
+
+    // 2. Check cache
+    if (!force) {
+      const { rows: cached } = await pool.query(
+        'SELECT * FROM tailored_resumes WHERE job_id=$1 ORDER BY created_at DESC LIMIT 1', [jobId]
+      );
+      if (cached.length > 0) {
+        const c = cached[0] as any;
+        let atsResearch = null; let gapAnalysis = null;
+        try { if (c.ats_research) atsResearch = JSON.parse(c.ats_research); } catch { /* ignore */ }
+        try { if (c.gap_analysis) gapAnalysis = JSON.parse(c.gap_analysis); } catch { /* ignore */ }
+        res.json({ resume_text: c.resume_text, ats_research: atsResearch, gap_analysis: gapAnalysis, cached: true, created_at: c.created_at });
+        return;
+      }
+    }
+
+    // 3. Load resume
+    const { rows: resumeRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
+    const resumeText: string = resumeRows[0]?.value ?? '';
+    if (!resumeText.trim()) {
+      res.status(400).json({ error: 'NO_RESUME', message: 'Please add your resume on the Resume page before tailoring.' });
+      return;
+    }
+
+    // 4. Load company research brief (fresh < 48h)
+    const { rows: briefRows } = await pool.query(
+      `SELECT brief_json FROM research_briefs WHERE LOWER(company_name)=LOWER($1) AND status='ready' AND created_at > NOW() - INTERVAL '48 hours' ORDER BY created_at DESC LIMIT 1`,
+      [job.company]
+    );
+    let companyResearchContext: string | null = null;
+    if (briefRows.length > 0) {
+      try {
+        const brief = briefRows[0].brief_json as any;
+        const parts: string[] = [];
+        if (brief.companyMoment) parts.push(`Company moment: ${brief.companyMoment}`);
+        if (brief.productContext) parts.push(`Products: ${brief.productContext}`);
+        if (brief.marketPosition) parts.push(`Market position: ${brief.marketPosition}`);
+        companyResearchContext = parts.join('\n');
+      } catch { /* ignore */ }
+    }
+
+    // 5. Three-step tailoring
+    console.log(`[TailorV2] Endpoint: job #${jobId} (${job.title} @ ${job.company}), force=${force}`);
+    const result = await tailorResumeV2WithClaude({
+      jobTitle: job.title,
+      companyName: job.company,
+      jobDescription: job.description ?? '',
+      resumeText,
+      companyResearchContext,
+    });
+
+    // 6. Cache (keep 3 most recent per job)
+    await pool.query(
+      `INSERT INTO tailored_resumes (job_id, resume_text, ats_keywords, gap_analysis, ats_research) VALUES ($1,$2,$3,$4,$5)`,
+      [
+        jobId,
+        result.resumeText,
+        result.atsResearch.mustHaveKeywords,
+        JSON.stringify(result.gapAnalysis),
+        JSON.stringify(result.atsResearch),
+      ]
+    );
+    await pool.query(
+      `DELETE FROM tailored_resumes WHERE job_id=$1 AND id NOT IN (SELECT id FROM tailored_resumes WHERE job_id=$1 ORDER BY created_at DESC LIMIT 3)`,
+      [jobId]
+    );
+
+    res.json({
+      resume_text: result.resumeText,
+      ats_research: result.atsResearch,
+      gap_analysis: result.gapAnalysis,
+      research_failed: result.researchFailed,
+      cached: false,
+      created_at: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error('[TailorV2] Error:', e);
     res.status(500).json({ error: String(e) });
   }
 });
@@ -3257,6 +3358,37 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .cl-research-list li:last-child{margin-bottom:0}
 .cl-modal-footer{padding:14px 24px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0;background:var(--surface)}
 
+/* tailor v2 modal */
+.tr-modal-box{background:var(--surface);border:1px solid var(--border);border-radius:14px;width:100%;max-width:760px;max-height:92vh;display:flex;flex-direction:column;position:relative;overflow:hidden}
+.tr-modal-header{padding:18px 24px 12px;border-bottom:1px solid var(--border);flex-shrink:0}
+.tr-modal-title{font-size:16px;font-weight:700;color:var(--text);margin-bottom:4px}
+.tr-ats-badge{display:inline-flex;align-items:center;gap:6px;background:rgba(212,175,55,.12);border:1px solid rgba(212,175,55,.3);border-radius:20px;padding:3px 12px;font-size:12px;color:var(--gold);font-weight:600}
+.tr-modal-sub{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:4px}
+.tr-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--bg)}
+.tr-tab{padding:10px 20px;font-size:13px;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;transition:color .12s,border-color .12s;user-select:none}
+.tr-tab:hover{color:var(--text)}
+.tr-tab.active{color:var(--gold);border-bottom-color:var(--gold);font-weight:600}
+.tr-modal-body{flex:1;overflow-y:auto;padding:0 24px}
+.tr-resume-wrap{background:#fafafa;border-radius:10px;padding:28px 32px;margin:20px 0;color:#1a1a1a;font-family:'Georgia',serif;font-size:14px;line-height:1.85;white-space:pre-wrap;word-break:break-word;box-shadow:0 1px 4px rgba(0,0,0,.12)}
+.tr-section{margin:20px 0}
+.tr-section-title{font-size:11px;font-weight:700;color:var(--gold);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px}
+.tr-keyword-grid{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.tr-kw{font-size:12px;padding:3px 10px;border-radius:20px;font-weight:500}
+.tr-kw.present{background:rgba(52,211,153,.15);color:#34d399;border:1px solid rgba(52,211,153,.3)}
+.tr-kw.missing{background:rgba(248,113,113,.12);color:#f87171;border:1px solid rgba(248,113,113,.25)}
+.tr-kw.company{background:rgba(212,175,55,.12);color:var(--gold);border:1px solid rgba(212,175,55,.25)}
+.tr-bullet-list{list-style:none;padding:0;margin:0}
+.tr-bullet-list li{font-size:13px;color:var(--muted);line-height:1.65;padding:4px 0 4px 18px;position:relative}
+.tr-bullet-list li::before{content:attr(data-icon);position:absolute;left:0;color:inherit}
+.tr-modal-footer{padding:14px 24px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0;background:var(--surface)}
+.tr-progress{text-align:center;padding:40px 24px}
+.tr-progress-steps{display:flex;flex-direction:column;gap:10px;margin-top:16px;max-width:320px;margin-left:auto;margin-right:auto}
+.tr-step{display:flex;align-items:center;gap:12px;font-size:13px;color:var(--muted);padding:8px 14px;border-radius:8px;border:1px solid var(--border);background:var(--bg)}
+.tr-step.active{color:var(--text);border-color:var(--gold);background:rgba(212,175,55,.06)}
+.tr-step.done{color:#34d399;border-color:rgba(52,211,153,.3);background:rgba(52,211,153,.05)}
+.tr-step-icon{width:20px;text-align:center;flex-shrink:0}
+.tr-step-spinner{width:14px;height:14px;border:2px solid rgba(212,175,55,.3);border-top-color:var(--gold);border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0}
+
 /* layout */
 .app-body{display:flex;flex:1;min-height:0}
 
@@ -4460,60 +4592,117 @@ textarea:focus,input:focus{border-color:var(--gold)}
 </div><!-- /main-content -->
 </div><!-- /app-body -->
 
-<!-- Tailor Resume Modal -->
-<div class="modal-overlay" id="tailor-modal">
-  <div class="modal" style="max-width:800px">
-    <div class="modal-header">
-      <div>
-        <div style="font-size:16px;font-weight:600" id="tailor-title"></div>
-        <div style="font-size:13px;color:var(--gold)" id="tailor-company"></div>
-      </div>
-      <div style="display:flex;align-items:center;gap:10px">
-        <span style="font-size:11px;color:var(--muted)">Target:</span>
-        <div class="page-toggle" id="modal-page-toggle">
-          <button class="page-toggle-btn active" data-pages="1" onclick="setModalPageTarget(1)">1 Page</button>
-          <button class="page-toggle-btn" data-pages="2" onclick="setModalPageTarget(2)">2 Pages</button>
-        </div>
-        <button class="btn btn-ghost btn-sm" id="retailor-btn" style="display:none" onclick="retailorResume()">↻ Re-tailor</button>
-        <button class="modal-close" onclick="closeTailorModal()">&times;</button>
-      </div>
-    </div>
-    <div id="tailor-loading" style="text-align:center;padding:32px;color:var(--muted)">Analyzing job description and tailoring resume with Claude Sonnet...</div>
-    <div id="tailor-content" style="display:none">
-      <div class="modal-section">
-        <div id="tailor-analysis-modal" style="display:none" class="tailor-analysis"></div>
-        <div style="display:flex;gap:16px">
-          <div style="flex:1;min-width:0">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-              <h3 style="margin:0">Tailored Resume</h3>
-              <div style="display:flex;gap:6px">
-                <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-resume')">Copy</button>
-                <button class="btn btn-ghost btn-sm" onclick="downloadDocxFromModal('tailor-resume','Tailored_Resume')">⬇ Word</button>
-                <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-resume')">⬇ PDF</button>
-              </div>
+<!-- Tailor Resume V2 Modal -->
+<div class="modal-overlay" id="tailor-modal" style="display:none" onclick="if(event.target===this)closeTailorModal()">
+  <div class="tr-modal-box">
+
+    <!-- Header -->
+    <div class="tr-modal-header">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+        <div style="flex:1;min-width:0">
+          <div class="tr-modal-title" id="tr-modal-title">Tailored Resume</div>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:6px;flex-wrap:wrap">
+            <span class="tr-ats-badge" id="tr-ats-badge" style="display:none">ATS Score: <span id="tr-score-before">–</span>% &rarr; <span id="tr-score-after">–</span>%</span>
+            <div class="tr-modal-sub">
+              <span id="tr-modal-ts"></span>
+              <span id="tr-cached-badge" style="display:none;color:var(--gold)">&#x2713; Cached</span>
+              <button class="btn btn-ghost btn-sm" id="tr-regen-btn" onclick="regenerateTailoredResume()" style="display:none;padding:2px 10px;font-size:11px">&#x21BA; Regenerate</button>
             </div>
-            <div class="resume-rendered" id="tailor-resume" style="max-height:380px"></div>
-          </div>
-          <div style="flex:1;min-width:0">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-              <h3 style="margin:0">Cover Letter</h3>
-              <div style="display:flex;gap:6px">
-                <button class="btn btn-ghost btn-sm" onclick="copyRendered('tailor-cover')">Copy</button>
-                <button class="btn btn-ghost btn-sm" onclick="downloadDocxFromModal('tailor-cover','Cover_Letter')">⬇ Word</button>
-                <button class="btn btn-ghost btn-sm" onclick="printResume('tailor-cover')">⬇ PDF</button>
-              </div>
-            </div>
-            <div class="resume-rendered" id="tailor-cover" style="max-height:380px"></div>
           </div>
         </div>
-        <details style="margin-top:16px;border:1px solid var(--border);border-radius:8px;padding:0 12px">
-          <summary style="cursor:pointer;font-size:13px;color:var(--gold);font-weight:600;padding:12px 0;user-select:none">▸ What Changed & Why</summary>
-          <div style="padding-bottom:14px">
-            <div class="resume-rendered" id="tailor-edits"></div>
-          </div>
-        </details>
+        <button class="modal-close" style="position:static;margin-top:-4px" onclick="closeTailorModal()">&times;</button>
       </div>
     </div>
+
+    <!-- Progress / Loading -->
+    <div id="tr-loading" class="tr-progress">
+      <div class="spinner" style="margin:0 auto 16px"></div>
+      <div class="tr-progress-steps" id="tr-progress-steps">
+        <div class="tr-step" id="tr-step-1">
+          <div class="tr-step-icon" id="tr-step-1-icon">&#x2022;</div>
+          <span>Step 1: Researching ATS requirements &amp; keywords</span>
+        </div>
+        <div class="tr-step" id="tr-step-2">
+          <div class="tr-step-icon" id="tr-step-2-icon">&#x2022;</div>
+          <span>Step 2: Analyzing your resume for gaps</span>
+        </div>
+        <div class="tr-step" id="tr-step-3">
+          <div class="tr-step-icon" id="tr-step-3-icon">&#x2022;</div>
+          <span>Step 3: Writing your tailored resume</span>
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:16px">This takes 30&ndash;60 seconds &mdash; three Claude calls for maximum accuracy</div>
+    </div>
+
+    <!-- Error -->
+    <div id="tr-error" style="display:none;padding:32px 24px;text-align:center">
+      <div style="color:#ff6b6b;font-size:13px;margin-bottom:12px" id="tr-error-msg"></div>
+      <button class="btn btn-gold btn-sm" onclick="regenerateTailoredResume()">Try Again</button>
+    </div>
+
+    <!-- Tabs (shown when content loaded) -->
+    <div class="tr-tabs" id="tr-tabs" style="display:none">
+      <div class="tr-tab active" id="tr-tab-resume" onclick="switchTrTab('resume')">Resume</div>
+      <div class="tr-tab" id="tr-tab-changed" onclick="switchTrTab('changed')">What Changed</div>
+      <div class="tr-tab" id="tr-tab-ats" onclick="switchTrTab('ats')">ATS Analysis</div>
+    </div>
+
+    <!-- Tab: Resume -->
+    <div class="tr-modal-body" id="tr-panel-resume" style="display:none">
+      <div class="tr-resume-wrap" id="tr-resume-text"></div>
+    </div>
+
+    <!-- Tab: What Changed -->
+    <div class="tr-modal-body" id="tr-panel-changed" style="display:none">
+      <div class="tr-section">
+        <div class="tr-section-title">Keywords Added</div>
+        <div class="tr-keyword-grid" id="tr-kw-added"></div>
+      </div>
+      <div class="tr-section">
+        <div class="tr-section-title">Keywords Already Present</div>
+        <div class="tr-keyword-grid" id="tr-kw-present"></div>
+      </div>
+      <div class="tr-section">
+        <div class="tr-section-title">Experiences Highlighted</div>
+        <ul class="tr-bullet-list" id="tr-exp-highlight"></ul>
+      </div>
+      <div class="tr-section" id="tr-downplay-section">
+        <div class="tr-section-title">Experiences De-emphasized</div>
+        <ul class="tr-bullet-list" id="tr-exp-downplay"></ul>
+      </div>
+      <div class="tr-section">
+        <div class="tr-section-title">Summary Angle</div>
+        <div style="font-size:13px;color:var(--text);line-height:1.7;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px 14px" id="tr-summary-angle"></div>
+      </div>
+    </div>
+
+    <!-- Tab: ATS Analysis -->
+    <div class="tr-modal-body" id="tr-panel-ats" style="display:none">
+      <div class="tr-section">
+        <div class="tr-section-title">Must-Have Keywords</div>
+        <div class="tr-keyword-grid" id="tr-ats-must"></div>
+      </div>
+      <div class="tr-section">
+        <div class="tr-section-title">Company-Specific Terms</div>
+        <div class="tr-keyword-grid" id="tr-ats-company"></div>
+      </div>
+      <div class="tr-section" id="tr-ats-requirements-section">
+        <div class="tr-section-title">Top Requirements</div>
+        <ul class="tr-bullet-list" id="tr-ats-requirements"></ul>
+      </div>
+      <div class="tr-section" id="tr-buyer-section">
+        <div class="tr-section-title">Buyer Persona</div>
+        <div style="font-size:13px;color:var(--text);line-height:1.7;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px 14px" id="tr-buyer-persona"></div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="tr-modal-footer" id="tr-footer" style="display:none">
+      <button class="btn btn-gold btn-sm" onclick="copyTailoredResume()">&#x1F4CB; Copy Resume</button>
+      <button class="btn btn-ghost btn-sm" onclick="downloadTailoredResume()">&#x2B07; Download .txt</button>
+      <button class="btn btn-ghost btn-sm" onclick="openCoverLetterForCurrentJob()" style="margin-left:auto">&#x270D; Write Cover Letter</button>
+    </div>
+
   </div>
 </div>
 
@@ -5249,18 +5438,10 @@ async function uploadResumeFile(input) {
 
 // ── page target state ──────────────────────────────────────────────────────
 var _inlinePageTarget = 1;
-var _modalPageTarget = 1;
-var _currentTailorJobId = null;
 
 function setPageTarget(n) {
   _inlinePageTarget = n;
   document.querySelectorAll('#page-toggle .page-toggle-btn').forEach(function(b) {
-    b.classList.toggle('active', Number(b.dataset.pages) === n);
-  });
-}
-function setModalPageTarget(n) {
-  _modalPageTarget = n;
-  document.querySelectorAll('#modal-page-toggle .page-toggle-btn').forEach(function(b) {
     b.classList.toggle('active', Number(b.dataset.pages) === n);
   });
 }
@@ -5319,54 +5500,206 @@ async function tailorFromDesc() {
   } catch(e) { msg.textContent = 'Error: ' + e.message; msg.style.color = 'var(--red)'; }
 }
 
-// ── tailor resume modal ───────────────────────────────────────────────────
+// ── Tailor Resume V2 Modal ────────────────────────────────────────────────
+var _trJobId = null;
+var _trJobTitle = '';
+var _trCompany = '';
+var _trActiveTab = 'resume';
+
+function trEl(id) { return document.getElementById(id); }
+
 function closeTailorModal() {
-  document.getElementById('tailor-modal').classList.remove('show');
-  _currentTailorJobId = null;
-}
-function copyText(id) {
-  var text = document.getElementById(id).innerText;
-  navigator.clipboard.writeText(text);
+  trEl('tailor-modal').style.display = 'none';
+  _trJobId = null;
 }
 
-async function doTailorJob(jobId, force) {
-  document.getElementById('tailor-loading').style.display = '';
-  document.getElementById('tailor-loading').textContent = 'Analyzing job description and tailoring resume with Claude Sonnet (' + _modalPageTarget + '-page target)...';
-  document.getElementById('tailor-content').style.display = 'none';
-  document.getElementById('tailor-analysis-modal').style.display = 'none';
-  document.getElementById('retailor-btn').style.display = 'none';
-  try {
-    var payload = { targetPages: _modalPageTarget, force: !!force };
-    var res = await fetch('/api/tailor/' + jobId, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-    var data = await res.json();
-    if (data.error) {
-      document.getElementById('tailor-loading').textContent = 'Error: ' + data.error;
-      return;
-    }
-    setRendered('tailor-resume', data.resume_text || '');
-    setRendered('tailor-cover', data.cover_letter || '');
-    setRendered('tailor-edits', data.suggested_edits || '');
-    if (data.analysis) renderAnalysis('tailor-analysis-modal', data.analysis);
-    document.getElementById('tailor-loading').style.display = 'none';
-    document.getElementById('tailor-content').style.display = '';
-    document.getElementById('retailor-btn').style.display = '';
-  } catch(e) {
-    document.getElementById('tailor-loading').textContent = 'Error: ' + e.message;
+function switchTrTab(tab) {
+  _trActiveTab = tab;
+  ['resume', 'changed', 'ats'].forEach(function(t) {
+    trEl('tr-tab-' + t).classList.toggle('active', t === tab);
+    trEl('tr-panel-' + t).style.display = t === tab ? '' : 'none';
+  });
+}
+
+function trSetStep(step, state) {
+  var el = trEl('tr-step-' + step);
+  var icon = trEl('tr-step-' + step + '-icon');
+  if (!el) return;
+  el.className = 'tr-step ' + state;
+  if (state === 'active') {
+    icon.innerHTML = '<div class="tr-step-spinner"></div>';
+  } else if (state === 'done') {
+    icon.textContent = '\u2713';
+  } else {
+    icon.textContent = '\u2022';
   }
 }
 
 async function tailorResume(jobId) {
-  _currentTailorJobId = jobId;
   var j = _jobsById[jobId] || {};
-  document.getElementById('tailor-title').textContent = j.title || '';
-  document.getElementById('tailor-company').textContent = j.company || '';
-  document.getElementById('tailor-modal').classList.add('show');
-  await doTailorJob(jobId, false);
+  _trJobId = jobId;
+  _trJobTitle = j.title || '';
+  _trCompany = j.company || '';
+
+  trEl('tr-modal-title').textContent = 'Tailoring Resume \u2014 ' + _trJobTitle + ' at ' + _trCompany;
+  trEl('tr-ats-badge').style.display = 'none';
+  trEl('tr-cached-badge').style.display = 'none';
+  trEl('tr-regen-btn').style.display = 'none';
+  trEl('tr-modal-ts').textContent = '';
+  trEl('tr-loading').style.display = '';
+  trEl('tr-error').style.display = 'none';
+  trEl('tr-tabs').style.display = 'none';
+  trEl('tr-panel-resume').style.display = 'none';
+  trEl('tr-panel-changed').style.display = 'none';
+  trEl('tr-panel-ats').style.display = 'none';
+  trEl('tr-footer').style.display = 'none';
+  trSetStep(1, ''); trSetStep(2, ''); trSetStep(3, '');
+  trEl('tailor-modal').style.display = 'flex';
+
+  fetchTailoredResume(false);
 }
 
-async function retailorResume() {
-  if (!_currentTailorJobId) return;
-  await doTailorJob(_currentTailorJobId, true);
+async function regenerateTailoredResume() {
+  if (!_trJobId) return;
+  trEl('tr-loading').style.display = '';
+  trEl('tr-error').style.display = 'none';
+  trEl('tr-tabs').style.display = 'none';
+  trEl('tr-panel-resume').style.display = 'none';
+  trEl('tr-panel-changed').style.display = 'none';
+  trEl('tr-panel-ats').style.display = 'none';
+  trEl('tr-footer').style.display = 'none';
+  trEl('tr-cached-badge').style.display = 'none';
+  trEl('tr-regen-btn').style.display = 'none';
+  trEl('tr-ats-badge').style.display = 'none';
+  trSetStep(1, ''); trSetStep(2, ''); trSetStep(3, '');
+  fetchTailoredResume(true);
+}
+
+async function fetchTailoredResume(force) {
+  // Animate steps as the server runs (best-effort timing simulation)
+  trSetStep(1, 'active');
+  var step1Done = false, step2Done = false;
+  var stepTimer = setTimeout(function() {
+    if (!step1Done) { trSetStep(1, 'done'); step1Done = true; trSetStep(2, 'active'); }
+    setTimeout(function() {
+      if (!step2Done) { trSetStep(2, 'done'); step2Done = true; trSetStep(3, 'active'); }
+    }, 15000);
+  }, 12000);
+
+  try {
+    var url = '/api/jobs/' + _trJobId + '/tailor-resume' + (force ? '?force=true' : '');
+    var res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    clearTimeout(stepTimer);
+    var json = await res.json();
+
+    if (!res.ok) {
+      if (json.error === 'NO_RESUME') {
+        showTrError(json.message + ' <a href="#" onclick="showTab(\'resume\');closeTailorModal();return false" style="color:var(--gold)">Go to Resume page</a>');
+      } else {
+        showTrError(json.error || 'Failed to tailor resume');
+      }
+      return;
+    }
+
+    // Animate steps done
+    trSetStep(1, 'done'); trSetStep(2, 'done'); trSetStep(3, 'done');
+    setTimeout(function() { renderTailoredResume(json); }, 400);
+  } catch(e) {
+    clearTimeout(stepTimer);
+    showTrError('Network error: ' + e.message);
+  }
+}
+
+function renderTailoredResume(data) {
+  // Resume text
+  trEl('tr-resume-text').textContent = data.resume_text || '';
+
+  // ATS scores
+  var ga = data.gap_analysis || {};
+  if (ga.atsScore != null && ga.projectedScore != null) {
+    trEl('tr-score-before').textContent = ga.atsScore;
+    trEl('tr-score-after').textContent = ga.projectedScore;
+    trEl('tr-ats-badge').style.display = '';
+  }
+
+  // Metadata
+  var ts = data.created_at ? new Date(data.created_at).toLocaleString() : '';
+  trEl('tr-modal-ts').textContent = ts ? 'Generated ' + ts : '';
+  trEl('tr-cached-badge').style.display = data.cached ? '' : 'none';
+  trEl('tr-regen-btn').style.display = '';
+
+  // What Changed tab
+  var ar = data.ats_research || {};
+  var added = ga.keywordsMissing || [];
+  var present = ga.keywordsPresent || [];
+  trEl('tr-kw-added').innerHTML = added.map(function(k) { return '<span class="tr-kw missing">' + esc(k) + '</span>'; }).join('') || '<span style="font-size:12px;color:var(--muted)">None detected</span>';
+  trEl('tr-kw-present').innerHTML = present.map(function(k) { return '<span class="tr-kw present">' + esc(k) + '</span>'; }).join('') || '<span style="font-size:12px;color:var(--muted)">None detected</span>';
+  var highlights = ga.experienceToHighlight || [];
+  trEl('tr-exp-highlight').innerHTML = highlights.map(function(h) { return '<li data-icon="\u2191">' + esc(h) + '</li>'; }).join('') || '<li data-icon="\u2022" style="color:var(--muted)">None identified</li>';
+  var downplay = ga.experienceToDownplay || [];
+  trEl('tr-exp-downplay').innerHTML = downplay.map(function(h) { return '<li data-icon="\u2193">' + esc(h) + '</li>'; }).join('') || '<li data-icon="\u2022" style="color:var(--muted)">None identified</li>';
+  trEl('tr-downplay-section').style.display = downplay.length ? '' : 'none';
+  trEl('tr-summary-angle').textContent = ga.summaryAngle || '';
+
+  // ATS Analysis tab
+  var mustHave = ar.mustHaveKeywords || [];
+  var gaPresentSet = new Set((ga.keywordsPresent || []).map(function(k) { return k.toLowerCase(); }));
+  trEl('tr-ats-must').innerHTML = mustHave.map(function(k) {
+    var cls = gaPresentSet.has(k.toLowerCase()) ? 'present' : 'missing';
+    return '<span class="tr-kw ' + cls + '">' + esc(k) + '</span>';
+  }).join('') || '<span style="font-size:12px;color:var(--muted)">N/A</span>';
+  var compTerms = ar.companySpecificTerms || [];
+  trEl('tr-ats-company').innerHTML = compTerms.map(function(k) { return '<span class="tr-kw company">' + esc(k) + '</span>'; }).join('') || '<span style="font-size:12px;color:var(--muted)">N/A</span>';
+  var topReqs = ar.topRequirements || [];
+  trEl('tr-ats-requirements').innerHTML = topReqs.map(function(r) { return '<li data-icon="\u2022">' + esc(r) + '</li>'; }).join('');
+  trEl('tr-ats-requirements-section').style.display = topReqs.length ? '' : 'none';
+  trEl('tr-buyer-persona').textContent = ar.buyerPersona || '';
+  trEl('tr-buyer-section').style.display = ar.buyerPersona ? '' : 'none';
+
+  // Show content
+  trEl('tr-loading').style.display = 'none';
+  trEl('tr-error').style.display = 'none';
+  trEl('tr-tabs').style.display = '';
+  switchTrTab('resume');
+  trEl('tr-footer').style.display = '';
+}
+
+function showTrError(msg) {
+  trEl('tr-loading').style.display = 'none';
+  trEl('tr-error-msg').innerHTML = msg;
+  trEl('tr-error').style.display = '';
+  trEl('tr-regen-btn').style.display = '';
+}
+
+function copyTailoredResume() {
+  var txt = trEl('tr-resume-text').textContent || '';
+  if (!txt.trim()) return;
+  navigator.clipboard.writeText(txt).then(function() {
+    var btn = trEl('tailor-modal').querySelector('button[onclick="copyTailoredResume()"]');
+    if (btn) { var orig = btn.textContent; btn.textContent = '\u2713 Copied!'; setTimeout(function() { btn.textContent = orig; }, 1800); }
+  }).catch(function() {
+    var ta = document.createElement('textarea');
+    ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+  });
+}
+
+function downloadTailoredResume() {
+  var txt = trEl('tr-resume-text').textContent || '';
+  if (!txt.trim()) return;
+  var date = new Date().toISOString().slice(0, 10);
+  var safeCo = (_trCompany || 'Company').replace(/[^a-zA-Z0-9]/g, '_');
+  var filename = 'Resume_Tailored_' + safeCo + '_' + date + '.txt';
+  var blob = new Blob([txt], { type: 'text/plain' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function openCoverLetterForCurrentJob() {
+  if (!_trJobId) return;
+  closeTailorModal();
+  openCoverLetter(_trJobId, _trJobTitle, _trCompany);
 }
 
 // ── gmail ──────────────────────────────────────────────────────────────────
