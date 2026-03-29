@@ -1,0 +1,83 @@
+ADDITIONAL RESEARCH STEP — Territory and Regional Intelligence
+
+Before generating the cover letter or resume, check if the job title or description contains any geographic territory indicator such as:
+- Named regions: Southeast, Northeast, Mid-Atlantic, Pacific Northwest, Central, Mountain West, SLED, Federal, etc.
+- Named states or cities
+- Named vertical territories: Healthcare Southeast, Financial Services NY, Public Sector DC
+
+If a territory IS detected, add an additional Claude web search call specifically for territory intelligence.
+
+Create function analyzeTerritoryContext(jobTitle: string, companyName: string, territory: string): Promise<TerritoryContext | null>
+
+TerritoryContext interface:
+{
+  territoryDetected: string,
+  whyThisTerritory: string,
+  keyIndustries: string[],
+  majorProspects: string[],
+  recentWins: string[],
+  competitiveLandscape: string,
+  marketMoment: string,
+  candidateAdvantage: string
+}
+
+Claude prompt for this call (web search enabled):
+"A company called [COMPANY NAME] is hiring a [JOB TITLE] specifically for the [TERRITORY] territory. I need to understand why they are investing in this territory right now and what opportunity they are chasing.
+
+Search for:
+- '[COMPANY NAME] [TERRITORY] expansion customers'
+- '[COMPANY NAME] [TERRITORY] office hiring growth'
+- '[COMPANY NAME] [TERRITORY] major wins deals customers 2025 2026'
+- '[INDUSTRY] growth [TERRITORY] 2025 2026' — use the industry relevant to [COMPANY NAME]
+- Major enterprises headquartered in [TERRITORY] that would be ideal prospects for [COMPANY NAME]'s products
+
+Return ONLY a JSON object:
+{
+  'territoryDetected': '[TERRITORY]',
+  'whyThisTerritory': 'why is this company investing in this specific territory right now — market conditions, customer concentration, competitive dynamics, or growth signals',
+  'keyIndustries': ['top 3-4 industries concentrated in this territory that are ideal buyers for this company'],
+  'majorProspects': ['5-8 specific well-known companies headquartered or with major operations in this territory that would be ideal customers — be specific with real company names'],
+  'recentWins': ['any publicly known customer wins this company has had in this territory or with companies based there'],
+  'competitiveLandscape': 'who are the main competitors active in this territory and what is the dynamic',
+  'marketMoment': 'one sentence on the single biggest opportunity in this territory for this company right now',
+  'candidateAdvantage': 'based on the candidate resume provided below, what specific experience makes them uniquely suited for THIS territory — look for: companies they sold to in the region, industries they know that are concentrated here, geographic familiarity, relevant logos'
+}"
+
+HOW TO USE TERRITORY CONTEXT IN COVER LETTER:
+
+If territory context exists, inject it into the cover letter generation prompt with these additional instructions:
+
+"TERRITORY INTELLIGENCE:
+This role is specifically for the [TERRITORY] territory.
+Why this territory matters: [whyThisTerritory]
+Key industries to reference: [keyIndustries]
+Likely target accounts in territory: [majorProspects]
+Market moment: [marketMoment]
+Why the candidate fits this territory specifically: [candidateAdvantage]
+
+ADDITIONAL COVER LETTER INSTRUCTIONS FOR TERRITORY ROLES:
+- The opening paragraph should reference something specific about why this territory is strategically important for this company right now
+- If the candidate has sold to, worked with, or has relationships in this territory based on their resume, call it out explicitly — 'Having spent my career closing enterprise deals across the Southeast including accounts like X and Y...'
+- Reference 1-2 specific prospect types or industries concentrated in this territory to show you understand the opportunity
+- Do NOT just say 'I am based in the Southeast' — show you understand the business opportunity in that geography"
+
+HOW TO USE TERRITORY CONTEXT IN RESUME TAILORING:
+
+If territory context exists, inject into the resume generation prompt with these additional instructions:
+
+"TERRITORY CONTEXT FOR THIS ROLE:
+Territory: [TERRITORY]
+Key industries in territory: [keyIndustries]
+Likely target accounts: [majorProspects]
+Why candidate fits this territory: [candidateAdvantage]
+
+ADDITIONAL RESUME TAILORING INSTRUCTIONS FOR TERRITORY ROLES:
+- In the professional summary, if the candidate has relevant geographic or industry experience for this territory, surface it explicitly
+- If the candidate has sold to companies headquartered or operating heavily in this territory, reframe those bullets to make the geographic relevance clear
+- If the candidate's past accounts include companies that are in the same industry as the major prospects in this territory, highlight that industry expertise
+- Add the territory name naturally in the summary if the candidate has genuine relevant experience there — do not fabricate geographic experience"
+
+IF NO TERRITORY IS DETECTED:
+Skip this step entirely and proceed normally. Return null for territoryContext.
+
+Push to main when complete. This is an addition to the existing cover letter and resume tailoring logic — do not replace or modify anything already built, only add this territory intelligence layer on top.

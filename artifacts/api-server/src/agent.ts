@@ -818,9 +818,11 @@ export async function generateCoverLetterWithClaude(params: {
   userName: string;
   existingResearch?: string | null;
   temperature?: number;
+  model?: string;
 }): Promise<CoverLetterResult> {
   const { jobTitle, companyName, jobDescription, resumeText, userName, existingResearch } = params;
   const temperature = params.temperature ?? 1;
+  const MODEL_CL = params.model || 'claude-opus-4-6';
 
   // ── STEP 1: Web-search research for specific, impressive company facts ──────
   let research: CoverLetterResearch | null = null;
@@ -842,7 +844,7 @@ Respond with ONLY this JSON structure — no other text:
 }`;
 
     const researchMsg = await anthropic.messages.create({
-      model: 'claude-sonnet-4-5',
+      model: MODEL_CL,
       max_tokens: 1000,
       system: 'You are a research assistant. After using web search to gather information, respond with ONLY a valid JSON object. No conversational text, no markdown — just raw JSON starting with { and ending with }.',
       tools: [{ type: 'web_search_20250305', name: 'web_search' }] as unknown as Anthropic.Messages.Tool[],
@@ -922,7 +924,7 @@ Paragraph 4 — Close: Confident, direct, brief. Express genuine interest withou
 Write the full cover letter now. Return ONLY the cover letter text — no subject line, no preamble, no explanation. Start directly with the first paragraph.`;
 
   const genMsg = await anthropic.messages.create({
-    model: 'claude-sonnet-4-5',
+    model: MODEL_CL,
     max_tokens: 2000,
     temperature,
     system: systemPrompt,
@@ -973,9 +975,10 @@ export async function tailorResumeV2WithClaude(params: {
   jobDescription: string;
   resumeText: string;
   companyResearchContext?: string | null;
+  model?: string;
 }): Promise<TailoredResumeV2Result> {
   const { jobTitle, companyName, jobDescription, resumeText, companyResearchContext } = params;
-  const MODEL = 'claude-sonnet-4-5';
+  const MODEL = params.model || 'claude-opus-4-6';
 
   console.log(`[TailorV2] Starting 3-step tailoring for ${jobTitle} @ ${companyName}`);
 

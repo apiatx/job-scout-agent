@@ -1451,9 +1451,11 @@ app.post('/api/jobs/:id/cover-letter', async (req: Request, res: Response) => {
       return;
     }
 
-    // 4. Load user name from criteria
+    // 4. Load user name from criteria + document model preference
     const { rows: cRows } = await pool.query('SELECT your_name, your_email FROM criteria LIMIT 1');
     const userName: string = cRows[0]?.your_name ?? '';
+    const { rows: dmRows } = await pool.query("SELECT value FROM settings WHERE key='document_model'");
+    const documentModel: string = dmRows[0]?.value || 'claude-opus-4-6';
 
     // 5. Load existing research brief if fresh (< 24h)
     const { rows: briefRows } = await pool.query(
@@ -1467,7 +1469,7 @@ app.post('/api/jobs/:id/cover-letter', async (req: Request, res: Response) => {
     // 6. Generate cover letter (two-step: research + generation)
     // Use a slightly varied temperature on regenerate to get a different letter
     const temperature = force ? Math.min(1.9, 0.9 + Math.random() * 0.8) : 1.0;
-    console.log(`[CoverLetter] Generating for job #${jobId} (${job.title} @ ${job.company}), force=${force}, temperature=${temperature.toFixed(2)}`);
+    console.log(`[CoverLetter] Generating for job #${jobId} (${job.title} @ ${job.company}), force=${force}, model=${documentModel}, temperature=${temperature.toFixed(2)}`);
 
     const result = await generateCoverLetterWithClaude({
       jobTitle: job.title,
@@ -1477,6 +1479,7 @@ app.post('/api/jobs/:id/cover-letter', async (req: Request, res: Response) => {
       userName,
       existingResearch,
       temperature,
+      model: documentModel,
     });
 
     console.log(`[CoverLetter] Generated (${result.coverLetter.length} chars) | researchFailed=${result.researchFailed}`);
@@ -1497,6 +1500,7 @@ app.post('/api/jobs/:id/cover-letter', async (req: Request, res: Response) => {
       cover_letter: result.coverLetter,
       research: result.research,
       research_failed: result.researchFailed,
+      model: documentModel,
       cached: false,
       created_at: new Date().toISOString(),
     });
@@ -1558,17 +1562,22 @@ app.post('/api/jobs/:id/tailor-resume', async (req: Request, res: Response) => {
       } catch { /* ignore */ }
     }
 
-    // 5. Three-step tailoring
-    console.log(`[TailorV2] Endpoint: job #${jobId} (${job.title} @ ${job.company}), force=${force}`);
+    // 5. Load document model preference
+    const { rows: dmRows2 } = await pool.query("SELECT value FROM settings WHERE key='document_model'");
+    const documentModel2: string = dmRows2[0]?.value || 'claude-opus-4-6';
+
+    // 6. Three-step tailoring
+    console.log(`[TailorV2] Endpoint: job #${jobId} (${job.title} @ ${job.company}), force=${force}, model=${documentModel2}`);
     const result = await tailorResumeV2WithClaude({
       jobTitle: job.title,
       companyName: job.company,
       jobDescription: job.description ?? '',
       resumeText,
       companyResearchContext,
+      model: documentModel2,
     });
 
-    // 6. Cache (keep 3 most recent per job)
+    // 7. Cache (keep 3 most recent per job)
     await pool.query(
       `INSERT INTO tailored_resumes (job_id, resume_text, ats_keywords, gap_analysis, ats_research) VALUES ($1,$2,$3,$4,$5)`,
       [
@@ -1589,6 +1598,7 @@ app.post('/api/jobs/:id/tailor-resume', async (req: Request, res: Response) => {
       ats_research: result.atsResearch,
       gap_analysis: result.gapAnalysis,
       research_failed: result.researchFailed,
+      model: documentModel2,
       cached: false,
       created_at: new Date().toISOString(),
     });
@@ -3857,6 +3867,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
           <div class="cl-modal-title" id="cl-modal-title">Cover Letter</div>
           <div class="cl-modal-sub">
             <span id="cl-modal-ts"></span>
+            <span id="cl-model-badge" style="display:none;font-size:11px;color:var(--muted);background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:2px 9px"></span>
             <span id="cl-cached-badge" style="display:none;color:var(--gold)">&#x2713; Cached</span>
             <button class="btn btn-ghost btn-sm" id="cl-regen-btn" onclick="regenerateCoverLetter()" style="padding:2px 10px;font-size:11px">&#x21BA; Regenerate</button>
           </div>
@@ -3868,8 +3879,8 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <!-- Loading state -->
     <div id="cl-loading" style="padding:40px 24px;text-align:center">
       <div class="spinner" style="margin:0 auto 14px"></div>
-      <div style="font-size:13px;color:var(--muted)">Researching company with web search&hellip;</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:6px">Step 1: gathering specific facts &mdash; Step 2: writing your letter &mdash; takes 20-40 seconds</div>
+      <div style="font-size:13px;color:var(--muted)" id="cl-loading-msg">Researching company with web search&hellip;</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px" id="cl-loading-sub">Step 1: gathering specific facts &mdash; Step 2: writing your letter</div>
     </div>
 
     <!-- Error state -->
@@ -4359,19 +4370,13 @@ textarea:focus,input:focus{border-color:var(--gold)}
     </div>
   </div>
 
-  <div class="sec-title" style="margin:24px 0 12px">Resume AI Model</div>
-  <div style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.6">Choose which Claude model powers resume tailoring and cover letter writing. Opus produces higher-quality, more nuanced output — Sonnet is faster and still excellent.</div>
-  <div style="display:flex;gap:12px;flex-wrap:wrap" id="tailor-model-btns">
-    <button class="model-pick-btn" id="mpb-sonnet" onclick="setTailorModel('claude-sonnet-4-5')">
-      <div style="font-size:13px;font-weight:700">Claude Sonnet</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:3px">Fast · Great quality · Default</div>
-    </button>
-    <button class="model-pick-btn" id="mpb-opus" onclick="setTailorModel('claude-opus-4-5')">
-      <div style="font-size:13px;font-weight:700">Claude Opus</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:3px">Slower · Best quality · Recommended for final applications</div>
-    </button>
-  </div>
-  <div id="tailor-model-msg" style="font-size:11px;color:#4ade80;margin-top:8px;display:none">Model saved.</div>
+  <div class="sec-title" style="margin:24px 0 12px">AI Model for Documents</div>
+  <div style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.6">Choose which Claude model powers resume tailoring and cover letter generation. Opus produces the highest-quality, most nuanced output — recommended for roles that matter most.</div>
+  <select id="document-model-select" class="input" style="max-width:520px" onchange="setDocumentModel(this.value)">
+    <option value="claude-opus-4-6">Opus (Best Quality &mdash; recommended for dream jobs, slower &mdash; 45&ndash;90 sec)</option>
+    <option value="claude-sonnet-4-6">Sonnet (Balanced &mdash; fast and high quality, recommended for most applications &mdash; 20&ndash;40 sec)</option>
+  </select>
+  <div id="document-model-msg" style="font-size:11px;color:#4ade80;margin-top:8px;display:none">Model preference saved.</div>
 
   <div class="save-row" style="margin-top:24px">
     <button class="btn btn-gold" onclick="saveCriteria()">Save Settings</button>
@@ -4605,6 +4610,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
             <span class="tr-ats-badge" id="tr-ats-badge" style="display:none">ATS Score: <span id="tr-score-before">–</span>% &rarr; <span id="tr-score-after">–</span>%</span>
             <div class="tr-modal-sub">
               <span id="tr-modal-ts"></span>
+              <span id="tr-model-badge" style="display:none;font-size:11px;color:var(--muted);background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:2px 9px"></span>
               <span id="tr-cached-badge" style="display:none;color:var(--gold)">&#x2713; Cached</span>
               <button class="btn btn-ghost btn-sm" id="tr-regen-btn" onclick="regenerateTailoredResume()" style="display:none;padding:2px 10px;font-size:11px">&#x21BA; Regenerate</button>
             </div>
@@ -4631,7 +4637,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
           <span>Step 3: Writing your tailored resume</span>
         </div>
       </div>
-      <div style="font-size:11px;color:var(--muted);margin-top:16px">This takes 30&ndash;60 seconds &mdash; three Claude calls for maximum accuracy</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:16px" id="tr-loading-sub">This takes 30&ndash;60 seconds &mdash; three Claude calls for maximum accuracy</div>
     </div>
 
     <!-- Error -->
@@ -5543,6 +5549,7 @@ async function tailorResume(jobId) {
 
   trEl('tr-modal-title').textContent = 'Tailoring Resume \u2014 ' + _trJobTitle + ' at ' + _trCompany;
   trEl('tr-ats-badge').style.display = 'none';
+  trEl('tr-model-badge').style.display = 'none';
   trEl('tr-cached-badge').style.display = 'none';
   trEl('tr-regen-btn').style.display = 'none';
   trEl('tr-modal-ts').textContent = '';
@@ -5556,7 +5563,23 @@ async function tailorResume(jobId) {
   trSetStep(1, ''); trSetStep(2, ''); trSetStep(3, '');
   trEl('tailor-modal').style.display = 'flex';
 
+  // Set model-aware loading subtitle
+  try {
+    var mr2 = await fetch('/api/settings/document_model');
+    var md2 = await mr2.json();
+    setTrLoadingText(md2.value || 'claude-opus-4-6');
+  } catch(e2) { setTrLoadingText('claude-opus-4-6'); }
+
   fetchTailoredResume(false);
+}
+
+function setTrLoadingText(model) {
+  var subEl = trEl('tr-loading-sub');
+  if (!subEl) return;
+  var isOpus = model.includes('opus');
+  subEl.textContent = isOpus
+    ? 'Writing with Opus \u2014 three Claude calls for maximum accuracy \u2014 45\u201390 seconds'
+    : 'Writing with Sonnet \u2014 three Claude calls for speed and quality \u2014 20\u201340 seconds';
 }
 
 async function regenerateTailoredResume() {
@@ -5571,7 +5594,13 @@ async function regenerateTailoredResume() {
   trEl('tr-cached-badge').style.display = 'none';
   trEl('tr-regen-btn').style.display = 'none';
   trEl('tr-ats-badge').style.display = 'none';
+  trEl('tr-model-badge').style.display = 'none';
   trSetStep(1, ''); trSetStep(2, ''); trSetStep(3, '');
+  try {
+    var mr3 = await fetch('/api/settings/document_model');
+    var md3 = await mr3.json();
+    setTrLoadingText(md3.value || 'claude-opus-4-6');
+  } catch(e3) { setTrLoadingText('claude-opus-4-6'); }
   fetchTailoredResume(true);
 }
 
@@ -5624,7 +5653,10 @@ function renderTailoredResume(data) {
 
   // Metadata
   var ts = data.created_at ? new Date(data.created_at).toLocaleString() : '';
-  trEl('tr-modal-ts').textContent = ts ? 'Generated ' + ts : '';
+  trEl('tr-modal-ts').textContent = ts || '';
+  var trBadge = trEl('tr-model-badge');
+  if (trBadge && data.model) { trBadge.textContent = modelLabel(data.model); trBadge.style.display = ''; }
+  else if (trBadge) trBadge.style.display = 'none';
   trEl('tr-cached-badge').style.display = data.cached ? '' : 'none';
   trEl('tr-regen-btn').style.display = '';
 
@@ -6003,13 +6035,14 @@ var _clCompany = '';
 
 function clEl(id) { return document.getElementById(id); }
 
-function openCoverLetter(jobId, title, company) {
+async function openCoverLetter(jobId, title, company) {
   _clJobId = jobId;
   _clJobTitle = title;
   _clCompany = company;
 
-  clEl('cl-modal-title').textContent = 'Cover Letter — ' + title + ' at ' + company;
+  clEl('cl-modal-title').textContent = 'Cover Letter \u2014 ' + title + ' at ' + company;
   clEl('cl-modal-ts').textContent = '';
+  clEl('cl-model-badge').style.display = 'none';
   clEl('cl-cached-badge').style.display = 'none';
   clEl('cl-regen-btn').style.display = 'none';
   clEl('cl-loading').style.display = '';
@@ -6018,14 +6051,30 @@ function openCoverLetter(jobId, title, company) {
   clEl('cl-footer').style.display = 'none';
   clEl('cl-modal').style.display = 'flex';
 
+  // Set model-aware loading text
+  try {
+    var mr = await fetch('/api/settings/document_model');
+    var md = await mr.json();
+    var m = md.value || 'claude-opus-4-6';
+    setClLoadingText(m);
+  } catch(e) { setClLoadingText('claude-opus-4-6'); }
+
   fetchCoverLetter(false);
+}
+
+function setClLoadingText(model) {
+  var msgEl = clEl('cl-loading-msg');
+  var subEl = clEl('cl-loading-sub');
+  var isOpus = model.includes('opus');
+  if (msgEl) msgEl.textContent = isOpus ? 'Writing with Opus \u2014 this produces the best results\u2026' : 'Writing with Sonnet\u2026';
+  if (subEl) subEl.textContent = isOpus ? 'Step 1: researching company \u2014 Step 2: writing your letter \u2014 45\u201390 seconds' : 'Step 1: researching company \u2014 Step 2: writing your letter \u2014 20\u201340 seconds';
 }
 
 function closeCoverLetterModal() {
   clEl('cl-modal').style.display = 'none';
 }
 
-function regenerateCoverLetter() {
+async function regenerateCoverLetter() {
   if (!_clJobId) return;
   clEl('cl-loading').style.display = '';
   clEl('cl-error').style.display = 'none';
@@ -6033,8 +6082,12 @@ function regenerateCoverLetter() {
   clEl('cl-footer').style.display = 'none';
   clEl('cl-cached-badge').style.display = 'none';
   clEl('cl-regen-btn').style.display = 'none';
-  var loadTxt = clEl('cl-loading').querySelector('div:first-child + div');
-  if (loadTxt) loadTxt.textContent = 'Researching company with web search\u2026';
+  clEl('cl-model-badge').style.display = 'none';
+  try {
+    var mr = await fetch('/api/settings/document_model');
+    var md = await mr.json();
+    setClLoadingText(md.value || 'claude-opus-4-6');
+  } catch(e) { setClLoadingText('claude-opus-4-6'); }
   fetchCoverLetter(true);
 }
 
@@ -6059,12 +6112,22 @@ async function fetchCoverLetter(force) {
   }
 }
 
+function modelLabel(model) {
+  if (!model) return '';
+  if (model.includes('opus')) return 'Generated with Opus';
+  if (model.includes('sonnet')) return 'Generated with Sonnet';
+  return 'Generated with ' + model;
+}
+
 function renderCoverLetter(data) {
   var letter = data.cover_letter || '';
   clEl('cl-letter-text').textContent = letter;
 
   var ts = data.created_at ? new Date(data.created_at).toLocaleString() : '';
-  clEl('cl-modal-ts').textContent = ts ? 'Generated ' + ts : '';
+  clEl('cl-modal-ts').textContent = ts ? ts : '';
+  var badge = clEl('cl-model-badge');
+  if (badge && data.model) { badge.textContent = modelLabel(data.model); badge.style.display = ''; }
+  else if (badge) badge.style.display = 'none';
   clEl('cl-cached-badge').style.display = data.cached ? '' : 'none';
   clEl('cl-regen-btn').style.display = '';
 
@@ -6168,15 +6231,10 @@ function setTags(stateKey, tagsId, arr) {
 }
 
 var _criteriaInitialized = false;
-async function setTailorModel(model) {
-  await fetch('/api/settings/tailor_model', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:model}) });
-  document.querySelectorAll('.model-pick-btn').forEach(function(b){ b.classList.remove('active'); });
-  var id = model === 'claude-opus-4-5' ? 'mpb-opus' : 'mpb-sonnet';
-  var btn = document.getElementById(id);
-  if (btn) btn.classList.add('active');
-  var msg = document.getElementById('tailor-model-msg');
-  msg.style.display = '';
-  setTimeout(function(){ msg.style.display = 'none'; }, 2000);
+async function setDocumentModel(model) {
+  await fetch('/api/settings/document_model', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:model}) });
+  var msg = document.getElementById('document-model-msg');
+  if (msg) { msg.style.display = ''; setTimeout(function(){ msg.style.display = 'none'; }, 2000); }
 }
 
 async function loadCriteria() {
@@ -6236,18 +6294,16 @@ async function loadCriteria() {
       initTagInput('set-niches-input', 'set-niches-tags', 'vertical_niches');
       _criteriaInitialized = true;
     }
-    // Load saved tailor model and highlight the correct button
+    // Load saved document model and set the dropdown
     try {
-      var mr = await fetch('/api/settings/tailor_model');
-      var md = await mr.json();
-      var savedModel = md.value || 'claude-sonnet-4-5';
-      document.querySelectorAll('.model-pick-btn').forEach(function(b){ b.classList.remove('active'); });
-      var activeId = savedModel === 'claude-opus-4-5' ? 'mpb-opus' : 'mpb-sonnet';
-      var activeBtn = document.getElementById(activeId);
-      if (activeBtn) activeBtn.classList.add('active');
+      var dmr = await fetch('/api/settings/document_model');
+      var dmd = await dmr.json();
+      var savedDocModel = dmd.value || 'claude-opus-4-6';
+      var sel = document.getElementById('document-model-select');
+      if (sel) sel.value = savedDocModel;
     } catch(e2) {
-      var fb = document.getElementById('mpb-sonnet');
-      if (fb) fb.classList.add('active');
+      var sel2 = document.getElementById('document-model-select');
+      if (sel2) sel2.value = 'claude-opus-4-6';
     }
   } catch(e) {
     console.error('loadCriteria failed:', e);
