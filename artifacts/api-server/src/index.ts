@@ -3005,6 +3005,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
 #panel-clawd{padding:0!important}
 #panel-clawd.active{display:flex;flex-direction:column;flex:1;min-height:0}
 .clawd-frame{flex:1;min-height:0;width:100%;border:none;display:block}
+.main-content.clawd-open{overflow-y:hidden}
 /* email tab */
 .email-section{max-width:100%}
 .email-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;font-size:12px}
@@ -3582,6 +3583,7 @@ function showTab(name) {
     document.getElementById('tab-' + t).classList.toggle('active', t === name);
     document.getElementById('panel-' + t).classList.toggle('active', t === name);
   });
+  document.querySelector('.main-content').classList.toggle('clawd-open', name === 'clawd');
   if (name === 'jobs')      loadJobs();
   if (name === 'saved')     loadSavedJobs();
   if (name === 'research')  loadSavedResearch();
