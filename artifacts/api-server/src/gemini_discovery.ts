@@ -77,6 +77,8 @@ export interface GeminiDiscoveryCriteria {
   avoid: string[];
   industries: string[];
   min_salary?: number | null;
+  /** When set, discovery focuses exclusively on these named companies */
+  company_focus?: string[];
 }
 
 export interface GeminiDiscoveryResult {
@@ -300,6 +302,55 @@ function buildSearchPrompt(criteria: GeminiDiscoveryCriteria, maxResults: number
   const industries = criteria.industries.slice(0, 4).join(', ');
   const salaryNote = criteria.min_salary ? `Minimum salary: $${criteria.min_salary.toLocaleString()}` : '';
 
+  // ── Company-focused mode (Career Intel / Pre-IPO targeted scan) ───────────
+  if (criteria.company_focus && criteria.company_focus.length > 0) {
+    const companyList = criteria.company_focus.slice(0, 20).join(', ');
+    return `You are a job search assistant. Use Google Search to find currently open job listings at THESE SPECIFIC COMPANIES ONLY:
+
+COMPANIES TO SEARCH: ${companyList}
+
+TARGET ROLES (must match one of these): ${roles}
+WORK TYPE: ${workType} — preferred locations: ${locations}
+KEY SKILLS: ${mustHave || 'enterprise sales, SaaS, B2B'}
+${salaryNote}
+
+For EACH company in the list above, search its direct careers page, Greenhouse, Lever, Ashby, or Workday job board. Use queries like:
+- "[company name] site:greenhouse.io OR site:lever.co OR site:ashbyhq.com"
+- "[company name] careers ${roles.split(',')[0]?.trim() || 'sales'} open roles"
+
+For each job found, I need:
+- Exact job title
+- Company name (must be one of the companies listed above)
+- Location (write "Remote" if remote)
+- Direct application URL (the actual job posting page, not a search results page)
+- Brief description snippet (1–2 sentences from the posting)
+- Salary range (if visible in the posting)
+
+Output ONLY a JSON array between the markers JOBS_START and JOBS_END. No other text outside the markers:
+
+JOBS_START
+[
+  {
+    "title": "Enterprise Account Executive",
+    "company": "Acme Corp",
+    "location": "Remote",
+    "url": "https://boards.greenhouse.io/acmecorp/jobs/12345",
+    "description": "Lead enterprise sales cycles for Fortune 500 accounts...",
+    "salary": "$150,000 - $180,000 base"
+  }
+]
+JOBS_END
+
+Rules:
+- Find up to ${maxResults} unique, currently open positions across the listed companies
+- ONLY include jobs from companies explicitly listed above — do not add others
+- Only include roles that match the target roles list
+- Do NOT include expired, filled, or clearly irrelevant roles
+- Prefer direct ATS URLs (greenhouse/lever/ashby/workday) over LinkedIn/Indeed links
+- Do not fabricate jobs — only include roles you can verify exist via search`;
+  }
+
+  // ── Standard broad search mode ────────────────────────────────────────────
   return `You are a job search assistant. Use Google Search to find currently open job listings matching these criteria:
 
 TARGET ROLES: ${roles}

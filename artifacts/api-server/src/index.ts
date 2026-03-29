@@ -1396,6 +1396,144 @@ Do not use generic phrases like "I hope this message finds you well". Be specifi
   }
 });
 
+// ── Targeted company scan (Career Intel / Pre-IPO → open roles) ───────────
+// POST /api/jobs/targeted-scan
+// Body: { companies: string[], source: 'intel' | 'preipo' }
+// Runs Gemini discovery scoped to the listed companies, scores with Claude,
+// saves matches to DB, and returns the scored jobs for display.
+app.post('/api/jobs/targeted-scan', async (req: Request, res: Response) => {
+  try {
+    const { companies, source } = req.body as { companies?: string[]; source?: string };
+    if (!companies || !Array.isArray(companies) || companies.length === 0) {
+      res.status(400).json({ error: 'companies array is required' });
+      return;
+    }
+
+    const companyNames = companies.map((c: string) => c.trim()).filter(Boolean).slice(0, 20);
+    const scanSource = source === 'preipo' ? 'preipo-scan' : 'intel-scan';
+
+    console.log(`\n──── TARGETED SCAN (${scanSource}) ────────────────────────────────`);
+    console.log(`Companies (${companyNames.length}): ${companyNames.join(', ')}`);
+
+    // Load criteria
+    const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
+    const criteria = cRows[0] as any ?? {};
+    const { rows: resumeRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
+    const candidateResume: string = resumeRows[0]?.value ?? '';
+
+    const geminiCriteria = {
+      target_roles:  criteria.target_roles  ?? [],
+      locations:     criteria.locations     ?? ['Remote'],
+      work_type:     criteria.work_type     ?? 'any',
+      must_have:     criteria.must_have     ?? [],
+      nice_to_have:  criteria.nice_to_have  ?? [],
+      avoid:         criteria.avoid         ?? [],
+      industries:    criteria.industries    ?? [],
+      min_salary:    criteria.min_salary    ?? null,
+      company_focus: companyNames,
+    };
+
+    // Run Gemini with company-focused prompt
+    console.log('[TargetedScan] Calling Gemini discovery…');
+    const geminiResult = await runGeminiJobDiscovery(geminiCriteria);
+
+    if (geminiResult.skipped) {
+      console.log(`[TargetedScan] Gemini skipped: ${geminiResult.skipReason}`);
+      res.json({ jobs: [], skipped: true, skip_reason: geminiResult.skipReason });
+      return;
+    }
+
+    console.log(`[TargetedScan] Gemini returned ${geminiResult.jobs.length} raw jobs`);
+
+    // Deduplicate against existing jobs in DB
+    const { rows: existingRows } = await pool.query('SELECT apply_url FROM jobs');
+    const seenUrls = new Set(existingRows.map((r: any) => r.apply_url as string));
+    const newJobs = geminiResult.jobs.filter(j => !seenUrls.has(j.applyUrl));
+    console.log(`[TargetedScan] ${newJobs.length} new (${geminiResult.jobs.length - newJobs.length} already in DB)`);
+
+    if (newJobs.length === 0 && geminiResult.jobs.length === 0) {
+      res.json({ jobs: [], count: 0 });
+      return;
+    }
+
+    // Score with Claude (use all Gemini results, even if URL already in DB — we still return them)
+    const toScore = geminiResult.jobs.slice(0, 25);
+    const { rows: tierRows } = await pool.query("SELECT value FROM settings WHERE key='tier_settings'");
+    const tierSettings = tierRows[0]?.value ? JSON.parse(tierRows[0].value) : {};
+
+    console.log(`[TargetedScan] Scoring ${toScore.length} jobs with Claude…`);
+    const matches = await scoreJobsWithClaude(
+      toScore.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
+      {
+        targetRoles:        criteria.target_roles       ?? [],
+        industries:         criteria.industries         ?? [],
+        minSalary:          criteria.min_salary         ?? null,
+        minOte:             criteria.min_ote            ?? null,
+        locations:          criteria.locations          ?? ['Remote'],
+        allowedWorkModes:   criteria.allowed_work_modes ?? [],
+        mustHave:           criteria.must_have          ?? [],
+        niceToHave:         criteria.nice_to_have       ?? [],
+        avoid:              criteria.avoid              ?? [],
+        preApprovedCompanies: companyNames,
+        tierSettings,
+        candidateResume: candidateResume || undefined,
+      }
+    );
+
+    console.log(`[TargetedScan] Claude returned ${matches.length} scored matches`);
+
+    // Save new (not-yet-in-DB) matches to the jobs table
+    const allowedWorkModes: string[] = criteria.allowed_work_modes ?? [];
+    let saved = 0;
+    for (const m of matches) {
+      if (!seenUrls.has(m.applyUrl)) {
+        const loc = (m.location ?? '').trim();
+        const locationOk = checkJobLocation(loc, criteria.locations ?? [], false, allowedWorkModes);
+        const finalTier = !locationOk
+          ? 'Probably Skip'
+          : (m.subScores && m.matchScore)
+            ? computeTier(m.matchScore, m.aiRisk ?? 'unknown', m.subScores, m.title, m.company, loc, tierSettings)
+            : (m.opportunityTier ?? 'unscored');
+
+        try {
+          await pool.query(
+            `INSERT INTO jobs (title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+             ON CONFLICT (apply_url) DO NOTHING`,
+            [m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, scanSource, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null)]
+          );
+          saved++;
+        } catch (_e) { /* ignore individual insert errors */ }
+      }
+    }
+    console.log(`[TargetedScan] Saved ${saved} new jobs to DB`);
+    console.log(`───────────────────────────────────────────────────────────`);
+
+    // Return scored matches for immediate display
+    res.json({
+      jobs: matches.map(m => ({
+        id: null,
+        title: m.title,
+        company: m.company,
+        location: m.location,
+        salary: m.salary,
+        apply_url: m.applyUrl,
+        why_good_fit: m.whyGoodFit,
+        match_score: m.matchScore,
+        opportunity_tier: m.opportunityTier,
+        ai_risk: m.aiRisk,
+        source: scanSource,
+      })),
+      count: matches.length,
+      saved,
+      model_used: geminiResult.modelUsed,
+    });
+  } catch (e) {
+    console.error('[TargetedScan] Error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // ── Auto-run status endpoint ───────────────────────────────────────────────
 app.get('/api/scout/auto-status', async (_req, res: Response) => {
   try {
@@ -3656,6 +3794,28 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="intel-cards" id="intel-cards"></div>
 
     <div class="intel-footer" id="intel-footer"></div>
+
+    <div id="intel-scan-section" style="margin-top:24px;border-top:1px solid var(--border);padding-top:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:8px">
+        <div>
+          <div style="font-size:14px;font-weight:700;color:var(--text)">Open Roles at These Companies</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px">Search for matching jobs at every company in this radar</div>
+        </div>
+        <button class="btn btn-gold" id="intel-scan-btn" onclick="scanForRoles('intel')">&#x1F50D; Find Open Roles</button>
+      </div>
+      <div id="intel-scan-spinner" style="display:none;text-align:center;padding:20px 0">
+        <div class="intel-spinner" style="margin:0 auto 10px"></div>
+        <div style="font-size:12px;color:var(--muted)">Asking Gemini to search for open roles at each company&hellip; (30-90s)</div>
+      </div>
+      <div id="intel-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
+      <div id="intel-scan-results" style="display:none;margin-top:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none" onclick="toggleIntelScanResults()">
+          <div id="intel-scan-count" style="font-size:13px;font-weight:700;color:var(--gold)"></div>
+          <span id="intel-scan-toggle" style="font-size:12px;color:var(--muted)">&#x25B2; Collapse</span>
+        </div>
+        <div id="intel-scan-jobs" style="margin-top:12px"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -3703,6 +3863,28 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="preipo-grid" id="preipo-grid"></div>
 
     <div class="preipo-footer" id="preipo-footer"></div>
+
+    <div id="preipo-scan-section" style="margin-top:24px;border-top:1px solid var(--border);padding-top:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:8px">
+        <div>
+          <div style="font-size:14px;font-weight:700;color:var(--text)">Open Roles at These Companies</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px">Search for matching jobs at every company in this radar</div>
+        </div>
+        <button class="btn btn-gold" id="preipo-scan-btn" onclick="scanForRoles('preipo')">&#x1F50D; Find Open Roles</button>
+      </div>
+      <div id="preipo-scan-spinner" style="display:none;text-align:center;padding:20px 0">
+        <div class="intel-spinner" style="margin:0 auto 10px"></div>
+        <div style="font-size:12px;color:var(--muted)">Asking Gemini to search for open roles at each company&hellip; (30-90s)</div>
+      </div>
+      <div id="preipo-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
+      <div id="preipo-scan-results" style="display:none;margin-top:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none" onclick="togglePreIpoScanResults()">
+          <div id="preipo-scan-count" style="font-size:13px;font-weight:700;color:var(--gold)"></div>
+          <span id="preipo-scan-toggle" style="font-size:12px;color:var(--muted)">&#x25B2; Collapse</span>
+        </div>
+        <div id="preipo-scan-jobs" style="margin-top:12px"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -5840,6 +6022,7 @@ async function deleteSavedBrief(briefId) {
 
 // ── Career Intel ──────────────────────────────────────────────────────────
 var intelLoaded = false;
+var _intelCompanies = [];
 
 function intelEl(id) { return document.getElementById(id); }
 
@@ -5879,6 +6062,7 @@ function renderCareerIntel(data, generatedAt, stale) {
 
   // Company count label
   var companies = data.companies || [];
+  _intelCompanies = companies.map(function(c) { return c.company_name; }).filter(Boolean);
   intelEl('intel-companies-label').textContent = 'Company Opportunity Radar (' + companies.length + ' companies)';
 
   // Company cards
@@ -6193,6 +6377,112 @@ function buildPreIpoCard(c) {
     (cites ? '<div class="preipo-card-section"><div class="preipo-lbl">Sources</div><div class="preipo-cites">' + cites + '</div></div>' : '') +
 
   '</div>';
+}
+
+// ── Targeted Company Role Scan (Career Intel + Pre-IPO) ───────────────────
+
+function renderTargetedJobCard(j) {
+  var score = j.match_score || 0;
+  var scoreColor = score >= 85 ? '#00c86e' : score >= 70 ? '#f5c842' : score >= 55 ? '#7c8dff' : '#888';
+  var tier = j.opportunity_tier || '';
+  var tierColor = tier === 'Top Target' ? '#00c86e'
+    : tier === 'Fast Win' ? '#f5c842'
+    : tier === 'Long Shot' ? '#7c8dff'
+    : '#888';
+  var salaryHtml = j.salary && j.salary !== 'Unknown' && j.salary !== 'N/A' && j.salary.trim()
+    ? '<span style="font-size:11px;color:var(--muted)">' + esc(j.salary) + '</span>'
+    : '';
+  var applyUrl = j.apply_url || '#';
+  return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:10px">' +
+    '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="font-size:14px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(j.title) + '</div>' +
+        '<div style="font-size:12px;color:var(--muted);margin-top:2px">' +
+          esc(j.company) +
+          (j.location ? ' &bull; ' + esc(j.location) : '') +
+          (salaryHtml ? ' &bull; ' + salaryHtml : '') +
+        '</div>' +
+      '</div>' +
+      '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">' +
+        (score ? '<span style="font-size:13px;font-weight:800;color:' + scoreColor + '">' + score + '</span>' : '') +
+        (tier ? '<span style="font-size:10px;font-weight:700;background:' + tierColor + '22;color:' + tierColor + ';border:1px solid ' + tierColor + '55;border-radius:4px;padding:2px 7px">' + esc(tier) + '</span>' : '') +
+        '<a href="' + esc(applyUrl) + '" target="_blank" rel="noopener" style="font-size:12px;font-weight:700;background:var(--gold);color:#000;border-radius:6px;padding:5px 12px;text-decoration:none;white-space:nowrap">Apply \u2192</a>' +
+      '</div>' +
+    '</div>' +
+    (j.why_good_fit ? '<div style="font-size:12px;color:var(--muted);margin-top:10px;line-height:1.55;border-left:2px solid var(--gold);padding-left:10px">' + esc(j.why_good_fit) + '</div>' : '') +
+  '</div>';
+}
+
+async function scanForRoles(source) {
+  var isIntel = source === 'intel';
+  var prefix = isIntel ? 'intel' : 'preipo';
+  var companies = isIntel ? _intelCompanies : preIpoAllCompanies.map(function(c) { return c.company_name; }).filter(Boolean);
+
+  if (!companies || companies.length === 0) {
+    var errEl = document.getElementById(prefix + '-scan-error');
+    if (errEl) { errEl.textContent = 'No companies loaded yet \u2014 generate the radar first.'; errEl.style.display = ''; }
+    return;
+  }
+
+  var btn = document.getElementById(prefix + '-scan-btn');
+  var spinner = document.getElementById(prefix + '-scan-spinner');
+  var errBox = document.getElementById(prefix + '-scan-error');
+  var resultsBox = document.getElementById(prefix + '-scan-results');
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Scanning\u2026'; }
+  if (spinner) spinner.style.display = '';
+  if (errBox) { errBox.textContent = ''; errBox.style.display = 'none'; }
+  if (resultsBox) resultsBox.style.display = 'none';
+
+  try {
+    var res = await fetch('/api/jobs/targeted-scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ companies: companies, source: source })
+    });
+    var json = await res.json();
+    if (!res.ok) throw new Error(json.error || 'Scan failed');
+
+    if (json.skipped) {
+      throw new Error('Gemini search not available: ' + (json.skip_reason || 'check GEMINI_API_KEY in Settings'));
+    }
+
+    var jobs = json.jobs || [];
+    var countEl = document.getElementById(prefix + '-scan-count');
+    var jobsEl = document.getElementById(prefix + '-scan-jobs');
+    var toggleEl = document.getElementById(prefix + '-scan-toggle');
+
+    if (countEl) countEl.textContent = jobs.length > 0
+      ? '\u2705 Found ' + jobs.length + ' matching role' + (jobs.length === 1 ? '' : 's') + ' across ' + companies.length + ' companies'
+      : '\u26A0\uFE0F No matching roles found \u2014 try refreshing the radar or adjusting your target roles in Settings';
+    if (jobsEl) jobsEl.innerHTML = jobs.length > 0 ? jobs.map(renderTargetedJobCard).join('') : '';
+    if (toggleEl) toggleEl.textContent = '\u25B2 Collapse';
+    if (resultsBox) resultsBox.style.display = '';
+
+  } catch(e) {
+    if (errBox) { errBox.textContent = 'Scan error: ' + e.message; errBox.style.display = ''; }
+  } finally {
+    if (spinner) spinner.style.display = 'none';
+    if (btn) { btn.disabled = false; btn.textContent = '\uD83D\uDD0D Find Open Roles'; }
+  }
+}
+
+var _intelScanCollapsed = false;
+function toggleIntelScanResults() {
+  _intelScanCollapsed = !_intelScanCollapsed;
+  var jobsEl = document.getElementById('intel-scan-jobs');
+  var toggleEl = document.getElementById('intel-scan-toggle');
+  if (jobsEl) jobsEl.style.display = _intelScanCollapsed ? 'none' : '';
+  if (toggleEl) toggleEl.textContent = _intelScanCollapsed ? '\u25BC Expand' : '\u25B2 Collapse';
+}
+
+var _preipoScanCollapsed = false;
+function togglePreIpoScanResults() {
+  _preipoScanCollapsed = !_preipoScanCollapsed;
+  var jobsEl = document.getElementById('preipo-scan-jobs');
+  var toggleEl = document.getElementById('preipo-scan-toggle');
+  if (jobsEl) jobsEl.style.display = _preipoScanCollapsed ? 'none' : '';
+  if (toggleEl) toggleEl.textContent = _preipoScanCollapsed ? '\u25BC Expand' : '\u25B2 Collapse';
 }
 
 // ── Positioning Engine ────────────────────────────────────────────────────
