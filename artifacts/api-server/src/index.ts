@@ -3601,7 +3601,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="pos-section-header">
       <div>
         <h2 class="pos-title">Career Positioning Intake</h2>
-        <p class="pos-sub">Your answers become the single source of truth for every output Claude generates.</p>
+        <p class="pos-sub">This drives your 8 outbound assets (LinkedIn, pitches, bios, objection handling). It does <em>not</em> affect job search — that's governed by Settings + Resume + Companies.</p>
       </div>
       <button class="btn btn-gold" onclick="saveIntake()">Save Intake</button>
     </div>
@@ -3613,10 +3613,6 @@ textarea:focus,input:focus{border-color:var(--gold)}
       <div class="pos-field">
         <label class="pos-label">Target Industry <span class="pos-req">*</span></label>
         <input class="pos-input" id="pi-target-industry" placeholder="e.g. SaaS, Cybersecurity, Data Infrastructure">
-      </div>
-      <div class="pos-field pos-full">
-        <label class="pos-label">Past Roles <span class="pos-req">*</span></label>
-        <textarea class="pos-textarea" id="pi-past-roles" rows="3" placeholder="List your last 3-5 roles with company and tenure. e.g. Sr. AE @ Salesforce (2019-2022), AE @ HubSpot (2016-2019)..."></textarea>
       </div>
       <div class="pos-field pos-full">
         <label class="pos-label">Top 5 Measurable Wins <span class="pos-req">*</span></label>
@@ -5590,7 +5586,6 @@ async function loadPositioning() {
     if (p && p.target_role) {
       document.getElementById('pi-target-role').value = p.target_role || '';
       document.getElementById('pi-target-industry').value = p.target_industry || '';
-      document.getElementById('pi-past-roles').value = p.past_roles || '';
       document.getElementById('pi-top-wins').value = p.top_wins || '';
       document.getElementById('pi-strengths').value = p.strengths || '';
       document.getElementById('pi-want-next').value = p.want_next || '';
@@ -5610,7 +5605,7 @@ async function saveIntake() {
   var body = {
     target_role: document.getElementById('pi-target-role').value,
     target_industry: document.getElementById('pi-target-industry').value,
-    past_roles: document.getElementById('pi-past-roles').value,
+    past_roles: '',
     top_wins: document.getElementById('pi-top-wins').value,
     strengths: document.getElementById('pi-strengths').value,
     want_next: document.getElementById('pi-want-next').value,
