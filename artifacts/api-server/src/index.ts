@@ -3458,6 +3458,10 @@ textarea:focus,input:focus{border-color:var(--gold)}
   </div>
 </div>
 
+<div class="panel" id="panel-clawd">
+  <iframe class="clawd-frame" src="https://deathbyclawd.com/" allow="fullscreen" loading="lazy"></iframe>
+</div>
+
 </div><!-- /main-content -->
 </div><!-- /app-body -->
 
@@ -3560,10 +3564,6 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </div>
     </div>
   </div>
-</div>
-
-<div class="panel" id="panel-clawd">
-  <iframe class="clawd-frame" src="https://deathbyclawd.com/" allow="fullscreen" loading="lazy"></iframe>
 </div>
 
 <script>
