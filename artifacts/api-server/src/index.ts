@@ -3001,6 +3001,9 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .intel-footer{font-size:11px;color:var(--muted);margin-top:20px;padding-top:14px;border-top:1px solid var(--border)}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media(max-width:700px){.intel-cards{grid-template-columns:1fr}.intel-themes-grid{grid-template-columns:1fr}}
+/* clawd iframe panel */
+#panel-clawd{padding:0!important}
+.clawd-frame{width:100%;height:100%;border:none;display:block}
 /* email tab */
 .email-section{max-width:100%}
 .email-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;font-size:12px}
@@ -3077,6 +3080,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="tab" id="tab-email" onclick="showTab('email')">Daily Jobs Report</div>
   <div class="tab" id="tab-runs" onclick="showTab('runs')">Run History</div>
   <div class="tab" id="tab-settings" onclick="showTab('settings')">Settings</div>
+  <div class="tab" id="tab-clawd" onclick="showTab('clawd')">DeathByClawd</div>
 </nav>
 <div class="main-content">
 <div class="panel active" id="panel-jobs">
@@ -3557,6 +3561,10 @@ textarea:focus,input:focus{border-color:var(--gold)}
   </div>
 </div>
 
+<div class="panel" id="panel-clawd">
+  <iframe class="clawd-frame" src="https://deathbyclawd.com/" allow="fullscreen" loading="lazy"></iframe>
+</div>
+
 <script>
 // ── helpers ──────────────────────────────────────────────────────────────
 function esc(s) {
@@ -3567,7 +3575,7 @@ function lines(id) {
 }
 
 // ── tabs ─────────────────────────────────────────────────────────────────
-var TABS = ['jobs','saved','research','intel','companies','resume','email','runs','settings'];
+var TABS = ['jobs','saved','research','intel','companies','resume','email','runs','settings','clawd'];
 function showTab(name) {
   TABS.forEach(function(t) {
     document.getElementById('tab-' + t).classList.toggle('active', t === name);
