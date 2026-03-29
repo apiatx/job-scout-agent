@@ -389,6 +389,8 @@ async function initDb(): Promise<void> {
   await safeAddColumn('jobs', 'gemini_grounding_metadata', 'JSONB');
   await safeAddColumn('jobs', 'ingestion_confidence', 'FLOAT');
   await safeAddColumn('jobs', 'momentum_warning', 'TEXT');
+  await safeAddColumn('jobs', 'user_action', 'TEXT');
+  await safeAddColumn('jobs', 'user_action_at', 'TIMESTAMPTZ');
 
   // Index for fast momentum lookups by company name
   try {
@@ -1388,6 +1390,79 @@ app.delete('/api/jobs/:id/save', async (req: Request, res: Response) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+// ── User action tracking (applied, interested, skipped, etc.) ─────────────
+app.put('/api/jobs/:id/action', async (req: Request, res: Response) => {
+  try {
+    const valid = ['applied', 'interested', 'interviewing', 'rejected', 'skipped', 'none'];
+    const action: string = req.body?.action;
+    if (!action || !valid.includes(action)) {
+      res.status(400).json({ error: 'Invalid action. Must be: ' + valid.join(', ') }); return;
+    }
+    const { rows } = await pool.query(
+      action === 'none'
+        ? 'UPDATE jobs SET user_action=NULL, user_action_at=NULL WHERE id=$1 RETURNING *'
+        : 'UPDATE jobs SET user_action=$1, user_action_at=NOW() WHERE id=$2 RETURNING *',
+      action === 'none' ? [req.params.id] : [action, req.params.id]
+    );
+    if (!rows.length) { res.status(404).json({ error: 'Job not found' }); return; }
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Preference profile — Claude analysis of behavioral patterns ─────────────
+app.get('/api/jobs/preference-profile', async (_req, res: Response) => {
+  try {
+    const { rows: actions } = await pool.query(
+      `SELECT j.title, j.company, j.location, j.salary, j.match_score,
+              j.opportunity_tier, j.sub_scores, j.source, j.user_action, j.user_action_at
+       FROM jobs j WHERE j.user_action IS NOT NULL AND j.user_action != 'none'
+       ORDER BY j.user_action_at DESC LIMIT 60`
+    );
+    if (actions.length < 3) {
+      res.json({ profile: null, action_count: actions.length, message: 'Mark at least 3 jobs (applied, interested, or skipped) to generate your preference profile.' });
+      return;
+    }
+
+    const actionSummary = actions.map(j =>
+      `${(j.user_action as string).toUpperCase()}: ${j.title} @ ${j.company} | Score: ${j.match_score} | Tier: ${j.opportunity_tier} | Salary: ${j.salary || 'not listed'} | Location: ${j.location}`
+    ).join('\n');
+
+    const prompt = `You are analyzing a sales professional's behavioral patterns to reveal their revealed job preferences — not what they claim to want, but what their actual actions show.
+
+Their recent job actions:
+${actionSummary}
+
+Write a preference profile with these 5 parts:
+1. **Role Fit**: What role types and seniority levels do they actually engage with?
+2. **Company Signal**: What company characteristics attract them (stage, industry, size)?
+3. **Compensation Pattern**: What does their behavior reveal about salary tolerance?
+4. **Hidden Insight**: One surprising or counterintuitive finding from their actual choices.
+5. **Action**: One concrete thing to adjust in their search criteria based on this data.
+
+Be direct and specific. Use the actual data points. 1-2 sentences per section. Under 280 words total.`;
+
+    const AnthropicSdk2 = (await import('@anthropic-ai/sdk')).default;
+    const ac2 = new AnthropicSdk2({
+      apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '',
+      ...(process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL ? { baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL } : {}),
+    });
+    const response = await ac2.messages.create({
+      model: 'claude-haiku-4-5',
+      max_tokens: 450,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const profile = response.content[0]?.type === 'text' ? response.content[0].text.trim() : '';
+    const breakdown = {
+      applied:      actions.filter(a => a.user_action === 'applied').length,
+      interested:   actions.filter(a => a.user_action === 'interested').length,
+      interviewing: actions.filter(a => a.user_action === 'interviewing').length,
+      rejected:     actions.filter(a => a.user_action === 'rejected').length,
+      skipped:      actions.filter(a => a.user_action === 'skipped').length,
+    };
+    res.json({ profile, action_count: actions.length, breakdown });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 // ── LinkedIn outreach message generator ───────────────────────────────────
 app.post('/api/jobs/:id/outreach', async (req: Request, res: Response) => {
   try {
@@ -1421,8 +1496,12 @@ Write two short outreach messages:
 
 Do not use generic phrases like "I hope this message finds you well". Be specific. Use first person.`;
 
-    const anthropic = getAnthropicClient();
-    const msg = await anthropic.messages.create({
+    const AnthropicSdk3 = (await import('@anthropic-ai/sdk')).default;
+    const ac3 = new AnthropicSdk3({
+      apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '',
+      ...(process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL ? { baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL } : {}),
+    });
+    const msg = await ac3.messages.create({
       model: 'claude-haiku-4-5',
       max_tokens: 600,
       messages: [{ role: 'user', content: prompt }],
@@ -2621,8 +2700,9 @@ app.post('/api/gmail/send-test', async (_req, res: Response) => {
       'SELECT * FROM jobs WHERE match_score >= 50 ORDER BY match_score DESC LIMIT 10'
     );
 
-    const html = buildDigestHtml(jobs);
-    const sent = await sendGmailEmail(email, 'Job Scout Agent — Test Digest', html);
+    const narrative = await generateDigestNarrative(jobs);
+    const html = buildDigestHtml(jobs, narrative);
+    const sent = await sendGmailEmail(email, 'JSOS.ai — Test Digest', html);
     if (sent) {
       res.json({ ok: true, message: 'Test digest sent to ' + email });
     } else {
@@ -2636,36 +2716,211 @@ app.get('/api/gmail/preview', async (_req, res: Response) => {
     const { rows: jobs } = await pool.query(
       'SELECT * FROM jobs WHERE match_score >= 50 ORDER BY match_score DESC LIMIT 10'
     );
-    res.json({ html: buildDigestHtml(jobs) });
+    const narrative = await generateDigestNarrative(jobs);
+    res.json({ html: buildDigestHtml(jobs, narrative) });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-function buildDigestHtml(jobs: any[]): string {
+// ── Narrative digest generator ────────────────────────────────────────────
+async function generateDigestNarrative(jobs: any[]): Promise<string> {
+  try {
+    const topTargets = jobs.filter(j => (j.opportunity_tier || '').toLowerCase().includes('top'));
+    const fastWins   = jobs.filter(j => (j.opportunity_tier || '').toLowerCase().includes('fast'));
+    const freshJobs  = jobs.filter(j => {
+      if (!j.found_at) return false;
+      const hrs = (Date.now() - new Date(j.found_at as string).getTime()) / 3600000;
+      return hrs < 24;
+    });
+
+    const prompt = `You are an executive assistant briefing a senior sales professional on their daily job scout results.
+
+Today's scout found ${jobs.length} total matches: ${topTargets.length} Top Targets, ${fastWins.length} Fast Wins.${freshJobs.length > 0 ? ` ${freshJobs.length} posted in the last 24 hours.` : ''}
+
+Top matches:
+${topTargets.slice(0, 5).map(j => {
+  const hrs = j.found_at ? Math.round((Date.now() - new Date(j.found_at as string).getTime()) / 3600000) : null;
+  return `- ${j.title} @ ${j.company} | Score: ${j.match_score} | ${j.salary || 'salary not listed'} | ${hrs !== null ? hrs + 'h ago' : 'unknown age'}`;
+}).join('\n')}${fastWins.length > 0 ? `\nFast Wins:\n${fastWins.slice(0,2).map(j => `- ${j.title} @ ${j.company} | Score: ${j.match_score}`).join('\n')}` : ''}
+
+Write EXACTLY 2-3 sentences in second person. Be specific and action-oriented:
+1. Lead with the most notable opportunity and urgency if any are fresh
+2. Note any compensation or market pattern
+3. End with one concrete action recommendation
+
+No bullet points. Maximum 3 sentences. Write like a sharp analyst briefing an executive.`;
+
+    const AnthropicSdk = (await import('@anthropic-ai/sdk')).default;
+    const ac = new AnthropicSdk({
+      apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '',
+      ...(process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL ? { baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL } : {}),
+    });
+    const response = await ac.messages.create({
+      model: 'claude-haiku-4-5',
+      max_tokens: 250,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    return response.content[0]?.type === 'text' ? response.content[0].text.trim() : '';
+  } catch (e) {
+    console.error('[DigestNarrative] Failed:', e instanceof Error ? e.message : e);
+    return '';
+  }
+}
+
+// ── Background job tailoring (fire-and-forget) ────────────────────────────
+async function tailorJobInBackground(jobId: number): Promise<void> {
+  const { rows: cached } = await pool.query(
+    'SELECT id FROM tailored_resumes WHERE job_id=$1 ORDER BY created_at DESC LIMIT 1', [jobId]
+  );
+  if (cached.length > 0) return;
+
+  const { rows: jobRows } = await pool.query('SELECT * FROM jobs WHERE id=$1', [jobId]);
+  if (!jobRows.length) return;
+  const job = jobRows[0] as Record<string, unknown>;
+
+  const { rows: resumeRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
+  const resumeText: string = (resumeRows[0]?.value as string) ?? '';
+  if (!resumeText.trim()) return;
+
+  const { rows: briefRows } = await pool.query(
+    `SELECT brief_json FROM research_briefs WHERE LOWER(company_name)=LOWER($1) AND status='ready' AND created_at > NOW() - INTERVAL '48 hours' ORDER BY created_at DESC LIMIT 1`,
+    [job.company as string]
+  );
+  let companyResearchContext: string | null = null;
+  if (briefRows.length > 0) {
+    try {
+      const brief = briefRows[0].brief_json as Record<string, string>;
+      const parts: string[] = [];
+      if (brief.companyMoment) parts.push(`Company moment: ${brief.companyMoment}`);
+      if (brief.productContext) parts.push(`Products: ${brief.productContext}`);
+      if (brief.marketPosition) parts.push(`Market position: ${brief.marketPosition}`);
+      companyResearchContext = parts.join('\n');
+    } catch { /* ignore */ }
+  }
+
+  const { rows: dmRows } = await pool.query("SELECT value FROM settings WHERE key='document_model'");
+  const documentModel: string = (dmRows[0]?.value as string) || 'claude-opus-4-6';
+
+  const detectedTerritory = detectTerritory(job.title as string, (job.description as string) ?? '');
+  let territoryCtx = null;
+  if (detectedTerritory) {
+    territoryCtx = await analyzeTerritoryContext(job.title as string, job.company as string, detectedTerritory, resumeText);
+  }
+
+  const result = await tailorResumeV2WithClaude({
+    jobTitle:               job.title as string,
+    companyName:            job.company as string,
+    jobDescription:         (job.description as string) ?? '',
+    resumeText,
+    companyResearchContext,
+    model:                  documentModel,
+    territoryContext:       territoryCtx,
+  });
+
+  await pool.query(
+    `INSERT INTO tailored_resumes (job_id, resume_text, ats_keywords, gap_analysis, ats_research) VALUES ($1,$2,$3,$4,$5)`,
+    [jobId, result.resumeText, result.atsResearch.mustHaveKeywords, JSON.stringify(result.gapAnalysis), JSON.stringify(result.atsResearch)]
+  );
+  await pool.query(
+    `DELETE FROM tailored_resumes WHERE job_id=$1 AND id NOT IN (SELECT id FROM tailored_resumes WHERE job_id=$1 ORDER BY created_at DESC LIMIT 3)`,
+    [jobId]
+  );
+}
+
+function autotailorTopMatches(runId: number): void {
+  (async () => {
+    try {
+      const { rows: resumeRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
+      if (!(resumeRows[0]?.value as string)?.trim()) {
+        console.log('[AutoTailor] No resume set — skipping auto-tailoring.');
+        return;
+      }
+      const { rows: topJobs } = await pool.query(
+        `SELECT j.id, j.title, j.company FROM jobs j
+         WHERE j.scout_run_id = $1
+           AND j.opportunity_tier ILIKE 'Top Target'
+           AND NOT EXISTS (SELECT 1 FROM tailored_resumes tr WHERE tr.job_id = j.id)
+         ORDER BY j.match_score DESC LIMIT 3`,
+        [runId]
+      );
+      if (topJobs.length === 0) {
+        console.log('[AutoTailor] All Top Targets already tailored or none found.');
+        return;
+      }
+      console.log(`[AutoTailor] Pre-tailoring ${topJobs.length} Top Target resume(s) in background…`);
+      for (const job of topJobs) {
+        try {
+          console.log(`[AutoTailor]   Tailoring: ${job.title} @ ${job.company} (id: ${job.id})`);
+          await tailorJobInBackground(job.id as number);
+          console.log(`[AutoTailor]   ✓ Done: ${job.title} @ ${job.company}`);
+        } catch (e) {
+          console.error(`[AutoTailor]   ✗ Failed (job ${job.id}):`, e instanceof Error ? e.message : e);
+        }
+      }
+      console.log('[AutoTailor] Background tailoring complete.');
+    } catch (e) {
+      console.error('[AutoTailor] Fatal:', e instanceof Error ? e.message : e);
+    }
+  })();
+}
+
+function buildDigestHtml(jobs: any[], narrative = ''): string {
+  const topTargets = jobs.filter(j => (j.opportunity_tier || '').toLowerCase().includes('top'));
+  const freshJobs  = jobs.filter(j => {
+    if (!j.found_at) return false;
+    return (Date.now() - new Date(j.found_at as string).getTime()) / 3600000 < 24;
+  });
+
   const jobCards = jobs.map(j => {
+    const freshHrs = j.found_at ? (Date.now() - new Date(j.found_at as string).getTime()) / 3600000 : null;
+    const tierBg = (j.opportunity_tier || '').toLowerCase().includes('top') ? '#c8a96e' : (j.opportunity_tier || '').toLowerCase().includes('fast') ? '#4ade80' : '#888';
+    const freshTag = freshHrs !== null && freshHrs < 24 ? `<span style="background:#00c86e22;color:#00c86e;border:1px solid #00c86e44;padding:1px 6px;border-radius:3px;font-size:11px;font-weight:700;margin-left:6px">🔥 NEW</span>` : '';
+    const staleTag = freshHrs !== null && freshHrs > 14 * 24 ? `<span style="background:#e5535322;color:#e55353;border:1px solid #e5535344;padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px">⏱ ${Math.round(freshHrs/24)}d old</span>` : '';
     const jobData = JSON.stringify({ title: j.title, company: j.company, location: j.location, salary: j.salary || '', score: j.match_score, why: j.why_good_fit || '', url: j.apply_url }).replace(/"/g, '&quot;');
     return `
     <div class="digest-job" data-job="${jobData}" style="background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:16px;margin-bottom:12px;position:relative">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <span style="color:#c8a96e;font-weight:bold;font-size:16px">${esc(j.title)}</span>
-        <div style="display:flex;align-items:center;gap:8px">
-          <span style="background:#c8a96e;color:#0f0f0f;padding:2px 10px;border-radius:12px;font-weight:bold;font-size:13px">${esc(j.match_score)}/100</span>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+        <div>
+          <span style="color:#c8a96e;font-weight:bold;font-size:16px">${esc(j.title)}</span>${freshTag}${staleTag}
+          ${j.opportunity_tier ? `<div style="margin-top:4px"><span style="background:${tierBg}22;color:${tierBg};border:1px solid ${tierBg}44;padding:1px 8px;border-radius:3px;font-size:11px;font-weight:700">${esc(j.opportunity_tier)}</span></div>` : ''}
         </div>
+        <span style="background:#c8a96e;color:#0f0f0f;padding:2px 10px;border-radius:12px;font-weight:bold;font-size:13px;white-space:nowrap">${esc(j.match_score)}/100</span>
       </div>
-      <div style="color:#999;margin:6px 0">${esc(j.company)} • ${esc(j.location)}${j.salary ? ' • ' + esc(j.salary) : ''}</div>
-      <div style="color:#bbb;font-size:13px;margin:8px 0">${esc(j.why_good_fit)}</div>
-      <div style="display:flex;align-items:center;gap:12px">
-        <a href="${esc(j.apply_url)}" style="color:#c8a96e;font-size:13px">View Posting →</a>
-      </div>
+      <div style="color:#999;margin:6px 0;font-size:13px">${esc(j.company)} • ${esc(j.location)}${j.salary ? ' • <strong style="color:#c8a96e">' + esc(j.salary) + '</strong>' : ''}</div>
+      <div style="color:#bbb;font-size:13px;margin:8px 0;line-height:1.5">${esc(j.why_good_fit)}</div>
+      <a href="${esc(j.apply_url)}" style="display:inline-block;background:#c8a96e;color:#0f0f0f;padding:6px 16px;border-radius:4px;font-size:12px;font-weight:700;text-decoration:none;margin-top:4px">Apply Now →</a>
     </div>
   `;}).join('');
+
+  const narrativeBlock = narrative ? `
+    <div style="background:#1a1a1a;border:1px solid #c8a96e44;border-left:3px solid #c8a96e;border-radius:6px;padding:16px 18px;margin-bottom:24px">
+      <div style="color:#c8a96e;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px">Scout Briefing</div>
+      <div style="color:#e8e6e0;font-size:14px;line-height:1.6">${esc(narrative)}</div>
+    </div>` : '';
+
+  const statsBlock = `
+    <div style="display:flex;gap:16px;margin-bottom:20px;flex-wrap:wrap">
+      <div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:10px 16px;flex:1;min-width:80px;text-align:center">
+        <div style="color:#c8a96e;font-size:20px;font-weight:700">${jobs.length}</div>
+        <div style="color:#666;font-size:11px">Total Matches</div>
+      </div>
+      <div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:10px 16px;flex:1;min-width:80px;text-align:center">
+        <div style="color:#c8a96e;font-size:20px;font-weight:700">${topTargets.length}</div>
+        <div style="color:#666;font-size:11px">Top Targets</div>
+      </div>
+      <div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:10px 16px;flex:1;min-width:80px;text-align:center">
+        <div style="color:#00c86e;font-size:20px;font-weight:700">${freshJobs.length}</div>
+        <div style="color:#666;font-size:11px">Fresh Today</div>
+      </div>
+    </div>`;
 
   return `
     <div style="background:#0f0f0f;color:#e8e6e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:32px;max-width:640px;margin:0 auto">
       <div style="text-align:center;margin-bottom:24px">
-        <h1 style="color:#c8a96e;font-size:22px;margin:0">⬡ Job Scout Agent — Daily Digest</h1>
+        <h1 style="color:#c8a96e;font-size:22px;margin:0">⬡ JSOS.ai — Daily Scout Digest</h1>
         <p style="color:#666;font-size:13px;margin-top:6px">${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
       </div>
-      <div style="color:#999;font-size:14px;margin-bottom:16px">${jobs.length} match${jobs.length !== 1 ? 'es' : ''} found</div>
+      ${narrativeBlock}
+      ${statsBlock}
       ${jobs.length > 0 ? jobCards : '<div style="color:#666;text-align:center;padding:32px">No matches yet. Run the scout first!</div>'}
     </div>
   `;
@@ -3272,15 +3527,20 @@ async function runScoutInBackground(runId: number): Promise<void> {
         const { rows: recentJobs } = await pool.query(
           'SELECT * FROM jobs WHERE scout_run_id=$1 ORDER BY match_score DESC', [runId]
         );
+        // Generate AI narrative briefing (non-fatal if fails)
+        const narrative = await generateDigestNarrative(recentJobs);
         await sendGmailEmail(
           crit[0].your_email,
           `Job Scout Agent — ${matches.length} new match${matches.length !== 1 ? 'es' : ''} found`,
-          buildDigestHtml(recentJobs)
+          buildDigestHtml(recentJobs, narrative)
         );
       }
     } catch (emailErr) {
       console.error('Email sending failed (non-fatal):', emailErr);
     }
+
+    // Background auto-tailoring: pre-tailor top 3 Top Targets (fire-and-forget)
+    autotailorTopMatches(runId);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     await pool.query(
@@ -3574,6 +3834,8 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .save-btn:hover{border-color:var(--gold);color:var(--gold)}
 .save-btn.saved{background:var(--gold);color:#0f0f0f;border-color:var(--gold)}
 .saved-date{font-size:10px;color:var(--muted);margin-top:4px}
+.track-status-sel{background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;cursor:pointer;appearance:none;-webkit-appearance:none;min-width:110px;outline:none}
+.track-status-sel:hover{border-color:var(--gold);color:var(--gold)}
 
 /* jobs */
 .jobs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;margin-top:16px}
@@ -4191,6 +4453,19 @@ textarea:focus,input:focus{border-color:var(--gold)}
       <div class="intel-meta" id="intel-meta">Powered by Gemini + Google Search grounding &mdash; refreshes daily</div>
     </div>
     <button class="btn btn-gold btn-sm" id="intel-refresh-btn" onclick="refreshCareerIntel()">Refresh Intel</button>
+  </div>
+
+  <!-- Preference Profile Section (always visible) -->
+  <div id="pref-profile-section" style="background:#111;border:1px solid #222;border-radius:10px;padding:18px 20px;margin-bottom:20px">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px">
+      <div>
+        <div style="font-size:14px;font-weight:700;color:var(--text)">&#x1F9E0; Behavioral Preference Profile</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px">Claude analyzes your tracked job actions to reveal revealed preferences &mdash; not what you say, but what you actually respond to</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="pref-analyze-btn" onclick="loadPreferenceProfile()">Analyze My Preferences</button>
+    </div>
+    <div id="pref-loading" style="display:none;color:var(--muted);font-size:13px;padding:8px 0">Analyzing your job activity&hellip;</div>
+    <div id="pref-output"></div>
   </div>
 
   <div id="intel-loading" style="display:none">
@@ -5179,6 +5454,24 @@ function renderJobCard(j, opts) {
   // RepVue badge
   var repvueBadge = renderRepVueBadge(j);
 
+  // Freshness / staleness badges (from found_at)
+  var urgentBadge = '';
+  var staleBadge = '';
+  if (j.found_at) {
+    var freshHrs = (Date.now() - new Date(j.found_at).getTime()) / 3600000;
+    if (freshHrs < 6) {
+      urgentBadge = '<span style="display:inline-flex;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:700;background:rgba(0,200,110,.15);color:#00c86e;border:1px solid rgba(0,200,110,.35)" title="Posted just ' + Math.round(freshHrs * 10) / 10 + 'h ago \u2014 apply fast for best chance">\uD83D\uDD25 URGENT</span>';
+    } else if (freshHrs > 14 * 24) {
+      staleBadge = '<span style="display:inline-flex;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:600;background:rgba(229,83,83,.1);color:#e55353;border:1px solid rgba(229,83,83,.2)" title="Posted ' + Math.round(freshHrs/24) + ' days ago \u2014 may already be filled">\u23F1 ' + Math.round(freshHrs/24) + 'd old</span>';
+    }
+  }
+
+  // User action status badge
+  var userAction = j.user_action || '';
+  var actionColors = { applied: '#4ade80', interested: '#f5c842', interviewing: '#818cf8', rejected: '#e55353', skipped: '#555' };
+  var actionLabels = { applied: '\u2713 Applied', interested: '\u2605 Interested', interviewing: '\uD83D\uDCCB Interviewing', rejected: '\u2715 Rejected', skipped: '\u2014 Skipped' };
+  var actionBadgeHtml = userAction ? '<span style="display:inline-flex;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:700;background:' + (actionColors[userAction] || '#555') + '22;color:' + (actionColors[userAction] || '#888') + ';border:1px solid ' + (actionColors[userAction] || '#555') + '44">' + (actionLabels[userAction] || userAction) + '</span>' : '';
+
   // Momentum badge (fresh data from company_momentum join)
   var momentumBadge = '';
   if (j.momentum_score !== undefined && j.momentum_score !== null) {
@@ -5224,10 +5517,13 @@ function renderJobCard(j, opts) {
     '</div>' +
     // ── Signal: Why this fits you
     (j.why_good_fit ? '<div class="card-signal"><div class="signal-label">\uD83C\uDFAF Why this fits you</div><div class="signal-text">' + esc(j.why_good_fit) + '</div></div>' : '') +
-    // ── Meta strip: salary, risk, momentum, territory, source
+    // ── Meta strip: salary, risk, momentum, territory, source, freshness, action
     '<div class="card-meta-strip">' +
       salaryHtml +
       aiRiskBadge +
+      urgentBadge +
+      staleBadge +
+      actionBadgeHtml +
       momentumBadge +
       momentumWarning +
       territoryBadge +
@@ -5243,6 +5539,14 @@ function renderJobCard(j, opts) {
       '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ')">Tailor Resume</button>' +
       '<button class="btn btn-ghost btn-sm" data-jid="' + j.id + '" data-jtit="' + esc(j.title) + '" data-jco="' + esc(j.company) + '" onclick="openCoverLetter(this.dataset.jid,this.dataset.jtit,this.dataset.jco)">\u270D Cover Letter</button>' +
       '<button class="btn btn-ghost btn-sm" id="research-btn-' + j.id + '" onclick="researchCompany(' + j.id + ')">\uD83D\uDD0D Research</button>' +
+      '<select class="btn btn-ghost btn-sm track-status-sel" data-jid="' + j.id + '" onchange="markJobAction(this.dataset.jid,this.value);this.blur()" style="cursor:pointer">' +
+        '<option value="">' + (userAction ? '\u21BA Change Status' : '\u2295 Track Status') + '</option>' +
+        '<option value="applied"' + (userAction === 'applied' ? ' selected' : '') + '>\u2713 Applied</option>' +
+        '<option value="interested"' + (userAction === 'interested' ? ' selected' : '') + '>\u2605 Interested</option>' +
+        '<option value="interviewing"' + (userAction === 'interviewing' ? ' selected' : '') + '>\uD83D\uDCCB Interviewing</option>' +
+        '<option value="rejected"' + (userAction === 'rejected' ? ' selected' : '') + '>\u2715 Rejected</option>' +
+        '<option value="skipped"' + (userAction === 'skipped' ? ' selected' : '') + '>\u2014 Skipped</option>' +
+      '</select>' +
       '<button class="' + saveClass + '" onclick="toggleSave(' + j.id + ')" id="save-btn-' + j.id + '">' + saveLabel + '</button>' +
     '</div>' +
   '</div>';
@@ -5326,6 +5630,59 @@ async function loadJobs() {
       _jobsRetries = 0;
     }
   }
+}
+
+async function markJobAction(jobId, action) {
+  if (!action) return;
+  try {
+    var res = await fetch('/api/jobs/' + jobId + '/action', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: action })
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var updated = await res.json();
+    _jobsById[jobId] = updated;
+    for (var i = 0; i < _allJobs.length; i++) {
+      if (_allJobs[i].id == jobId) { _allJobs[i] = updated; break; }
+    }
+    renderJobs();
+  } catch(e) { console.error('markJobAction failed:', e); }
+}
+
+async function loadPreferenceProfile() {
+  var loadEl = document.getElementById('pref-loading');
+  var outputEl = document.getElementById('pref-output');
+  var btnEl = document.getElementById('pref-analyze-btn');
+  if (loadEl) loadEl.style.display = '';
+  if (outputEl) { outputEl.style.display = 'none'; outputEl.innerHTML = ''; }
+  if (btnEl) btnEl.disabled = true;
+  try {
+    var res = await fetch('/api/jobs/preference-profile');
+    var data = await res.json();
+    if (loadEl) loadEl.style.display = 'none';
+    if (outputEl) { outputEl.style.display = ''; outputEl.innerHTML = renderPreferenceProfile(data); }
+  } catch(e) {
+    if (loadEl) loadEl.style.display = 'none';
+    if (outputEl) { outputEl.style.display = ''; outputEl.innerHTML = '<div style="color:#e55353;font-size:13px">Error: ' + (e.message || String(e)) + '</div>'; }
+  }
+  if (btnEl) btnEl.disabled = false;
+}
+
+function renderPreferenceProfile(data) {
+  if (!data.profile) {
+    return '<div style="color:var(--muted);font-size:13px;padding:8px 0;font-style:italic">' + esc(data.message || 'Not enough data yet.') + '</div>';
+  }
+  var breakdown = data.breakdown || {};
+  var statPills = Object.entries(breakdown).filter(function(e) { return e[1] > 0; }).map(function(e) {
+    var colors = { applied: '#4ade80', interested: '#f5c842', interviewing: '#818cf8', rejected: '#e55353', skipped: '#555' };
+    var col = colors[e[0]] || '#888';
+    return '<span style="background:' + col + '22;color:' + col + ';border:1px solid ' + col + '44;border-radius:4px;padding:3px 10px;font-size:12px">' + e[0].charAt(0).toUpperCase() + e[0].slice(1) + ': <strong>' + e[1] + '</strong></span>';
+  }).join('');
+  var profileHtml = esc(data.profile).replace(/\*\*([^*]+)\*\*/g, '<strong style="color:var(--gold)">$1</strong>').replace(/\\n/g, '<br>');
+  return '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">' + statPills + '</div>' +
+    '<div style="background:#0d0d0d;border:1px solid #252525;border-radius:8px;padding:16px;font-size:13px;line-height:1.75;color:var(--text)">' + profileHtml + '</div>' +
+    '<div style="font-size:11px;color:var(--muted);margin-top:8px">Based on ' + esc(data.action_count) + ' tracked actions</div>';
 }
 
 async function toggleSave(jobId) {
