@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenAI } from '@google/genai';
 import type { ScrapedJob } from './scraper.js';
 
 const anthropic = new Anthropic({
@@ -8,16 +9,48 @@ const anthropic = new Anthropic({
     : {}),
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SubScores — 5-component system (v2)
+//
+// The 5 components sum to a 0-100 matchScore directly:
+//   roleFit        0-30   Role title/level match
+//   companyQuality 0-25   Company momentum, pre-approval status, AI risk
+//   compensationFit 0-20  Salary vs candidate minimum
+//   locationFit    0-15   Remote/location preference match
+//   territoryFit   0-10   Territory match (7 default when no territory detected)
+//
+// realVsFake (0-10) is a hard-skip gate only — not counted in matchScore.
+//
+// Backward compatibility: old stored sub_scores lack `compensationFit`.
+// computeTier() detects format via presence of `compensationFit`.
+// ─────────────────────────────────────────────────────────────────────────────
 export interface SubScores {
-  roleFit: number;           // 0-10: role title/level vs target roles
-  companyQuality: number;    // 0-10: company reputation, growth, prestige
-  locationFit: number;       // 0-10: remote/hybrid/location match
-  hiringUrgency: number;     // 0-10: active hiring signals vs stale evergreen
-  tailoringRequired: number; // 0-10: 10=minimal tailoring, 0=major overhaul needed
-  referralOdds: number;      // 0-10: likelihood of finding a warm referral
-  realVsFake: number;        // 0-10: confidence this is a genuine open role
-  qualificationFit: number;  // 0-10: how well candidate's actual background matches JD requirements
+  roleFit:          number;   // 0-30
+  companyQuality:   number;   // 0-25
+  compensationFit:  number;   // 0-20  (new; undefined on legacy stored data)
+  locationFit:      number;   // 0-15
+  territoryFit:     number;   // 0-10  (new; undefined on legacy stored data)
+  realVsFake:       number;   // 0-10  hard-skip gate (not added to matchScore)
+  // Legacy fields — present on old stored jobs, ignored in new scoring
+  hiringUrgency?:      number;
+  tailoringRequired?:  number;
+  referralOdds?:       number;
+  qualificationFit?:   number;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MomentumScore — pre-check run before scoring (Gemini + DB cache, 48 h TTL)
+// ─────────────────────────────────────────────────────────────────────────────
+export interface MomentumScore {
+  companyName:    string;
+  score:          number;    // 0-25 — feeds directly into companyQuality component
+  signals:        string[];  // positive signals (funding, hiring surge, product launch…)
+  warning:        string | null; // single-sentence red flag, if any
+  cached:         boolean;
+}
+
+// In-process cache — avoids duplicate Gemini calls within a single scout run
+const _momentumCache = new Map<string, { data: MomentumScore; expiresAt: number }>();
 
 export type OpportunityTier = 'Top Target' | 'Fast Win' | 'Stretch Role' | 'Probably Skip' | 'unscored';
 
@@ -51,6 +84,110 @@ interface CriteriaForAgent {
   candidateResume?: string;    // raw resume text for qualification matching
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// getCompanyMomentum — Gemini-powered company health pre-check (48 h in-memory cache)
+// Returns 0-25 score feeding directly into companyQuality component.
+// ─────────────────────────────────────────────────────────────────────────────
+export async function getCompanyMomentum(
+  companyName: string,
+  isPreApproved: boolean,
+): Promise<MomentumScore> {
+  const cacheKey = companyName.toLowerCase().trim();
+
+  // Return in-process cached result if fresh (48 h)
+  const mem = _momentumCache.get(cacheKey);
+  if (mem && Date.now() < mem.expiresAt) {
+    return { ...mem.data, cached: true };
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) {
+    // No Gemini key — use a sensible default so scoring still works
+    const fallback: MomentumScore = {
+      companyName,
+      score: isPreApproved ? 18 : 10,
+      signals: [],
+      warning: null,
+      cached: false,
+    };
+    _momentumCache.set(cacheKey, { data: fallback, expiresAt: Date.now() + 48 * 3600 * 1000 });
+    return fallback;
+  }
+
+  const prompt = `You are a company intelligence analyst. Evaluate the current momentum and health of "${companyName}" as of today.
+
+Search the web for the most recent news (last 6 months preferred). Look for:
+- Recent funding rounds, IPO news, or financial results
+- Headcount growth or layoffs in the last 12 months
+- Product launches or major contract wins
+- Leadership stability (CEO/CRO changes are a flag)
+- Any legal issues, regulatory action, or public controversy
+
+Return ONLY a valid JSON object (no markdown, no other text):
+{
+  "score": <integer 0-25>,
+  "signals": [<up to 3 short positive signal strings, e.g. "Raised $120M Series C (Jan 2025)">],
+  "warning": <null or one-sentence red flag, e.g. "Laid off 20% of workforce in Q1 2025">,
+  "reasoning": "<one sentence summary>"
+}
+
+SCORING GUIDE:
+23-25: Elite momentum — major funding/IPO, strong growth, no red flags
+18-22: Healthy — stable growth, some positive signals, no major concerns
+13-17: Neutral — no clear signals either way, or pre-approved company without recent news
+8-12: Cautious — some negative signals (slowing growth, leadership turnover)
+0-7:  Red flag — layoffs, legal/regulatory problems, financial distress`;
+
+  const CANDIDATE_MODELS = ['gemini-3-flash-preview', 'gemini-flash-latest', 'gemini-pro-latest'];
+
+  let result: MomentumScore | null = null;
+
+  for (const modelName of CANDIDATE_MODELS) {
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: prompt,
+        config: { tools: [{ googleSearch: {} }] },
+      });
+
+      const text = (response.text ?? '').trim().replace(/```json|```/g, '').trim();
+      if (!text) continue;
+
+      const parsed = JSON.parse(text) as {
+        score?: number;
+        signals?: string[];
+        warning?: string | null;
+      };
+
+      result = {
+        companyName,
+        score:   Math.min(25, Math.max(0, Math.round(parsed.score ?? (isPreApproved ? 16 : 10)))),
+        signals: Array.isArray(parsed.signals) ? parsed.signals.slice(0, 3) : [],
+        warning: parsed.warning ?? null,
+        cached:  false,
+      };
+      console.log(`  [Momentum] ${companyName}: ${result.score}/25 via ${modelName}${result.warning ? ' ⚠ ' + result.warning : ''}`);
+      break;
+    } catch {
+      // Try next model
+    }
+  }
+
+  if (!result) {
+    result = {
+      companyName,
+      score: isPreApproved ? 16 : 10,
+      signals: [],
+      warning: null,
+      cached: false,
+    };
+  }
+
+  _momentumCache.set(cacheKey, { data: result, expiresAt: Date.now() + 48 * 3600 * 1000 });
+  return result;
+}
+
 async function scoreOne(
   job: ScrapedJob,
   criteriaText: string,
@@ -60,42 +197,53 @@ async function scoreOne(
   minSalary?: number | null,
   candidateResume?: string,
   minOte?: number | null,
+  momentumContext?: MomentumScore | null,
 ): Promise<JobMatch | null> {
   try {
     const isPreApproved = preApprovedCompanies.some(
       (name) => name.toLowerCase() === job.company.toLowerCase()
     );
-    let companySpecificSection = preApprovedSection;
-    if (isPreApproved) {
-      companySpecificSection += `\n\nNOTE: ${job.company} is on the user's pre-approved companies list. The user has already decided this company is a target employer. Score at least 65 if the role title meaningfully matches any of the user's target roles. Only score below 65 if the role type is completely wrong (e.g. engineering, marketing, HR, finance, legal) or the location is outside the user's preferences.`;
-    }
 
-    // Build salary constraint text
+    // ── Build salary constraint text ─────────────────────────────────────────
     const salaryParts: string[] = [];
     if (minSalary) {
-      salaryParts.push(`Minimum BASE salary: $${minSalary.toLocaleString()}. If the listing shows a base salary AND the highest figure is below this: set matchScore=0, isMatch=false.`);
+      salaryParts.push(`Minimum BASE salary: $${minSalary.toLocaleString()}. If salary listed AND highest figure is below this, set compensationFit=0.`);
     }
     if (minOte) {
-      salaryParts.push(`Minimum OTE (On-Target Earnings / total comp): $${minOte.toLocaleString()}. OTE is the total package including base + variable/commission when at 100% quota. If the listing shows an OTE AND the highest figure is below this: set matchScore=0, isMatch=false.`);
+      salaryParts.push(`Minimum OTE: $${minOte.toLocaleString()}. If OTE listed AND below this, set compensationFit=0.`);
     }
     const salaryRule = salaryParts.length > 0
-      ? `COMPENSATION REQUIREMENTS (hard gates):\n${salaryParts.join('\n')}\nIf no salary is listed: do not penalize — mention the unknown compensation in whyGoodFit.`
-      : '';
+      ? `COMPENSATION MINIMUM:\n${salaryParts.join('\n')}\nIf no salary listed: do NOT penalize — score 10.`
+      : 'No salary minimum set. Score compensationFit=10 if no salary listed.';
 
-    // Candidate background section
+    // ── Candidate background section ─────────────────────────────────────────
     const resumeSection = candidateResume
       ? `═══════════════════════════════════════════════════
-CANDIDATE BACKGROUND (from uploaded resume)
+CANDIDATE BACKGROUND (uploaded resume)
 ═══════════════════════════════════════════════════
-Read this to understand who the candidate actually IS — their real experience, past titles, industries sold into, methodologies used, deal sizes, and achievements. Use this to evaluate whether they are genuinely qualified for the role.
+Use this to understand who the candidate is — titles, industries sold into, deal sizes, methodologies.
 
 ${candidateResume.slice(0, 2500)}
 `
       : '';
 
-    const prompt = `You are a world-class career strategist and executive recruiter who evaluates job-candidate fit with surgical precision. You understand the nuances of enterprise sales roles deeply: the difference between hunters and farmers, the difference between SMB/Commercial/Mid-Market/Enterprise/Strategic levels, industry vertical specialists vs generalists, and what methodologies like MEDDPICC, Challenger, or Command of the Message signal about a candidate.
+    // ── Momentum context ─────────────────────────────────────────────────────
+    const momentumSection = momentumContext
+      ? `COMPANY MOMENTUM (pre-researched):
+Score: ${momentumContext.score}/25
+${momentumContext.signals.length ? 'Positive signals: ' + momentumContext.signals.join(' | ') : ''}
+${momentumContext.warning ? '⚠ Warning: ' + momentumContext.warning : ''}
+Use this to inform companyQuality. Pre-approved + high momentum → 22-25. Warning flag → reduce companyQuality.`
+      : isPreApproved
+        ? `COMPANY MOMENTUM: ${job.company} is pre-approved by the user. Default companyQuality 16 unless you have clear evidence of problems.`
+        : '';
 
-Your job: evaluate how well THIS job matches THIS specific candidate — based on their actual background (resume) AND their stated preferences.
+    // ── Pre-approved note ────────────────────────────────────────────────────
+    const preApprovedNote = isPreApproved
+      ? `\nCOMPANY NOTE: ${job.company} is on the user's pre-approved companies list. The user has already decided this is a target employer.`
+      : '';
+
+    const prompt = `You are a world-class career strategist evaluating job-candidate fit with surgical precision.
 
 ${resumeSection}
 ═══════════════════════════════════════════════════
@@ -103,7 +251,11 @@ CANDIDATE PREFERENCES & CRITERIA
 ═══════════════════════════════════════════════════
 ${criteriaText}
 
+${preApprovedSection}${preApprovedNote}
+
 ${salaryRule}
+
+${momentumSection}
 
 ═══════════════════════════════════════════════════
 JOB TO EVALUATE
@@ -113,70 +265,72 @@ Company: ${job.company}
 Location: ${job.location}
 ${job.description ? `Description:\n${job.description.slice(0, 1500)}` : '(No description available)'}
 
-${companySpecificSection}
-
 ═══════════════════════════════════════════════════
-SCORING INSTRUCTIONS
+SCORING — 5 COMPONENTS (they sum to matchScore 0-100)
 ═══════════════════════════════════════════════════
-Score based on BOTH the candidate's preferences AND their actual qualifications from the resume.
 
-1. matchScore (0-100): Overall fit score combining preferences + actual qualification.
-   - Start at 50. Adjust up/down:
-   - Role title matches target roles: +/-25 (biggest factor)
-   - Candidate is actually qualified based on resume: +/-20 (second biggest factor)
-   - Location/remote match: +/-15
-   - Compensation meets requirements (if known): hard gate
-   - Must-have requirements met: +/-8 each
-   - Avoid keywords present: -25 each (likely disqualifier)
-   - Company quality/fit with candidate's industry background: +/-10
-   - AI displacement risk: LOW=no penalty, MEDIUM=-5, HIGH=-20
+COMPONENT 1 — roleFit (0-30 points):
+  30: Exact target-role title match at correct seniority level
+  20: Close match — same level, slightly different title
+  12: Related role that makes sense given resume
+  5:  Wrong level (too junior or senior for candidate)
+  0:  Wrong role type entirely (engineering, HR, marketing, etc.)
 
-2. isMatch: true if matchScore >= 60, otherwise false.
+COMPONENT 2 — companyQuality (0-25 points):
+  Use momentum context above if provided.
+  25: Pre-approved AND elite momentum (funding/growth/IPO)
+  20: Pre-approved, solid established company
+  16: Not pre-approved, but safe and respectable
+  10: Small unknown company, no signals
+  0:  AI disruption risk, layoff signals, or company in decline
 
-3. isHardware: true if the company sells physical hardware, semiconductors, networking equipment, industrial machinery, or data center infrastructure products.
+COMPONENT 3 — compensationFit (0-20 points):
+  ${salaryRule}
+  20: Salary listed and clearly meets/exceeds minimum
+  15: Salary within 10% below minimum (close)
+  10: No salary listed — cannot penalize
+  5:  No salary listed, company known for low pay
+  0:  Salary listed and clearly below minimum
 
-4. aiRisk — how easily could AI replace this company's core product?
-   - LOW: Physical hardware, semiconductors, networking gear, storage, servers, industrial/defense tech, robotics — physical supply chains AI cannot replicate.
-   - MEDIUM: Complex vertical SaaS with deep integrations, proprietary data moats, specialized industry software, ERP.
-   - HIGH: Generic horizontal SaaS — workflow tools, basic project management, email productivity, simple analytics, form builders.
+COMPONENT 4 — locationFit (0-15 points):
+  15: Remote US or explicitly in candidate's preferred locations
+  10: Hybrid with home office in candidate's preferred region
+  5:  Requires relocation but Top Target company
+  0:  On-site only far from preferences
 
-5. subScores (each 0-10):
-   - roleFit: Does the title/responsibilities precisely match the candidate's target roles AND their experience level? 10=exact title+level match, 5=partial, 0=wrong type.
-   - companyQuality: Company reputation, financial health, growth stage. 10=elite/public/unicorn, 5=solid mid-market, 2=tiny unknown.
-   - locationFit: Remote/location match against candidate preferences. 10=perfect, 0=wrong region, no remote.
-   - hiringUrgency: Signs of real active hiring vs evergreen pipeline posting. 10=specific team context, 0=generic template.
-   - tailoringRequired: 10=candidate's background is a natural fit (minimal resume work), 0=significant gap (major tailoring needed).
-   - referralOdds: Likelihood of finding a warm referral. 10=large well-known company, 0=tiny obscure startup.
-   - realVsFake: Confidence this is a genuine currently-open role. 10=specific unique JD, 0=generic evergreen template.
-   - qualificationFit: How well does the candidate's ACTUAL background from the resume match what this JD requires? Consider: industry experience, past title level, deal sizes, methodologies, product types sold. 10=highly qualified (has done this exact work before), 5=transferable skills with some gap, 0=significant qualification mismatch.
+COMPONENT 5 — territoryFit (0-10 points):
+  If no territory indicator in title or description: score 7 (neutral default).
+  10: Territory matches AND candidate has relevant regional experience
+  7:  No territory requirement (fully remote/flexible)
+  4:  Territory mentioned but candidate could transition
+  0:  Hard geographic territory requirement outside candidate's area
 
-LOCATION NOTE: "Remote" alone = work from anywhere. "Remote, [City]" means must live near that city. Score locationFit 2-4 if city doesn't match candidate's locations.
+ADDITIONAL FIELDS:
+  realVsFake (0-10): Confidence this is a genuine open role. 10=specific unique JD, 0=generic evergreen template. This is a hard-skip gate and NOT added to matchScore.
+  isHardware: true if company sells physical hardware, semiconductors, networking equipment, or industrial machinery.
+  aiRisk: LOW=physical supply chain/hardware; MEDIUM=complex vertical SaaS with moats; HIGH=generic horizontal SaaS easily replaced.
+
+LOCATION NOTE: "Remote" alone = anywhere. "Remote, [City]" = must live near that city.
 
 ═══════════════════════════════════════════════════
 REQUIRED OUTPUT — JSON ONLY, NO MARKDOWN
 ═══════════════════════════════════════════════════
 {
-  "matchScore": <0-100 integer>,
-  "whyGoodFit": "<2-3 sentences that SPECIFICALLY reference the candidate's background and why this role does or doesn't fit — mention their past titles, industries, or specific experience. Not generic statements.>",
-  "isMatch": <true if matchScore >= 60, else false>,
+  "roleFit": <0-30>,
+  "companyQuality": <0-25>,
+  "compensationFit": <0-20>,
+  "locationFit": <0-15>,
+  "territoryFit": <0-10>,
+  "realVsFake": <0-10>,
+  "whyGoodFit": "<2-3 sentences referencing the candidate's background specifically — past titles, industries, experience — and why this role does or does not fit. Not generic.>",
   "isHardware": <true | false>,
   "aiRisk": <"LOW" | "MEDIUM" | "HIGH">,
-  "aiRiskReason": "<one sentence on AI displacement risk for this company's product>",
-  "subScores": {
-    "roleFit": <0-10>,
-    "companyQuality": <0-10>,
-    "locationFit": <0-10>,
-    "hiringUrgency": <0-10>,
-    "tailoringRequired": <0-10>,
-    "referralOdds": <0-10>,
-    "realVsFake": <0-10>,
-    "qualificationFit": <0-10>
-  }
+  "aiRiskReason": "<one sentence on AI displacement risk>"
 }`;
 
     const message = await anthropic.messages.create({
       model: 'claude-haiku-4-5',
-      max_tokens: 900,
+      max_tokens: 700,
       messages: [{ role: 'user', content: prompt }],
     });
 
@@ -185,50 +339,56 @@ REQUIRED OUTPUT — JSON ONLY, NO MARKDOWN
 
     const text = block.text.trim().replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(text) as {
-      matchScore: number;
-      whyGoodFit: string;
-      isMatch: boolean;
+      roleFit?: number;
+      companyQuality?: number;
+      compensationFit?: number;
+      locationFit?: number;
+      territoryFit?: number;
+      realVsFake?: number;
+      whyGoodFit?: string;
       isHardware?: boolean;
       aiRisk?: 'LOW' | 'MEDIUM' | 'HIGH';
       aiRiskReason?: string;
-      subScores?: {
-        roleFit?: number;
-        companyQuality?: number;
-        locationFit?: number;
-        hiringUrgency?: number;
-        tailoringRequired?: number;
-        referralOdds?: number;
-        realVsFake?: number;
-        qualificationFit?: number;
-      };
     };
 
-    if (!parsed.isMatch) {
-      if (parsed.matchScore >= 30) {
+    // Clamp components to their valid ranges
+    const roleFit         = Math.min(30, Math.max(0, Math.round(parsed.roleFit ?? 12)));
+    const companyQuality  = Math.min(25, Math.max(0, Math.round(parsed.companyQuality ?? 10)));
+    const compensationFit = Math.min(20, Math.max(0, Math.round(parsed.compensationFit ?? 10)));
+    const locationFit     = Math.min(15, Math.max(0, Math.round(parsed.locationFit ?? 7)));
+    const territoryFit    = Math.min(10, Math.max(0, Math.round(parsed.territoryFit ?? 7)));
+    const realVsFake      = Math.min(10, Math.max(0, Math.round(parsed.realVsFake ?? 6)));
+
+    // matchScore is the deterministic sum of the 5 components
+    const matchScore = roleFit + companyQuality + compensationFit + locationFit + territoryFit;
+
+    const subScores: SubScores = {
+      roleFit,
+      companyQuality,
+      compensationFit,
+      locationFit,
+      territoryFit,
+      realVsFake,
+    };
+
+    // Hard pre-filter: below stretch threshold or clearly fake
+    const isMatch = matchScore >= 35 && realVsFake >= 4;
+
+    if (!isMatch) {
+      if (matchScore >= 25) {
         const riskTag = parsed.aiRisk ? ` [${parsed.aiRisk} risk]` : '';
-        console.log(`  ✗ Rejected (${parsed.matchScore})${riskTag}: ${job.company} — "${job.title}" — ${parsed.whyGoodFit?.slice(0, 80)}`);
+        console.log(`  ✗ Rejected (${matchScore})${riskTag}: ${job.company} — "${job.title}" — ${parsed.whyGoodFit?.slice(0, 80)}`);
       }
       return null;
     }
 
-    const subScores: SubScores = {
-      roleFit:            Math.min(10, Math.max(0, parsed.subScores?.roleFit ?? 5)),
-      companyQuality:     Math.min(10, Math.max(0, parsed.subScores?.companyQuality ?? 5)),
-      locationFit:        Math.min(10, Math.max(0, parsed.subScores?.locationFit ?? 5)),
-      hiringUrgency:      Math.min(10, Math.max(0, parsed.subScores?.hiringUrgency ?? 5)),
-      tailoringRequired:  Math.min(10, Math.max(0, parsed.subScores?.tailoringRequired ?? 5)),
-      referralOdds:       Math.min(10, Math.max(0, parsed.subScores?.referralOdds ?? 5)),
-      realVsFake:         Math.min(10, Math.max(0, parsed.subScores?.realVsFake ?? 5)),
-      qualificationFit:   Math.min(10, Math.max(0, parsed.subScores?.qualificationFit ?? 5)),
-    };
-
-    // Tier is ALWAYS computed from user settings — Claude does not assign tier.
+    // Tier is ALWAYS computed deterministically — Claude does not assign tier.
     const tier: OpportunityTier = computeTier(
-      parsed.matchScore, parsed.aiRisk ?? 'unknown', subScores,
+      matchScore, parsed.aiRisk ?? 'unknown', subScores,
       job.title, job.company, job.location, tierSettings
     );
 
-    console.log(`  ✓ Match (${parsed.matchScore}) [${tier}] [AI:${parsed.aiRisk ?? '?'}]: ${job.company} — "${job.title}"`);
+    console.log(`  ✓ Match (${matchScore}) [${tier}] [AI:${parsed.aiRisk ?? '?'}]: ${job.company} — "${job.title}"`);
 
     return {
       title: job.title,
@@ -236,8 +396,8 @@ REQUIRED OUTPUT — JSON ONLY, NO MARKDOWN
       location: job.location,
       salary: job.salary,
       applyUrl: job.applyUrl,
-      whyGoodFit: parsed.whyGoodFit,
-      matchScore: parsed.matchScore,
+      whyGoodFit: parsed.whyGoodFit ?? '',
+      matchScore,
       isHardware: parsed.isHardware ?? false,
       aiRisk: parsed.aiRisk ?? 'unknown',
       aiRiskReason: parsed.aiRiskReason ?? '',
@@ -252,9 +412,9 @@ REQUIRED OUTPUT — JSON ONLY, NO MARKDOWN
 // Settings that control tier classification — all user-configurable
 export interface TierSettings {
   verticalNiches?: string[];    // Title keywords that signal above-level niche specialization
-  topTargetScore?: number;      // Min match score for Top Target (default 65)
-  fastWinScore?: number;        // Min match score for Fast Win (default 55)
-  stretchScore?: number;        // Min match score for Stretch Role (default 55)
+  topTargetScore?: number;      // Min match score for Top Target (default 80)
+  fastWinScore?: number;        // Min match score for Fast Win (default 65)
+  stretchScore?: number;        // Min match score for Stretch Role (default 45)
   experienceLevels?: string[];  // Array of: 'junior' | 'mid' | 'senior' | 'strategic'
 }
 
@@ -265,9 +425,17 @@ export interface TierSettings {
 // strategic=3: Strategic, Sr.Enterprise, Strategic Enterprise, Account Director
 const LEVEL_RANK: Record<string, number> = { junior: 0, mid: 1, senior: 2, strategic: 3 };
 
+const DEFAULT_VERTICAL_NICHES = ['federal', 'government', 'sled', 'fsi', 'dod', 'defense', 'navy', 'army', 'air force', 'marines', 'public sector', 'healthcare', 'health system', 'life sciences', 'pharma', 'pharmaceutical', 'banking', 'financial services', 'insurance', 'education', 'k-12', 'higher ed', 'gsi', 'hyperscaler', 'hyperscale'];
 
-const DEFAULT_VERTICAL_NICHES   = ['federal', 'government', 'sled', 'fsi', 'dod', 'defense', 'navy', 'army', 'air force', 'marines', 'public sector', 'healthcare', 'health system', 'life sciences', 'pharma', 'pharmaceutical', 'banking', 'financial services', 'insurance', 'education', 'k-12', 'higher ed', 'gsi', 'hyperscaler', 'hyperscale'];
-
+// ─────────────────────────────────────────────────────────────────────────────
+// computeTier — deterministic tier assignment
+//
+// Handles two sub-score formats automatically:
+//   v2 (new): sub_scores has `compensationFit` — uses 80/65/45 thresholds
+//   v1 (old): no `compensationFit` — uses legacy 65/55/45 thresholds
+//
+// Location filtering is done EXTERNALLY by checkJobLocation() before this call.
+// ─────────────────────────────────────────────────────────────────────────────
 export function computeTier(
   matchScore: number,
   aiRisk: string,
@@ -277,38 +445,96 @@ export function computeTier(
   location = '',
   settings?: TierSettings,
 ): OpportunityTier {
-  // === HARD SKIPS ===
+  void company;
+  void location;
+
+  const isNewFormat = (s as unknown as Record<string, unknown>).compensationFit !== undefined;
+
+  // ── HARD SKIPS (both formats) ─────────────────────────────────────────────
   if (aiRisk === 'HIGH') return 'Probably Skip';
-  if (s.realVsFake < 5) return 'Probably Skip';
-  if (matchScore < 50) return 'Probably Skip';
+  if (s.realVsFake < 4) return 'Probably Skip';
 
-  // NOTE: Location filtering is handled EXTERNALLY by checkJobLocation() before this function is called.
-  // computeTier() should never block based on isRemote — that is the location filter's job.
+  // ── NEW FORMAT (v2 — 5-component scoring, 0-100 is sum of components) ─────
+  if (isNewFormat) {
+    const topTargetScore = settings?.topTargetScore ?? 80;
+    const fastWinScore   = settings?.fastWinScore   ?? 65;
+    const stretchScore   = settings?.stretchScore   ?? 45;
 
-  // === USER-CONFIGURABLE THRESHOLDS ===
+    if (matchScore < stretchScore) return 'Probably Skip';
+
+    // Vertical niche / above-level detection (same as v1)
+    const nicheList = (settings?.verticalNiches && settings.verticalNiches.length > 0)
+      ? settings.verticalNiches.map((n) => n.toLowerCase().trim())
+      : DEFAULT_VERTICAL_NICHES;
+    const hasVerticalNiche = nicheList.some((niche) => {
+      const escaped = niche.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`\\b${escaped}\\b`, 'i').test(title.toLowerCase());
+    });
+
+    const expLevels = (settings?.experienceLevels && settings.experienceLevels.length > 0)
+      ? settings.experienceLevels : ['senior'];
+    const maxRank = Math.max(...expLevels.map((l) => LEVEL_RANK[l] ?? 2));
+
+    const isStrategic    = /\b(strategic|major|majors)\b/i.test(title);
+    const isDirector     = /\b(director|rvp\b|vice president|vp\b)\b/i.test(title);
+    const isPrincipal    = /\bprincipal\b/i.test(title);
+    const isNamedAE      = /\bnamed\b/i.test(title);
+    const isSenior       = /\b(senior|sr\.?)\b/i.test(title);
+    const hasEnterprise  = /\benterprise\b/i.test(title);
+    const isSrEnterprise = isSenior && hasEnterprise;
+
+    const namedAbove        = maxRank < 2 ? isNamedAE      : false;
+    const enterpriseAbove   = maxRank < 2 ? hasEnterprise   : false;
+    const srEnterpriseAbove = maxRank < 3 ? isSrEnterprise  : false;
+    const strategicAbove    = maxRank < 3 ? isStrategic     : false;
+    const directorAbove     = maxRank < 3 ? isDirector      : false;
+    const principalAbove    = isPrincipal;
+
+    const isAboveLevel = namedAbove || enterpriseAbove || srEnterpriseAbove ||
+      strategicAbove || directorAbove || principalAbove || hasVerticalNiche;
+
+    // STRETCH: above user's level
+    if (isAboveLevel && matchScore >= stretchScore) return 'Stretch Role';
+
+    // Component gates for Top Target (v2 specific)
+    const strongRole    = s.roleFit >= 20;        // out of 30
+    const strongCompany = s.companyQuality >= 15;  // out of 25
+    const okComp        = s.compensationFit >= 10; // out of 20 (unknown = 10, so not penalized)
+
+    // TOP TARGET: high score + strong components + not above level
+    if (!isAboveLevel && matchScore >= topTargetScore && strongRole && strongCompany && okComp && s.realVsFake >= 5) {
+      return 'Top Target';
+    }
+
+    // FAST WIN: solid score
+    if (matchScore >= fastWinScore && s.realVsFake >= 5) return 'Fast Win';
+
+    // STRETCH fallback
+    if (matchScore >= stretchScore && s.realVsFake >= 4) return 'Stretch Role';
+
+    return 'Probably Skip';
+  }
+
+  // ── LEGACY FORMAT (v1 — 0-10 sub-score scale) ────────────────────────────
   const topTargetScore = settings?.topTargetScore ?? 65;
   const fastWinScore   = settings?.fastWinScore   ?? 55;
   const stretchScore   = settings?.stretchScore   ?? 55;
 
-  // === VERTICAL NICHE CHECK (user-configurable) ===
+  if (s.realVsFake < 5) return 'Probably Skip';
+  if (matchScore < 50) return 'Probably Skip';
+
   const nicheList = (settings?.verticalNiches && settings.verticalNiches.length > 0)
     ? settings.verticalNiches.map((n) => n.toLowerCase().trim())
     : DEFAULT_VERTICAL_NICHES;
-  const titleLower = title.toLowerCase();
   const hasVerticalNiche = nicheList.some((niche) => {
     const escaped = niche.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`\\b${escaped}\\b`, 'i').test(titleLower);
+    return new RegExp(`\\b${escaped}\\b`, 'i').test(title.toLowerCase());
   });
 
-  // === EXPERIENCE LEVEL CONFIGURATION ===
-  // Determine the highest selected level — that sets the ceiling for what's "accessible"
   const expLevels = (settings?.experienceLevels && settings.experienceLevels.length > 0)
-    ? settings.experienceLevels
-    : ['senior'];
-  const maxRank = Math.max(...expLevels.map((l) => LEVEL_RANK[l] ?? 2)); // default to senior (2)
+    ? settings.experienceLevels : ['senior'];
+  const maxRank = Math.max(...expLevels.map((l) => LEVEL_RANK[l] ?? 2));
 
-  // === ROLE TITLE ANALYSIS ===
-  // Strategic-level titles include "Major" / "Majors" accounts roles in addition to Strategic/Sr.Enterprise/Account Director
   const isStrategic    = /\b(strategic|major|majors)\b/i.test(title);
   const isDirector     = /\b(director|rvp\b|vice president|vp\b)\b/i.test(title);
   const isPrincipal    = /\bprincipal\b/i.test(title);
@@ -317,73 +543,41 @@ export function computeTier(
   const hasEnterprise  = /\benterprise\b/i.test(title);
   const isSrEnterprise = isSenior && hasEnterprise;
 
-  // Signals that a role is ABOVE the user's current experience level — 4-tier model:
-  //   junior (0):   SMB / commercial at mid-tier; Enterprise, Named, Sr.Enterprise, Strategic, Director all above
-  //   mid (1):      Commercial-good, Corporate, MM accessible; Enterprise, Named, Sr.Enterprise, Strategic, Director above
-  //   senior (2):   Sr./Senior, Named, Enterprise accessible; Sr.Enterprise, Strategic, Director above
-  //   strategic (3): Strategic, Sr.Enterprise, Account Director accessible; very little above
-  const namedAbove        = maxRank < 2 ? isNamedAE    : false; // Named: above for junior/mid; accessible at senior+
-  const enterpriseAbove   = maxRank < 2 ? hasEnterprise : false; // Enterprise: above for junior/mid; accessible at senior+
-  const srEnterpriseAbove = maxRank < 3 ? isSrEnterprise : false; // Sr.Enterprise: above below strategic; accessible at strategic
-  const strategicAbove    = maxRank < 3 ? isStrategic  : false; // Strategic: above below strategic level; accessible at strategic
-  const directorAbove     = maxRank < 3 ? isDirector   : false; // Acct Director / RVP: above below strategic; accessible at strategic
-  const principalAbove    = isPrincipal;                          // always above (IC track, not AE path)
+  const namedAbove        = maxRank < 2 ? isNamedAE      : false;
+  const enterpriseAbove   = maxRank < 2 ? hasEnterprise   : false;
+  const srEnterpriseAbove = maxRank < 3 ? isSrEnterprise  : false;
+  const strategicAbove    = maxRank < 3 ? isStrategic     : false;
+  const directorAbove     = maxRank < 3 ? isDirector      : false;
+  const principalAbove    = isPrincipal;
 
-  // Signals that a role is ABOVE the user's current experience level
   const isAboveLevel = namedAbove || enterpriseAbove || srEnterpriseAbove ||
     strategicAbove || directorAbove || principalAbove || hasVerticalNiche;
-
-  // Role type modifiers — used to distinguish Top Target vs Fast Win, not for access gating
-  // Any role not above level is considered accessible (catch-all — we rely on title filter upstream)
   const isAccessibleRole = !isAboveLevel;
 
-  // Role types that typically have lower applicant competition → easier wins
-  const hasCommercial  = /\bcommercial\b/i.test(title);
-  const hasMidMarket   = /\b(mid[.\s-]?market|midmarket)\b/i.test(title);
-  const hasCorporate   = /\bcorporate\b/i.test(title);
-  const hasLowerBar    = hasCommercial || hasMidMarket || hasCorporate;
+  const hasCommercial = /\bcommercial\b/i.test(title);
+  const hasMidMarket  = /\b(mid[.\s-]?market|midmarket)\b/i.test(title);
+  const hasCorporate  = /\bcorporate\b/i.test(title);
+  const hasLowerBar   = hasCommercial || hasMidMarket || hasCorporate;
 
-  // === TIER ASSIGNMENT ===
+  if (isAboveLevel && matchScore >= stretchScore && s.realVsFake >= 5) return 'Stretch Role';
 
-  // STRETCH: Title signals above user's configured experience level
-  if (isAboveLevel && matchScore >= stretchScore && s.realVsFake >= 5) {
-    return 'Stretch Role';
-  }
+  const isQualityCompany = s.companyQuality >= 7;
+  const goodRoleFit      = s.roleFit >= 6;
+  const qualFitRaw       = s.qualificationFit;
+  const qualFitKnown     = qualFitRaw !== undefined && qualFitRaw !== null;
+  const qualFit          = qualFitRaw ?? 7;
+  const strongQualFit    = !qualFitKnown || qualFit >= 7;
+  const weakQualFit      = qualFitKnown && qualFit < 4;
 
-  const isQualityCompany  = s.companyQuality >= 7;
-  const goodRoleFit       = s.roleFit >= 6;
-  // qualificationFit is a new field — legacy jobs (scored before this feature) have it undefined.
-  // When undefined, do NOT apply any qualification gates so existing jobs are never downgraded.
-  const qualFitRaw      = s.qualificationFit;
-  const qualFitKnown    = qualFitRaw !== undefined && qualFitRaw !== null;
-  const qualFit         = qualFitRaw ?? 7; // treat legacy as "well qualified" — no penalty
-  const strongQualFit   = !qualFitKnown || qualFit >= 7;
-  const weakQualFit     = qualFitKnown && qualFit < 4;
-
-  // Hard downgrade: candidate is significantly underqualified (only applied when score is known)
   if (weakQualFit && matchScore < topTargetScore) return 'Probably Skip';
 
-  // TOP TARGET: Accessible role + high score + quality company + strong role fit
-  // qualificationFit gate is only applied when the score was actually computed
   if (isAccessibleRole && matchScore >= topTargetScore && isQualityCompany && goodRoleFit &&
-      s.realVsFake >= 6 && (strongQualFit || qualFit >= 6)) {
-    return 'Top Target';
-  }
+      s.realVsFake >= 6 && (strongQualFit || qualFit >= 6)) return 'Top Target';
 
-  // FAST WIN: Lower-competition role type OR strong accessible role with solid score
-  if (isAccessibleRole && hasLowerBar && matchScore >= fastWinScore && s.realVsFake >= 5) {
-    return 'Fast Win';
-  }
-  if (isAccessibleRole && matchScore >= (fastWinScore + 5) && s.realVsFake >= 5) {
-    return 'Fast Win';
-  }
+  if (isAccessibleRole && hasLowerBar && matchScore >= fastWinScore && s.realVsFake >= 5) return 'Fast Win';
+  if (isAccessibleRole && matchScore >= (fastWinScore + 5) && s.realVsFake >= 5) return 'Fast Win';
 
-  // TOP TARGET fallback: above-level role but strong enough to be worth it
-  if (isAboveLevel && matchScore >= topTargetScore && isQualityCompany && s.realVsFake >= 6) {
-    return 'Stretch Role';
-  }
-
-  // STRETCH fallback: decent score, not disqualified
+  if (isAboveLevel && matchScore >= topTargetScore && isQualityCompany && s.realVsFake >= 6) return 'Stretch Role';
   if (matchScore >= stretchScore && s.realVsFake >= 5) return 'Stretch Role';
 
   return 'Probably Skip';
@@ -503,7 +697,11 @@ export async function filterUnsafeCompanies(
   });
 }
 
-export async function scoreJobsWithClaude(jobs: ScrapedJob[], criteria: CriteriaForAgent): Promise<JobMatch[]> {
+export async function scoreJobsWithClaude(
+  jobs: ScrapedJob[],
+  criteria: CriteriaForAgent,
+  momentumMap?: Map<string, MomentumScore>,
+): Promise<JobMatch[]> {
   if (jobs.length === 0) return [];
 
   const criteriaText = [
@@ -537,14 +735,18 @@ Pre-approved companies: ${criteria.preApprovedCompanies.join(', ')}`;
     const batch = jobs.slice(i, i + CONCURRENCY);
     console.log(`Scoring batch ${Math.floor(i / CONCURRENCY) + 1}/${Math.ceil(jobs.length / CONCURRENCY)} (${batch.length} jobs)...`);
     const batchResults = await Promise.all(
-      batch.map((j) => scoreOne(
-        j, criteriaText, preApprovedSection,
-        criteria.preApprovedCompanies ?? [],
-        criteria.tierSettings,
-        criteria.minSalary,
-        criteria.candidateResume,
-        criteria.minOte,
-      ))
+      batch.map((j) => {
+        const momentum = momentumMap?.get(j.company.toLowerCase().trim()) ?? null;
+        return scoreOne(
+          j, criteriaText, preApprovedSection,
+          criteria.preApprovedCompanies ?? [],
+          criteria.tierSettings,
+          criteria.minSalary,
+          criteria.candidateResume,
+          criteria.minOte,
+          momentum,
+        );
+      })
     );
     for (const r of batchResults) {
       if (r !== null) results.push(r);

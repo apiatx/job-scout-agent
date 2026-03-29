@@ -1,0 +1,224 @@
+I need you to rebuild the job scoring and categorization logic for the main Jobs page. Do NOT rebuild the scraping pipeline, the database schema, or the UI tabs — those are fine. Only fix the scoring logic that categorizes jobs into Top Targets, Fast Wins, Stretch, Probably Pass, and All.
+
+The current problem: good jobs are ending up in Probably Pass, bad or irrelevant jobs are ending up in Top Targets, pay range is being ignored, and the agent has no intelligence about which companies are actually worth targeting right now beyond what the user explicitly listed.
+
+Read these files completely before making any changes:
+- artifacts/api-server/src/lib/agent.ts
+- artifacts/api-server/src/lib/scraper.ts
+- artifacts/api-server/src/routes/scout.ts
+- artifacts/api-server/src/index.ts
+
+Understand the full current scoring flow end to end, then apply the fixes below. Do not guess — read the actual code first.
+
+## THE NEW SCORING SYSTEM
+
+Every job that reaches Claude scoring must receive a composite score from 0-100 made up of these weighted components:
+
+COMPONENT 1 — Role Fit (30 points max)
+Does the role title and seniority match what the user is looking for?
+- Exact match on target role title: 30 points
+- Close match (same level, slightly different title): 20 points
+- Related role that makes sense given resume: 10 points
+- Wrong level (too junior or too senior): 5 points
+- Completely wrong role type: 0 points
+
+Read target roles from user settings table. Do not hardcode.
+
+COMPONENT 2 — Company Quality Score (25 points max)
+This is the intelligence layer. Claude must evaluate the company itself, not just the job.
+
+25 points — Pre-approved company on user's companies list AND company is currently in a high-growth, high-momentum phase (recent funding, expanding sales team, strong product-market fit, AI-era tailwind)
+
+20 points — Pre-approved company on user's companies list, solid established company
+
+15 points — Not on user's list but passes isCompanySafe() check AND shows strong hiring momentum signals
+
+10 points — Not on user's list, safe company, no particular momentum signal
+
+0 points — Pure SaaS with AI disruption risk, or company shows layoff signals, or company is in decline
+
+To evaluate company momentum for non-pre-approved companies, Claude must consider:
+- Is this company expanding its sales org right now or contracting?
+- Does this company sell something that AI makes MORE valuable, not less?
+- Is there recent funding, IPO activity, major partnership, or customer expansion news?
+- Is the product in a category that is growing because of AI infrastructure demand?
+
+Use the Gemini API which is already integrated to search for company momentum signals when evaluating non-pre-approved companies. Query: "[COMPANY NAME] hiring expansion funding 2025 2026 sales growth"
+
+COMPONENT 3 — Compensation Fit (20 points max)
+Read minimum base pay from user settings table.
+
+20 points — Salary listed and clearly meets or exceeds user minimum base
+15 points — Salary listed and is within 10% below user minimum (close enough)
+10 points — No salary listed but company is known to pay above user minimum for this role type (use Gemini to estimate if salary_estimates table has no cached data)
+5 points — No salary listed and company comp is unclear
+0 points — Salary listed and is clearly below user minimum base
+
+For OTE estimation when salary is not listed:
+Use the salary_estimates table if a fresh estimate exists (under 7 days old).
+If not, use Gemini to search: "[COMPANY NAME] [JOB TITLE] base salary OTE 2025 2026 Glassdoor LinkedIn"
+Store result in salary_estimates table for future use.
+Display both base AND OTE on every job card — if estimated show "~" prefix.
+
+COMPONENT 4 — Location Fit (15 points max)
+Read locations from user settings table. This is a SCORING factor not a hard filter — do not exclude jobs based on location, just score them lower.
+
+15 points — Remote US with no state restriction, or explicitly in one of user's preferred locations
+10 points — Hybrid with home office in user's preferred region
+5 points — Requires relocation to a state not in user preferences but is a Top Target company
+0 points — On-site only in a location far from user preferences with no remote option
+
+COMPONENT 5 — Territory Intelligence (10 points max)
+This is new. If the job title contains a geographic territory indicator (Southeast, Northeast, Mid-Atlantic, SLED, Federal, etc.):
+
+10 points — Territory matches user's preferred locations AND user's resume shows relevant experience in that territory
+7 points — Territory matches user's preferred locations
+3 points — Territory does not match but role could transition to user's region
+0 points — Territory is a hard geographic requirement far from user preferences
+
+If no territory is detected in the title, give 7 points by default (neutral).
+
+## CATEGORY THRESHOLDS
+
+After calculating total score 0-100, assign category:
+
+TOP TARGETS: score 80-100
+Requirements to qualify:
+- Component 1 (Role Fit) must be at least 20/30
+- Component 3 (Compensation) must be at least 10/20
+- Component 2 (Company Quality) must be at least 15/25
+- These are jobs the user should apply to immediately
+
+FAST WINS: score 65-79
+- Strong fit on role and compensation
+- Company may not be pre-approved but passes safety check
+- Good opportunity, apply within the week
+
+STRETCH: score 45-64
+- Either the role is slightly off, pay is unclear, or location is not ideal
+- Worth reviewing — user may have context that bumps it up
+- Do not discard these — some of the best opportunities are here
+
+PROBABLY PASS: score 0-44
+- Multiple components are weak
+- Only show these if the user explicitly wants to see them
+- Default to hidden or collapsed
+
+## COMPANY MOMENTUM INTELLIGENCE — THE BRAIN LAYER
+
+This is the most important addition. Before running Claude scoring on any job, run a company momentum check for every unique company in the current scout run.
+
+Create function getCompanyMomentum(companyName: string): Promise<MomentumScore>
+
+MomentumScore:
+{
+  score: number (0-25, feeds directly into Component 2),
+  signals: string[],
+  warning: string | null,
+  cached: boolean
+}
+
+Cache in a company_momentum table:
+CREATE TABLE IF NOT EXISTS company_momentum (
+  id SERIAL PRIMARY KEY,
+  company_name TEXT NOT NULL,
+  momentum_score INTEGER NOT NULL,
+  signals JSONB,
+  warning TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+Cache is valid for 48 hours.
+
+For pre-approved companies in user's companies table:
+- Start with base score of 20 (user already vetted them)
+- Use Gemini to check for positive signals: recent funding, product launch, sales team expansion, AI strategy announcement = boost to 25
+- Check for negative signals: layoffs, revenue miss, product discontinuation, leadership exodus = reduce to 15 or lower
+- Query: "[COMPANY NAME] news 2025 2026 hiring layoffs funding growth"
+
+For non-pre-approved companies from JobSpy:
+- Start with base score of 10
+- Run isCompanySafe() check — if false, score drops to 0 immediately
+- If safe, use Gemini to check momentum signals
+- Strong positive signals: boost to 15-20
+- No signals either way: stay at 10
+
+POSITIVE momentum signals (boost score):
+- Series B or later funding in last 18 months
+- IPO filed or rumored
+- Major enterprise customer announced
+- Expanding sales team (multiple AE roles posted simultaneously)
+- Strategic partnership with hyperscaler (AWS, Google, Azure, NVIDIA)
+- Product launch in AI infrastructure, networking, semiconductor, or energy space
+- Revenue growth announced
+- Analyst recognition (Gartner Magic Quadrant, Forrester Wave)
+
+NEGATIVE momentum signals (reduce score or flag warning):
+- Layoffs announced in last 12 months
+- CEO/CRO departure without replacement announced
+- Revenue miss or guidance cut
+- Category disruption by AI (especially if their core product is being replaced)
+- Multiple negative Glassdoor reviews about comp cuts or quota changes
+- Company acquired and going through integration (uncertain territory)
+
+Display warning flags on job cards when negative signals are detected. Example: "⚠️ Recent layoffs reported" or "⚠️ Leadership transition" in a muted orange color.
+
+## JOB CARD DISPLAY UPDATES
+
+Every job card must show:
+
+1. Category badge: TOP TARGET / FAST WIN / STRETCH / PROBABLY PASS with appropriate color
+2. Composite score: X/100 with a breakdown tooltip showing all 5 component scores
+3. Compensation: Base range and OTE range — listed or estimated with ~ prefix
+4. Company momentum badge: 🔥 Hot (score 20-25) | ✓ Solid (15-19) | ~ Unclear (10-14) | ⚠️ Flagged (0-9)
+5. Territory match indicator if applicable: "📍 Southeast Match" in green if territory aligns with user preferences
+6. Why it's categorized here: 1-2 sentence explanation visible on the card — not hidden in a modal
+
+## SETTINGS INTEGRATION
+
+Read ALL of the following from the settings table at the start of every scout run. Do not hardcode any values:
+- target_roles
+- locations
+- min_salary (base)
+- industries
+- must_have_keywords
+- nice_to_have_keywords
+- avoid_keywords
+- work_type (remote/hybrid/any)
+- document_model (for any Claude calls)
+
+If any setting is missing from the database, use the hardcoded defaults that are already seeded. Log which settings were read from DB vs defaults so we can debug if something is wrong.
+
+## GEMINI USAGE
+
+Gemini is already integrated. Use it for:
+1. Company momentum searches (faster and cheaper than Claude for web search)
+2. Salary estimation when not in cache
+3. Territory intelligence searches
+
+Use Claude for:
+1. Final scoring decisions (needs judgment, not just search)
+2. Cover letter and resume generation (already built)
+3. Company safety check isCompanySafe()
+
+This split keeps costs down and uses each model for what it does best.
+
+## WHAT NOT TO CHANGE
+
+- Do not touch the scraping pipeline (JobSpy, Greenhouse, Lever)
+- Do not touch the database schema for jobs, companies, or settings
+- Do not touch the UI tab structure (Top Targets, Fast Wins, Stretch, Probably Pass, All)
+- Do not touch the cover letter or resume tailoring features
+- Do not touch the research brief feature
+- Only change the scoring logic, categorization thresholds, and job card display
+
+## PERFORMANCE
+
+The new scoring adds more Claude and Gemini calls. Keep the scout run under 3 minutes by:
+- Running company momentum checks in parallel for all unique companies before scoring begins
+- Caching momentum scores aggressively (48 hours)
+- Running Claude job scoring in batches of 10 with concurrency 5
+- Running Gemini salary estimates in parallel for jobs missing salary data
+- Never making a redundant API call for the same company in the same scout run
+
+Push to main when complete.

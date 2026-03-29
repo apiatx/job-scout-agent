@@ -17,7 +17,8 @@ import {
   getOutputs, generateOutputs, getObjections, generateObjections,
   getNarrative, saveNarrative, draftNarrative
 } from './positioning.js';
-import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier, generateCoverLetterWithClaude, tailorResumeV2WithClaude, detectTerritory, analyzeTerritoryContext } from './agent.js';
+import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier, generateCoverLetterWithClaude, tailorResumeV2WithClaude, detectTerritory, analyzeTerritoryContext, getCompanyMomentum } from './agent.js';
+import type { MomentumScore } from './agent.js';
 import type { SubScores, OpportunityTier, TierSettings, TailoringAnalysis } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
 // RepVue: link-out only (no scraping — RepVue blocks automated requests)
@@ -304,6 +305,15 @@ async function initDb(): Promise<void> {
       ats_research       TEXT,
       created_at         TIMESTAMP DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS company_momentum (
+      id            SERIAL PRIMARY KEY,
+      company_name  TEXT NOT NULL,
+      momentum_score INT NOT NULL DEFAULT 10,
+      signals       JSONB NOT NULL DEFAULT '[]',
+      warning       TEXT,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
 
   await initPositioningDB(pool);
@@ -378,6 +388,12 @@ async function initDb(): Promise<void> {
   // Gemini discovery columns — added when hybrid pipeline was introduced
   await safeAddColumn('jobs', 'gemini_grounding_metadata', 'JSONB');
   await safeAddColumn('jobs', 'ingestion_confidence', 'FLOAT');
+  await safeAddColumn('jobs', 'momentum_warning', 'TEXT');
+
+  // Index for fast momentum lookups by company name
+  try {
+    await pool.query('CREATE INDEX IF NOT EXISTS company_momentum_name_idx ON company_momentum (LOWER(company_name))');
+  } catch { /* ignore */ }
 
   // Deduplicate existing jobs — keep the most recent row per apply_url
   try {
@@ -1114,7 +1130,20 @@ app.get('/api/jobs', async (req: Request, res: Response) => {
     } : { target_roles: [], must_have: [], nice_to_have: [], locations: [], work_type: 'any', min_salary: null, avoid: [] };
 
     const { rows } = await pool.query(
-      `SELECT * FROM jobs WHERE match_score >= $1 ORDER BY ${sort}`,
+      `SELECT j.*,
+              cm.momentum_score AS momentum_score,
+              cm.signals        AS momentum_signals
+       FROM jobs j
+       LEFT JOIN LATERAL (
+         SELECT momentum_score, signals
+         FROM company_momentum
+         WHERE LOWER(company_name) = LOWER(j.company)
+           AND created_at > NOW() - INTERVAL '48 hours'
+         ORDER BY created_at DESC
+         LIMIT 1
+       ) cm ON true
+       WHERE j.match_score >= $1
+       ORDER BY ${sort}`,
       [minScore]
     );
 
@@ -3054,6 +3083,70 @@ async function runScoutInBackground(runId: number): Promise<void> {
     const { rows: resumeSettingRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
     const candidateResume: string = resumeSettingRows[0]?.value ?? '';
 
+    // ── Company Momentum Pre-Check ──────────────────────────────────────────
+    // Run Gemini momentum check for all unique companies (in parallel, up to 10 at a time).
+    // Results feed directly into Claude's companyQuality scoring component.
+    const uniqueCompaniesForMomentum = Array.from(new Set(
+      newJobs.map(j => j.company.toLowerCase().trim())
+    ));
+
+    const momentumMap = new Map<string, MomentumScore>();
+    if (uniqueCompaniesForMomentum.length > 0) {
+      console.log(`\n──── MOMENTUM PRE-CHECK (${uniqueCompaniesForMomentum.length} companies) ──────────────────────────`);
+      await setStage(`Checking company momentum for ${uniqueCompaniesForMomentum.length} companies…`);
+
+      // Check DB cache first (48 h)
+      for (const rawName of uniqueCompaniesForMomentum) {
+        const realName = newJobs.find(j => j.company.toLowerCase().trim() === rawName)?.company ?? rawName;
+        try {
+          const { rows: cached } = await pool.query(
+            `SELECT momentum_score, signals, warning FROM company_momentum WHERE LOWER(company_name) = LOWER($1) AND created_at > NOW() - INTERVAL '48 hours' ORDER BY created_at DESC LIMIT 1`,
+            [realName]
+          );
+          if (cached.length > 0) {
+            const c = cached[0] as Record<string, unknown>;
+            const ms: MomentumScore = {
+              companyName: realName,
+              score: c.momentum_score as number,
+              signals: (c.signals ?? []) as string[],
+              warning: (c.warning ?? null) as string | null,
+              cached: true,
+            };
+            momentumMap.set(rawName, ms);
+            console.log(`  [Momentum] ${realName}: ${ms.score}/25 (DB cache)`);
+          }
+        } catch { /* DB not ready, skip cache */ }
+      }
+
+      // Run Gemini for companies not in cache (10 at a time)
+      const toFetch = uniqueCompaniesForMomentum.filter(k => !momentumMap.has(k));
+      const MOMENTUM_CONCURRENCY = 10;
+      for (let i = 0; i < toFetch.length; i += MOMENTUM_CONCURRENCY) {
+        const batch = toFetch.slice(i, i + MOMENTUM_CONCURRENCY);
+        const results = await Promise.allSettled(batch.map(async (rawName) => {
+          const realName = newJobs.find(j => j.company.toLowerCase().trim() === rawName)?.company ?? rawName;
+          const isPreApproved = companyNames.some(n => n.toLowerCase() === rawName);
+          const ms = await getCompanyMomentum(realName, isPreApproved);
+          momentumMap.set(rawName, ms);
+          // Persist to DB cache
+          try {
+            await pool.query(
+              `INSERT INTO company_momentum (company_name, momentum_score, signals, warning) VALUES ($1, $2, $3, $4)`,
+              [realName, ms.score, JSON.stringify(ms.signals), ms.warning]
+            );
+          } catch { /* ignore — non-critical */ }
+        }));
+        for (const r of results) {
+          if (r.status === 'rejected') console.log(`  [Momentum] Error: ${r.reason}`);
+        }
+      }
+
+      const warnings = Array.from(momentumMap.values()).filter(m => m.warning);
+      console.log(`  Momentum complete: ${momentumMap.size} companies checked, ${warnings.length} warnings`);
+      if (warnings.length) warnings.forEach(m => console.log(`    ⚠ ${m.companyName}: ${m.warning}`));
+      console.log(`───────────────────────────────────────────────────────────`);
+    }
+
     // Pass pre-approved company names from the database to Claude scoring
     // Only send genuinely new jobs (URLs not already in DB) to Claude
     const matches = await scoreJobsWithClaude(
@@ -3071,7 +3164,8 @@ async function runScoutInBackground(runId: number): Promise<void> {
         preApprovedCompanies: companyNames,
         tierSettings,
         candidateResume: candidateResume || undefined,
-      }
+      },
+      momentumMap,
     );
 
     console.log(`\n──── CLAUDE SCORING RESULTS ────────────────────────────────`);
@@ -3101,11 +3195,13 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
       // Look up Gemini-specific metadata for this job (if it came from Gemini)
       const geminiMeta = geminiMetaByUrl.get(m.applyUrl);
+      // Look up momentum warning for this company (if checked)
+      const momWarning = momentumMap.get(m.company.toLowerCase().trim())?.warning ?? null;
       await pool.query(
-        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
          ON CONFLICT (apply_url) DO NOTHING`,
-        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), geminiMeta?.groundingMetadata ? JSON.stringify(geminiMeta.groundingMetadata) : null, geminiMeta?.confidence ?? null]
+        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), geminiMeta?.groundingMetadata ? JSON.stringify(geminiMeta.groundingMetadata) : null, geminiMeta?.confidence ?? null, momWarning]
       );
     }
 
@@ -3488,6 +3584,7 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .card-tier-row{display:flex;align-items:center;justify-content:space-between;padding:13px 16px 0}
 .score-chip{font-size:19px;font-weight:800;color:var(--gold);line-height:1;min-width:36px;text-align:right}
 .score-chip.score-green{color:var(--green)}
+.score-chip.score-yellow{color:#f5c842}
 .score-chip.score-red{color:var(--red)}
 .card-title-block{padding:7px 16px 10px}
 .card-v2-title{font-size:15px;font-weight:700;line-height:1.3;color:var(--text)}
@@ -4940,28 +5037,43 @@ function tierBadgeHtml(j) {
   return '<span class="tier-badge ' + cls + '">' + icon + ' ' + esc(t) + '</span>';
 }
 
-function subScoreColor(v) {
-  if (v >= 8) return '#00c86e';
-  if (v >= 6) return '#f5c842';
-  if (v >= 4) return '#ff9f43';
+function subScoreColor(pct) {
+  if (pct >= 80) return '#00c86e';
+  if (pct >= 60) return '#f5c842';
+  if (pct >= 40) return '#ff9f43';
   return '#e55353';
 }
 
 function subScoresHtml(j) {
   if (!j.sub_scores) return '';
   var s = typeof j.sub_scores === 'string' ? JSON.parse(j.sub_scores) : j.sub_scores;
-  var dims = [
-    ['roleFit','Role Fit'],['qualificationFit','Qualification'],['companyQuality','Company'],
-    ['locationFit','Location'],['hiringUrgency','Hiring Urgency'],
-    ['tailoringRequired','Tailoring Needed'],['referralOdds','Referral Odds'],['realVsFake','Real vs Fake']
-  ];
+  var isNewFormat = s.compensationFit !== undefined;
   var rows = '';
-  for (var i = 0; i < dims.length; i++) {
-    var key = dims[i][0]; var label = dims[i][1];
-    var v = (s[key] !== undefined && s[key] !== null) ? Number(s[key]) : 5;
-    var pct = Math.round(v * 10);
-    var col = subScoreColor(v);
-    rows += '<div class="sub-score-row"><span class="sub-score-label">' + label + '</span><div class="sub-score-bar"><div class="sub-score-fill" style="width:' + pct + '%;background:' + col + '"></div></div><span class="sub-score-val">' + v + '</span></div>';
+  if (isNewFormat) {
+    var dims = [
+      ['roleFit','Role Fit',30],['companyQuality','Company',25],['compensationFit','Comp Fit',20],
+      ['locationFit','Location',15],['territoryFit','Territory',10],['realVsFake','Real Role',10]
+    ];
+    for (var i = 0; i < dims.length; i++) {
+      var key = dims[i][0]; var label = dims[i][1]; var max = dims[i][2];
+      var v = (s[key] !== undefined && s[key] !== null) ? Number(s[key]) : 0;
+      var pct = Math.round((v / max) * 100);
+      var col = subScoreColor(pct);
+      rows += '<div class="sub-score-row"><span class="sub-score-label">' + label + '</span><div class="sub-score-bar"><div class="sub-score-fill" style="width:' + pct + '%;background:' + col + '"></div></div><span class="sub-score-val">' + v + '/' + max + '</span></div>';
+    }
+  } else {
+    var legDims = [
+      ['roleFit','Role Fit'],['qualificationFit','Qualification'],['companyQuality','Company'],
+      ['locationFit','Location'],['hiringUrgency','Hiring Urgency'],
+      ['tailoringRequired','Tailoring Needed'],['referralOdds','Referral Odds'],['realVsFake','Real vs Fake']
+    ];
+    for (var li = 0; li < legDims.length; li++) {
+      var lkey = legDims[li][0]; var llabel = legDims[li][1];
+      var lv = (s[lkey] !== undefined && s[lkey] !== null) ? Number(s[lkey]) : 5;
+      var lpct = Math.round(lv * 10);
+      var lcol = subScoreColor(lpct);
+      rows += '<div class="sub-score-row"><span class="sub-score-label">' + llabel + '</span><div class="sub-score-bar"><div class="sub-score-fill" style="width:' + lpct + '%;background:' + lcol + '"></div></div><span class="sub-score-val">' + lv + '</span></div>';
+    }
   }
   return '<div class="sub-scores" id="ss-' + j.id + '"><div class="sub-score-grid">' + rows + '</div></div>';
 }
@@ -5028,8 +5140,8 @@ function renderJobCard(j, opts) {
   var saveLabel = isSaved ? '\u2605 Saved' : '\u2606 Save';
   var saveClass = isSaved ? 'save-btn saved' : 'save-btn';
 
-  // Score chip colour
-  var scoreChipClass = j.match_score >= 80 ? 'score-chip score-green' : j.match_score >= 50 ? 'score-chip' : 'score-chip score-red';
+  // Score chip colour — aligned with new tier thresholds (80/65/45)
+  var scoreChipClass = j.match_score >= 80 ? 'score-chip score-green' : j.match_score >= 65 ? 'score-chip score-yellow' : j.match_score >= 45 ? 'score-chip' : 'score-chip score-red';
 
   // Tier badge
   var tBadge = tierBadgeHtml(j) || '<span style="color:var(--muted);font-size:11px">Unscored</span>';
@@ -5067,6 +5179,26 @@ function renderJobCard(j, opts) {
   // RepVue badge
   var repvueBadge = renderRepVueBadge(j);
 
+  // Momentum badge (fresh data from company_momentum join)
+  var momentumBadge = '';
+  if (j.momentum_score !== undefined && j.momentum_score !== null) {
+    var ms = Number(j.momentum_score);
+    var msColor = ms >= 20 ? '#00c86e' : ms >= 14 ? '#f5c842' : ms >= 8 ? '#ff9f43' : '#e55353';
+    var msLabel = ms >= 20 ? '\u26A1 Hot' : ms >= 14 ? '\u2B06 Growing' : ms >= 8 ? '\u2194 Neutral' : '\u26D4 Caution';
+    var msSigs = '';
+    if (j.momentum_signals) {
+      var sigs = typeof j.momentum_signals === 'string' ? JSON.parse(j.momentum_signals) : j.momentum_signals;
+      if (Array.isArray(sigs) && sigs.length) msSigs = sigs.slice(0,2).join(' | ');
+    }
+    momentumBadge = '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600;background:' + msColor + '22;color:' + msColor + ';border:1px solid ' + msColor + '44" title="Momentum ' + ms + '/25' + (msSigs ? ': ' + msSigs : '') + '">' + msLabel + '</span>';
+  }
+
+  // Momentum warning badge
+  var momentumWarning = '';
+  if (j.momentum_warning) {
+    momentumWarning = '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600;background:rgba(229,83,83,.12);color:#e55353;border:1px solid rgba(229,83,83,.3)" title="' + esc(j.momentum_warning) + '">\u26A0 Warning</span>';
+  }
+
   // Sub-scores toggle
   var ssHtml = subScoresHtml(j);
   var ssToggle = j.sub_scores ? '<button class="sub-score-toggle" style="font-size:10px;margin-left:auto" onclick="toggleSubScores(' + j.id + ')">Details</button>' : '';
@@ -5092,10 +5224,12 @@ function renderJobCard(j, opts) {
     '</div>' +
     // ── Signal: Why this fits you
     (j.why_good_fit ? '<div class="card-signal"><div class="signal-label">\uD83C\uDFAF Why this fits you</div><div class="signal-text">' + esc(j.why_good_fit) + '</div></div>' : '') +
-    // ── Meta strip: salary, risk, source, territory
+    // ── Meta strip: salary, risk, momentum, territory, source
     '<div class="card-meta-strip">' +
       salaryHtml +
       aiRiskBadge +
+      momentumBadge +
+      momentumWarning +
       territoryBadge +
       srcBadge +
       repvueBadge +
@@ -5532,6 +5666,8 @@ var _trActiveTab = 'resume';
 
 function trEl(id) { return document.getElementById(id); }
 
+function goToResumeTab() { showTab('resume'); closeTailorModal(); }
+
 function closeTailorModal() {
   trEl('tailor-modal').style.display = 'none';
   _trJobId = null;
@@ -5641,7 +5777,7 @@ async function fetchTailoredResume(force) {
 
     if (!res.ok) {
       if (json.error === 'NO_RESUME') {
-        showTrError(json.message + ' <a href="#" onclick="showTab(\'resume\');closeTailorModal();return false" style="color:var(--gold)">Go to Resume page</a>');
+        showTrError(json.message + ' <a href="#" onclick="goToResumeTab();return false" style="color:var(--gold)">Go to Resume page</a>');
       } else {
         showTrError(json.error || 'Failed to tailor resume');
       }
@@ -6092,6 +6228,8 @@ function closeCoverLetterModal() {
   clEl('cl-modal').style.display = 'none';
 }
 
+function goToResumeTabCl() { showTab('resume'); closeCoverLetterModal(); }
+
 async function regenerateCoverLetter() {
   if (!_clJobId) return;
   clEl('cl-loading').style.display = '';
@@ -6117,7 +6255,7 @@ async function fetchCoverLetter(force) {
 
     if (!res.ok) {
       if (json.error === 'NO_RESUME') {
-        showClError(json.message + ' <a href="#" onclick="showTab(\'resume\');closeCoverLetterModal();return false" style="color:var(--gold)">Go to Resume page</a>');
+        showClError(json.message + ' <a href="#" onclick="goToResumeTabCl();return false" style="color:var(--gold)">Go to Resume page</a>');
       } else {
         showClError(json.error || 'Failed to generate cover letter');
       }
