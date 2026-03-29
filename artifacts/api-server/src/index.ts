@@ -3001,9 +3001,11 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .intel-footer{font-size:11px;color:var(--muted);margin-top:20px;padding-top:14px;border-top:1px solid var(--border)}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media(max-width:700px){.intel-cards{grid-template-columns:1fr}.intel-themes-grid{grid-template-columns:1fr}}
-/* clawd iframe panel */
+/* clawd iframe panel — fills the full available height */
+.main-content:has(#panel-clawd.active){overflow:hidden;display:flex;flex-direction:column}
 #panel-clawd{padding:0!important}
-.clawd-frame{width:100%;height:100%;border:none;display:block}
+#panel-clawd.active{display:flex;flex-direction:column;flex:1;min-height:0}
+.clawd-frame{flex:1;min-height:0;width:100%;border:none;display:block}
 /* email tab */
 .email-section{max-width:100%}
 .email-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;font-size:12px}
