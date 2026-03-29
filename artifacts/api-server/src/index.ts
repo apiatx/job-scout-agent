@@ -17,7 +17,7 @@ import {
   getOutputs, generateOutputs, getObjections, generateObjections,
   getNarrative, saveNarrative, draftNarrative
 } from './positioning.js';
-import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier } from './agent.js';
+import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier, generateCoverLetterWithClaude } from './agent.js';
 import type { SubScores, OpportunityTier, TierSettings, TailoringAnalysis } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
 // RepVue: link-out only (no scraping — RepVue blocks automated requests)
@@ -286,6 +286,14 @@ async function initDb(): Promise<void> {
       id           SERIAL PRIMARY KEY,
       result_json  JSONB NOT NULL,
       generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS cover_letters (
+      id                 SERIAL PRIMARY KEY,
+      job_id             INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+      cover_letter_text  TEXT NOT NULL,
+      research_context   TEXT,
+      created_at         TIMESTAMP DEFAULT NOW()
     );
   `);
 
@@ -1392,6 +1400,99 @@ Do not use generic phrases like "I hope this message finds you well". Be specifi
     });
   } catch (e) {
     console.error('Outreach generation error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// ── Cover Letter Generator ─────────────────────────────────────────────────
+// POST /api/jobs/:id/cover-letter
+// Two-step Claude: (1) web-search research → specific company facts,
+//                 (2) cover letter generation grounded in those facts.
+// Result is cached in cover_letters table; pass ?force=true to regenerate.
+app.post('/api/jobs/:id/cover-letter', async (req: Request, res: Response) => {
+  try {
+    const jobId = Number(req.params.id);
+    const force = req.query.force === 'true' || req.body?.force === true;
+
+    // 1. Load job record
+    const { rows: jobRows } = await pool.query('SELECT * FROM jobs WHERE id=$1', [jobId]);
+    if (jobRows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const job = jobRows[0] as any;
+
+    // 2. Check cache (skip if force=true)
+    if (!force) {
+      const { rows: cached } = await pool.query(
+        'SELECT * FROM cover_letters WHERE job_id=$1 ORDER BY created_at DESC LIMIT 1',
+        [jobId]
+      );
+      if (cached.length > 0) {
+        const c = cached[0] as any;
+        let research = null;
+        try { if (c.research_context) research = JSON.parse(c.research_context); } catch { /* ignore */ }
+        res.json({ cover_letter: c.cover_letter_text, research, cached: true, created_at: c.created_at });
+        return;
+      }
+    }
+
+    // 3. Load user resume
+    const { rows: resumeRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
+    const resumeText: string = resumeRows[0]?.value ?? '';
+    if (!resumeText.trim()) {
+      res.status(400).json({ error: 'NO_RESUME', message: 'Please add your resume on the Resume page before generating a cover letter.' });
+      return;
+    }
+
+    // 4. Load user name from criteria
+    const { rows: cRows } = await pool.query('SELECT your_name, your_email FROM criteria LIMIT 1');
+    const userName: string = cRows[0]?.your_name ?? '';
+
+    // 5. Load existing research brief if fresh (< 24h)
+    const { rows: briefRows } = await pool.query(
+      `SELECT brief_json FROM research_briefs WHERE LOWER(company_name) = LOWER($1) AND status = 'ready' AND created_at > NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 1`,
+      [job.company]
+    );
+    const existingResearch = briefRows.length > 0
+      ? JSON.stringify(briefRows[0].brief_json).slice(0, 2000)
+      : null;
+
+    // 6. Generate cover letter (two-step: research + generation)
+    // Use a slightly varied temperature on regenerate to get a different letter
+    const temperature = force ? Math.min(1.9, 0.9 + Math.random() * 0.8) : 1.0;
+    console.log(`[CoverLetter] Generating for job #${jobId} (${job.title} @ ${job.company}), force=${force}, temperature=${temperature.toFixed(2)}`);
+
+    const result = await generateCoverLetterWithClaude({
+      jobTitle: job.title,
+      companyName: job.company,
+      jobDescription: job.description ?? '',
+      resumeText,
+      userName,
+      existingResearch,
+      temperature,
+    });
+
+    console.log(`[CoverLetter] Generated (${result.coverLetter.length} chars) | researchFailed=${result.researchFailed}`);
+
+    // 7. Cache to DB
+    const researchJson = result.research ? JSON.stringify(result.research) : null;
+    await pool.query(
+      `INSERT INTO cover_letters (job_id, cover_letter_text, research_context) VALUES ($1, $2, $3)`,
+      [jobId, result.coverLetter, researchJson]
+    );
+    // Keep only the 3 most recent per job to avoid unbounded growth
+    await pool.query(
+      `DELETE FROM cover_letters WHERE job_id=$1 AND id NOT IN (SELECT id FROM cover_letters WHERE job_id=$1 ORDER BY created_at DESC LIMIT 3)`,
+      [jobId]
+    );
+
+    res.json({
+      cover_letter: result.coverLetter,
+      research: result.research,
+      research_failed: result.researchFailed,
+      cached: false,
+      created_at: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error('[CoverLetter] Error:', e);
     res.status(500).json({ error: String(e) });
   }
 });
@@ -3141,6 +3242,21 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .modal-copy-btn{font-size:11px;padding:4px 11px;margin-top:5px}
 .modal-spinner{text-align:center;padding:32px;color:var(--muted);font-size:13px}
 
+/* cover letter modal */
+.cl-modal-box{background:var(--surface);border:1px solid var(--border);border-radius:14px;width:100%;max-width:660px;max-height:90vh;display:flex;flex-direction:column;position:relative;overflow:hidden}
+.cl-modal-header{padding:20px 24px 14px;border-bottom:1px solid var(--border);flex-shrink:0}
+.cl-modal-title{font-size:16px;font-weight:700;color:var(--text);margin-bottom:2px}
+.cl-modal-sub{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.cl-modal-body{flex:1;overflow-y:auto;padding:0 24px}
+.cl-letter-wrap{background:#fafafa;border-radius:10px;padding:28px 32px;margin:20px 0;color:#1a1a1a;font-family:'Georgia',serif;font-size:14.5px;line-height:1.85;white-space:pre-wrap;word-break:break-word;box-shadow:0 1px 4px rgba(0,0,0,.12)}
+.cl-research-section{margin:0 0 20px}
+.cl-research-header{font-size:11px;font-weight:700;color:var(--gold);letter-spacing:.06em;text-transform:uppercase;cursor:pointer;padding:10px 0;display:flex;align-items:center;gap:6px;user-select:none}
+.cl-research-list{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-top:6px;display:none}
+.cl-research-list.open{display:block}
+.cl-research-list li{font-size:12px;color:var(--muted);line-height:1.65;margin-bottom:5px}
+.cl-research-list li:last-child{margin-bottom:0}
+.cl-modal-footer{padding:14px 24px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0;background:var(--surface)}
+
 /* layout */
 .app-body{display:flex;flex:1;min-height:0}
 
@@ -3596,6 +3712,56 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="modal-title" id="outreach-title">Reach Out</div>
     <div id="outreach-body">
       <div class="modal-spinner">Drafting your message with Claude&#8230;</div>
+    </div>
+  </div>
+</div>
+
+<!-- Cover Letter Modal -->
+<div class="modal-overlay" id="cl-modal" style="display:none" onclick="if(event.target===this)closeCoverLetterModal()">
+  <div class="cl-modal-box">
+    <div class="cl-modal-header">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+        <div style="flex:1;min-width:0">
+          <div class="cl-modal-title" id="cl-modal-title">Cover Letter</div>
+          <div class="cl-modal-sub">
+            <span id="cl-modal-ts"></span>
+            <span id="cl-cached-badge" style="display:none;color:var(--gold)">&#x2713; Cached</span>
+            <button class="btn btn-ghost btn-sm" id="cl-regen-btn" onclick="regenerateCoverLetter()" style="padding:2px 10px;font-size:11px">&#x21BA; Regenerate</button>
+          </div>
+        </div>
+        <button class="modal-close" style="position:static;margin-top:-4px" onclick="closeCoverLetterModal()">&times;</button>
+      </div>
+    </div>
+
+    <!-- Loading state -->
+    <div id="cl-loading" style="padding:40px 24px;text-align:center">
+      <div class="spinner" style="margin:0 auto 14px"></div>
+      <div style="font-size:13px;color:var(--muted)">Researching company with web search&hellip;</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:6px">Step 1: gathering specific facts &mdash; Step 2: writing your letter &mdash; takes 20-40 seconds</div>
+    </div>
+
+    <!-- Error state -->
+    <div id="cl-error" style="display:none;padding:32px 24px;text-align:center">
+      <div style="color:#ff6b6b;font-size:13px;margin-bottom:12px" id="cl-error-msg"></div>
+      <button class="btn btn-gold btn-sm" onclick="regenerateCoverLetter()">Try Again</button>
+    </div>
+
+    <!-- Content -->
+    <div class="cl-modal-body" id="cl-content" style="display:none">
+      <div class="cl-letter-wrap" id="cl-letter-text"></div>
+
+      <div class="cl-research-section" id="cl-research-section" style="display:none">
+        <div class="cl-research-header" onclick="toggleClResearch()">
+          <span id="cl-research-toggle">&#x25B6;</span>
+          Research Sources
+        </div>
+        <div class="cl-research-list" id="cl-research-list"></div>
+      </div>
+    </div>
+
+    <div class="cl-modal-footer" id="cl-footer" style="display:none">
+      <button class="btn btn-gold btn-sm" onclick="copyCoverLetter()">&#x1F4CB; Copy to Clipboard</button>
+      <button class="btn btn-ghost btn-sm" onclick="downloadCoverLetter()">&#x2B07; Download .txt</button>
     </div>
   </div>
 </div>
@@ -4728,6 +4894,7 @@ function renderJobCard(j, opts) {
       '<a href="' + esc(j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-apply btn-sm">Apply Now \u2192</a>' +
       reachBtn +
       '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ')">Tailor Resume</button>' +
+      '<button class="btn btn-ghost btn-sm" data-jid="' + j.id + '" data-jtit="' + esc(j.title) + '" data-jco="' + esc(j.company) + '" onclick="openCoverLetter(this.dataset.jid,this.dataset.jtit,this.dataset.jco)">\u270D Cover Letter</button>' +
       '<button class="btn btn-ghost btn-sm" id="research-btn-' + j.id + '" onclick="researchCompany(' + j.id + ')">\uD83D\uDD0D Research</button>' +
       '<button class="' + saveClass + '" onclick="toggleSave(' + j.id + ')" id="save-btn-' + j.id + '">' + saveLabel + '</button>' +
     '</div>' +
@@ -5495,6 +5662,140 @@ function copyOutreach(elId, btn) {
 }
 function copyConn(btn) { copyOutreach('outreach-conn', btn); }
 function copyDm(btn)   { copyOutreach('outreach-dm', btn); }
+
+// ── Cover Letter Modal ──────────────────────────────────────────────────────
+var _clJobId = null;
+var _clJobTitle = '';
+var _clCompany = '';
+
+function clEl(id) { return document.getElementById(id); }
+
+function openCoverLetter(jobId, title, company) {
+  _clJobId = jobId;
+  _clJobTitle = title;
+  _clCompany = company;
+
+  clEl('cl-modal-title').textContent = 'Cover Letter — ' + title + ' at ' + company;
+  clEl('cl-modal-ts').textContent = '';
+  clEl('cl-cached-badge').style.display = 'none';
+  clEl('cl-regen-btn').style.display = 'none';
+  clEl('cl-loading').style.display = '';
+  clEl('cl-error').style.display = 'none';
+  clEl('cl-content').style.display = 'none';
+  clEl('cl-footer').style.display = 'none';
+  clEl('cl-modal').style.display = 'flex';
+
+  fetchCoverLetter(false);
+}
+
+function closeCoverLetterModal() {
+  clEl('cl-modal').style.display = 'none';
+}
+
+function regenerateCoverLetter() {
+  if (!_clJobId) return;
+  clEl('cl-loading').style.display = '';
+  clEl('cl-error').style.display = 'none';
+  clEl('cl-content').style.display = 'none';
+  clEl('cl-footer').style.display = 'none';
+  clEl('cl-cached-badge').style.display = 'none';
+  clEl('cl-regen-btn').style.display = 'none';
+  var loadTxt = clEl('cl-loading').querySelector('div:first-child + div');
+  if (loadTxt) loadTxt.textContent = 'Researching company with web search\u2026';
+  fetchCoverLetter(true);
+}
+
+async function fetchCoverLetter(force) {
+  try {
+    var url = '/api/jobs/' + _clJobId + '/cover-letter' + (force ? '?force=true' : '');
+    var res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    var json = await res.json();
+
+    if (!res.ok) {
+      if (json.error === 'NO_RESUME') {
+        showClError(json.message + ' <a href="#" onclick="showTab(\'resume\');closeCoverLetterModal();return false" style="color:var(--gold)">Go to Resume page</a>');
+      } else {
+        showClError(json.error || 'Failed to generate cover letter');
+      }
+      return;
+    }
+
+    renderCoverLetter(json);
+  } catch(e) {
+    showClError('Network error: ' + e.message);
+  }
+}
+
+function renderCoverLetter(data) {
+  var letter = data.cover_letter || '';
+  clEl('cl-letter-text').textContent = letter;
+
+  var ts = data.created_at ? new Date(data.created_at).toLocaleString() : '';
+  clEl('cl-modal-ts').textContent = ts ? 'Generated ' + ts : '';
+  clEl('cl-cached-badge').style.display = data.cached ? '' : 'none';
+  clEl('cl-regen-btn').style.display = '';
+
+  var research = data.research;
+  if (research && research.specificFacts && research.specificFacts.length > 0) {
+    var listEl = clEl('cl-research-list');
+    listEl.innerHTML = '<ul style="list-style:disc;padding-left:16px;margin:0">' +
+      research.specificFacts.map(function(f) { return '<li>' + esc(f) + '</li>'; }).join('') +
+      (research.companyMoment ? '<li><strong>Company moment:</strong> ' + esc(research.companyMoment) + '</li>' : '') +
+    '</ul>';
+    clEl('cl-research-section').style.display = '';
+  } else {
+    clEl('cl-research-section').style.display = 'none';
+  }
+
+  clEl('cl-loading').style.display = 'none';
+  clEl('cl-error').style.display = 'none';
+  clEl('cl-content').style.display = '';
+  clEl('cl-footer').style.display = '';
+}
+
+function showClError(msg) {
+  clEl('cl-loading').style.display = 'none';
+  var errMsg = clEl('cl-error-msg');
+  errMsg.innerHTML = msg;
+  clEl('cl-error').style.display = '';
+  clEl('cl-regen-btn').style.display = '';
+}
+
+var _clResearchOpen = false;
+function toggleClResearch() {
+  _clResearchOpen = !_clResearchOpen;
+  var list = clEl('cl-research-list');
+  var toggle = clEl('cl-research-toggle');
+  list.classList.toggle('open', _clResearchOpen);
+  if (toggle) toggle.textContent = _clResearchOpen ? '\u25BC' : '\u25B6';
+}
+
+function copyCoverLetter() {
+  var txt = clEl('cl-letter-text').textContent || '';
+  if (!txt.trim()) return;
+  navigator.clipboard.writeText(txt).then(function() {
+    var btn = clEl('cl-modal').querySelector('button[onclick="copyCoverLetter()"]');
+    if (btn) { var orig = btn.textContent; btn.textContent = '\u2713 Copied!'; setTimeout(function() { btn.textContent = orig; }, 1800); }
+  }).catch(function() {
+    var ta = document.createElement('textarea');
+    ta.value = txt; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+  });
+}
+
+function downloadCoverLetter() {
+  var txt = clEl('cl-letter-text').textContent || '';
+  if (!txt.trim()) return;
+  var date = new Date().toISOString().slice(0, 10);
+  var safeCo = (_clCompany || 'Company').replace(/[^a-zA-Z0-9]/g, '_');
+  var filename = 'CoverLetter_' + safeCo + '_' + date + '.txt';
+  var blob = new Blob([txt], { type: 'text/plain' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
 
 // ── settings / criteria ────────────────────────────────────────────────────
 var _criteriaTagState = {};

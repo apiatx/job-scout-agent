@@ -1,0 +1,139 @@
+Rebuild the cover letter generation feature from scratch. The current version produces generic AI-sounding output. I need it to produce cover letters that are indistinguishable from human writing, deeply researched, and specific to both the role and the company.
+
+## WHERE IT APPEARS
+On every job card, there is already a "Tailor Resume" button. Add a separate "Write Cover Letter" button next to it. This is a distinct feature from resume tailoring — do not combine them.
+
+## HOW IT WORKS
+
+When "Write Cover Letter" is clicked:
+
+1. Pull the job description, company name, and role title from the job record
+2. Pull the user's resume text from the settings/resume table
+3. Pull the company research brief from research_briefs table if it exists — if not, generate one fresh using the same research endpoint already built
+4. Use Claude with web search to do additional real-time research specifically for cover letter context
+5. Generate the cover letter
+6. Display it in a modal with copy and download options
+
+## BACKEND — New endpoint
+
+Create POST /api/jobs/:id/cover-letter
+
+This endpoint:
+1. Reads job record for title, company, description, apply URL
+2. Reads user resume from settings table (key: 'resume')
+3. Reads user name and email from settings table
+4. Checks research_briefs for existing company research — if older than 24 hours or missing, regenerate it
+5. Calls Claude with web search to do cover-letter-specific research
+6. Generates the cover letter
+7. Caches result in cover_letters table
+8. Returns the cover letter text
+
+## DATABASE
+
+CREATE TABLE IF NOT EXISTS cover_letters (
+  id SERIAL PRIMARY KEY,
+  job_id INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+  cover_letter_text TEXT NOT NULL,
+  research_context TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+## CLAUDE CALL — Two step process
+
+STEP 1 — Research call (Claude with web search):
+
+Use model claude-sonnet-4-20250514 with web search tool enabled.
+
+Prompt:
+"I am writing a cover letter for a [JOB TITLE] position at [COMPANY NAME]. Before I write it I need you to find 3-5 highly specific, recent, concrete facts about this company that would impress a hiring manager if referenced in a cover letter. These should be things a casual applicant would not know — specific product launches, recent partnerships, funding details, strategic pivots, leadership quotes about company direction, customer wins, expansion plans, or competitive moves. Search for '[COMPANY NAME] news 2025 2026', '[COMPANY NAME] product launch', '[COMPANY NAME] expansion', '[COMPANY NAME] partnership announcement'. Return a JSON object:
+{
+  'specificFacts': ['fact 1 with source', 'fact 2 with source', 'fact 3 with source', 'fact 4 with source', 'fact 5 with source'],
+  'companyMoment': 'one sentence describing the most compelling thing happening at this company right now that a candidate should reference',
+  'productContext': 'what their core product does and why it matters to their customers right now',
+  'roleContext': 'based on the job description, what specific problem is this person being hired to solve'
+}"
+
+STEP 2 — Cover letter generation call (Claude, no web search needed):
+
+Use model claude-sonnet-4-20250514, max_tokens 2000.
+
+System prompt:
+"You are an expert cover letter writer who has helped hundreds of enterprise technology sales professionals land roles at top hardware, semiconductor, AI infrastructure, and industrial technology companies. You write cover letters that sound completely human — like they were written by a confident, articulate sales professional who knows exactly what they want and why they are the right person for this role. 
+
+CRITICAL RULES FOR HUMAN-SOUNDING WRITING:
+- Never use em dashes (—) or en dashes (–) anywhere in the letter
+- Never use the word 'leverage' or 'leveraging'
+- Never use the word 'passionate' or 'passionate about'
+- Never use the phrase 'I am excited to' or 'I am thrilled to'
+- Never use the word 'synergy' or 'synergistic'
+- Never use the word 'utilize' — use 'use' instead
+- Never use 'in terms of'
+- Never use bullet points or lists — this is prose only
+- Vary sentence length naturally — mix short punchy sentences with longer ones
+- Write in first person with confidence, not humility
+- Never start consecutive sentences with 'I'
+- Never use corporate buzzwords like 'thought leader', 'best-in-class', 'cutting-edge'
+- The letter should sound like it was written by a real person who is genuinely excited but not sycophantic
+- Maximum 4 paragraphs, each focused and tight
+- Total length: 250-350 words maximum — hiring managers do not read long cover letters"
+
+User prompt:
+"Write a cover letter for this application. Here is all the context you need:
+
+ROLE: [JOB TITLE] at [COMPANY NAME]
+
+JOB DESCRIPTION:
+[JOB DESCRIPTION — first 1500 characters]
+
+MY RESUME:
+[RESUME TEXT — first 2000 characters]
+
+MY NAME: [USER NAME]
+
+RECENT COMPANY RESEARCH (use at least 2 of these specific facts naturally in the letter):
+[specificFacts from step 1]
+
+COMPANY MOMENT (work this into the opening or closing):
+[companyMoment from step 1]
+
+ROLE CONTEXT (what problem am I being hired to solve):
+[roleContext from step 1]
+
+INSTRUCTIONS:
+Paragraph 1 — Opening: Reference something specific and recent about the company that shows genuine research. Connect it to why this role at this company matters right now. Do not open with 'I am applying for' — start with the company insight.
+
+Paragraph 2 — My fit: Pull 2-3 specific, quantified achievements from my resume that directly map to what this role requires. Be concrete — numbers, company names, outcomes. Do not be generic.
+
+Paragraph 3 — Why this company specifically: Show that I understand their market position, what they are building, and why my specific experience makes me valuable to them at this exact moment. Reference the company moment.
+
+Paragraph 4 — Close: Confident, direct, brief. Express genuine interest without begging. End with a specific call to action.
+
+Write the full cover letter now. Return only the cover letter text, nothing else."
+
+## FRONTEND — Cover letter modal
+
+When "Write Cover Letter" is clicked:
+1. Button shows "Writing..." with spinner — takes 20-40 seconds
+2. Modal opens full screen with close button
+
+Modal layout:
+- Header: "Cover Letter — [Job Title] at [Company Name]"
+- Subheader: "Generated [timestamp] · Regenerate"
+- Body: The cover letter text in a clean readable font, well spaced, not monospace
+- Research sources section (collapsed by default): shows the specific facts Claude found and used
+- Footer buttons:
+  - "Copy to Clipboard" — copies just the letter text
+  - "Download as .txt" — downloads the file named "CoverLetter_[CompanyName]_[Date].txt"
+  - "Regenerate" — calls the endpoint again with force:true to bypass cache
+
+The letter text area should look like an actual document — white or very light background within the dark modal, readable serif or clean sans font, generous line height.
+
+## IMPORTANT NOTES
+
+- If the user has not uploaded a resume on the Resume page, show a message: "Please add your resume on the Resume page before generating a cover letter" with a link to the Resume page
+- If research step fails, proceed with cover letter generation using just the job description and resume — do not block the feature
+- The cover letter must never mention Claude, AI, or that it was generated — it should read as written by the user
+- Regenerating produces a different letter each time — add a small amount of temperature variation so it is not identical on retry
+- Cache cover letters per job ID but allow regeneration on demand
+
+Push to main when complete.

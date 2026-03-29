@@ -792,3 +792,148 @@ Respond ONLY with a valid JSON object — no markdown fences, no text outside th
     return { resume: block.text, coverLetter: '' };
   }
 }
+
+// ── Cover Letter Generator ────────────────────────────────────────────────────
+// Two-step: (1) web-search research for specific company facts,
+//           (2) cover letter generation grounded in those facts.
+
+export interface CoverLetterResearch {
+  specificFacts: string[];
+  companyMoment: string;
+  productContext: string;
+  roleContext: string;
+}
+
+export interface CoverLetterResult {
+  coverLetter: string;
+  research: CoverLetterResearch | null;
+  researchFailed: boolean;
+}
+
+export async function generateCoverLetterWithClaude(params: {
+  jobTitle: string;
+  companyName: string;
+  jobDescription: string;
+  resumeText: string;
+  userName: string;
+  existingResearch?: string | null;
+  temperature?: number;
+}): Promise<CoverLetterResult> {
+  const { jobTitle, companyName, jobDescription, resumeText, userName, existingResearch } = params;
+  const temperature = params.temperature ?? 1;
+
+  // ── STEP 1: Web-search research for specific, impressive company facts ──────
+  let research: CoverLetterResearch | null = null;
+  let researchFailed = false;
+
+  try {
+    const researchPrompt = `I am writing a cover letter for a ${jobTitle} position at ${companyName}. Before I write it, find 3-5 highly specific, recent, concrete facts about this company that would impress a hiring manager if referenced in a cover letter. These should be things a casual applicant would not know — specific product launches, recent partnerships, funding details, strategic pivots, leadership quotes about company direction, customer wins, expansion plans, or competitive moves.
+
+Do NOT include generic facts like "they are a technology company" or "they value innovation."
+
+${existingResearch ? `EXISTING RESEARCH (use as context, supplement with current web search for anything more recent):\n${existingResearch.slice(0, 1500)}\n\n` : ''}JOB DESCRIPTION (for context on the role and what to research):\n${jobDescription.slice(0, 800)}
+
+Respond with ONLY this JSON structure — no other text:
+{
+  "specificFacts": ["fact 1 with source or date", "fact 2", "fact 3", "fact 4", "fact 5"],
+  "companyMoment": "one sentence describing the most compelling thing happening at this company right now that a candidate should reference",
+  "productContext": "what their core product does and why it matters to their customers right now",
+  "roleContext": "based on the job description, what specific problem is this person being hired to solve"
+}`;
+
+    const researchMsg = await anthropic.messages.create({
+      model: 'claude-sonnet-4-5',
+      max_tokens: 1000,
+      system: 'You are a research assistant. After using web search to gather information, respond with ONLY a valid JSON object. No conversational text, no markdown — just raw JSON starting with { and ending with }.',
+      tools: [{ type: 'web_search_20250305', name: 'web_search' }] as unknown as Anthropic.Messages.Tool[],
+      messages: [{ role: 'user', content: researchPrompt }],
+    });
+
+    const textBlocks = researchMsg.content.filter(b => b.type === 'text').map(b => (b as any).text as string);
+    for (let i = textBlocks.length - 1; i >= 0; i--) {
+      const raw = textBlocks[i].trim().replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed.specificFacts && parsed.companyMoment) {
+          research = parsed as CoverLetterResearch;
+          break;
+        }
+      } catch {
+        const m = raw.match(/\{[\s\S]*"specificFacts"[\s\S]*\}/);
+        if (m) {
+          try { research = JSON.parse(m[0]) as CoverLetterResearch; break; } catch { /* continue */ }
+        }
+      }
+    }
+    if (!research) researchFailed = true;
+  } catch (e) {
+    console.error('[CoverLetter] Research step failed (non-fatal):', e instanceof Error ? e.message : e);
+    researchFailed = true;
+  }
+
+  // ── STEP 2: Cover letter generation grounded in research ──────────────────
+  const factsBlock = research
+    ? `RECENT COMPANY RESEARCH (use at least 2 of these specific facts naturally in the letter):\n${research.specificFacts.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\nCOMPANY MOMENT (work this into the opening or closing):\n${research.companyMoment}\n\nROLE CONTEXT (what problem am I being hired to solve):\n${research.roleContext}`
+    : `Note: Live research was unavailable. Use the job description and resume to craft the most compelling letter possible.`;
+
+  const systemPrompt = `You are an expert cover letter writer who has helped hundreds of enterprise technology sales professionals land roles at top hardware, semiconductor, AI infrastructure, and industrial technology companies. You write cover letters that sound completely human — like they were written by a confident, articulate sales professional who knows exactly what they want and why they are the right person for this role.
+
+CRITICAL RULES FOR HUMAN-SOUNDING WRITING:
+- Never use em dashes (—) or en dashes (–) anywhere in the letter
+- Never use the word "leverage" or "leveraging"
+- Never use the word "passionate" or "passionate about"
+- Never use the phrase "I am excited to" or "I am thrilled to"
+- Never use the word "synergy" or "synergistic"
+- Never use the word "utilize" — use "use" instead
+- Never use "in terms of"
+- Never use bullet points or lists — this is prose only
+- Vary sentence length naturally — mix short punchy sentences with longer ones
+- Write in first person with confidence, not humility
+- Never start consecutive sentences with "I"
+- Never use corporate buzzwords like "thought leader", "best-in-class", "cutting-edge"
+- The letter should sound like it was written by a real person who is genuinely interested but not sycophantic
+- Maximum 4 paragraphs, each focused and tight
+- Total length: 250-350 words maximum — hiring managers do not read long cover letters
+- The letter must never mention Claude, AI, or that it was generated`;
+
+  const userPrompt = `Write a cover letter for this application. Here is all the context you need:
+
+ROLE: ${jobTitle} at ${companyName}
+
+JOB DESCRIPTION:
+${jobDescription.slice(0, 1500)}
+
+MY RESUME:
+${resumeText.slice(0, 2000)}
+
+MY NAME: ${userName || 'The Candidate'}
+
+${factsBlock}
+
+INSTRUCTIONS:
+Paragraph 1 — Opening: Reference something specific and recent about the company that shows genuine research. Connect it to why this role at this company matters right now. Do NOT open with "I am applying for" — start with the company insight.
+
+Paragraph 2 — My fit: Pull 2-3 specific, quantified achievements from my resume that directly map to what this role requires. Be concrete — numbers, company names, outcomes. Do not be generic.
+
+Paragraph 3 — Why this company specifically: Show that you understand their market position, what they are building, and why my specific experience makes me valuable to them at this exact moment. Reference the company moment if research is available.
+
+Paragraph 4 — Close: Confident, direct, brief. Express genuine interest without begging. End with a specific call to action.
+
+Write the full cover letter now. Return ONLY the cover letter text — no subject line, no preamble, no explanation. Start directly with the first paragraph.`;
+
+  const genMsg = await anthropic.messages.create({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 2000,
+    temperature,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: userPrompt }],
+  });
+
+  const letterText = genMsg.content
+    .filter(b => b.type === 'text')
+    .map(b => (b as any).text as string)
+    .join('\n')
+    .trim();
+
+  return { coverLetter: letterText, research, researchFailed };
+}
