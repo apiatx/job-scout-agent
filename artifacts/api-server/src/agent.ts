@@ -810,6 +810,126 @@ export interface CoverLetterResult {
   researchFailed: boolean;
 }
 
+// ── Territory Intelligence ─────────────────────────────────────────────────
+
+export interface TerritoryContext {
+  territoryDetected: string;
+  whyThisTerritory: string;
+  keyIndustries: string[];
+  majorProspects: string[];
+  recentWins: string[];
+  competitiveLandscape: string;
+  marketMoment: string;
+  candidateAdvantage: string;
+}
+
+const TERRITORY_PATTERNS: Array<{ re: RegExp; label: string }> = [
+  { re: /\bsoutheast\b/i, label: 'Southeast' },
+  { re: /\bnortheast\b/i, label: 'Northeast' },
+  { re: /\bmid-?atlantic\b/i, label: 'Mid-Atlantic' },
+  { re: /\bpacific\s+northwest\b/i, label: 'Pacific Northwest' },
+  { re: /\bcentral\s+region\b|\bcentral\s+us\b|\bcentral\s+territory\b/i, label: 'Central' },
+  { re: /\bmountain\s+west\b/i, label: 'Mountain West' },
+  { re: /\bsouthwest\b/i, label: 'Southwest' },
+  { re: /\bnorthwest\b/i, label: 'Northwest' },
+  { re: /\bmidwest\b/i, label: 'Midwest' },
+  { re: /\bsled\b/i, label: 'SLED' },
+  { re: /\bfederal\b|\bfed\s+civ\b|\bfedciv\b|\bdod\b|\bdefense\b/i, label: 'Federal' },
+  { re: /\bnew\s+england\b/i, label: 'New England' },
+  { re: /\bgulf\s+coast\b/i, label: 'Gulf Coast' },
+  { re: /\bgreat\s+lakes\b/i, label: 'Great Lakes' },
+  { re: /\bappalachia\b/i, label: 'Appalachia' },
+  // US states
+  { re: /\bcalifornia\b|\bca\s+territory\b/i, label: 'California' },
+  { re: /\btexas\b|\btx\s+territory\b/i, label: 'Texas' },
+  { re: /\bnew\s+york\b|\bny\s+territory\b/i, label: 'New York' },
+  { re: /\bflorida\b|\bfl\s+territory\b/i, label: 'Florida' },
+  { re: /\billino[i]s\b/i, label: 'Illinois' },
+  { re: /\bgeorgia\b/i, label: 'Georgia' },
+  { re: /\bnorth\s+carolina\b/i, label: 'North Carolina' },
+  { re: /\bvirginia\b/i, label: 'Virginia' },
+  { re: /\bwashington\s+dc\b|\bwashington,?\s*d\.c\b/i, label: 'Washington DC' },
+  { re: /\bchicago\b/i, label: 'Chicago' },
+  { re: /\bbay\s+area\b|\bsilicon\s+valley\b/i, label: 'Bay Area' },
+  { re: /\bnew\s+england\b/i, label: 'New England' },
+  // Vertical territories
+  { re: /\bhealthcare\s+(southeast|northeast|midwest|southwest|northwest|west|east|south|north|central)\b/i, label: 'Healthcare territory' },
+  { re: /\bfinancial\s+services?\s+(ny|new\s+york|northeast)\b/i, label: 'Financial Services Northeast' },
+  { re: /\bpublic\s+sector\s+(dc|washington)\b/i, label: 'Public Sector DC' },
+];
+
+export function detectTerritory(jobTitle: string, jobDescription: string): string | null {
+  const combined = `${jobTitle} ${jobDescription.slice(0, 800)}`;
+  for (const { re, label } of TERRITORY_PATTERNS) {
+    if (re.test(combined)) return label;
+  }
+  return null;
+}
+
+export async function analyzeTerritoryContext(
+  jobTitle: string,
+  companyName: string,
+  territory: string,
+  resumeText: string,
+): Promise<TerritoryContext | null> {
+  try {
+    console.log(`[Territory] Analyzing territory context: ${territory} for ${jobTitle} @ ${companyName}`);
+    const prompt = `A company called ${companyName} is hiring a ${jobTitle} specifically for the ${territory} territory. I need to understand why they are investing in this territory right now and what opportunity they are chasing.
+
+Search for:
+- "${companyName} ${territory} expansion customers"
+- "${companyName} ${territory} office hiring growth"
+- "${companyName} ${territory} major wins deals customers 2025 2026"
+- "industry growth ${territory} 2025 2026"
+- Major enterprises headquartered in ${territory} that would be ideal prospects for ${companyName}'s products
+
+CANDIDATE RESUME (for candidateAdvantage field):
+${resumeText.slice(0, 1500)}
+
+Return ONLY a JSON object:
+{
+  "territoryDetected": "${territory}",
+  "whyThisTerritory": "why is this company investing in this specific territory right now — market conditions, customer concentration, competitive dynamics, or growth signals",
+  "keyIndustries": ["top 3-4 industries concentrated in this territory that are ideal buyers for this company"],
+  "majorProspects": ["5-8 specific well-known companies headquartered or with major operations in this territory that would be ideal customers — be specific with real company names"],
+  "recentWins": ["any publicly known customer wins this company has had in this territory or with companies based there"],
+  "competitiveLandscape": "who are the main competitors active in this territory and what is the dynamic",
+  "marketMoment": "one sentence on the single biggest opportunity in this territory for this company right now",
+  "candidateAdvantage": "based on the candidate resume provided above, what specific experience makes them uniquely suited for THIS territory — look for: companies they sold to in the region, industries they know that are concentrated here, geographic familiarity, relevant logos"
+}`;
+
+    const msg = await anthropic.messages.create({
+      model: 'claude-haiku-4-5',
+      max_tokens: 1200,
+      system: 'You are a territory market research specialist. After using web search, respond with ONLY a valid JSON object. No conversational text, no markdown — just raw JSON starting with { and ending with }.',
+      tools: [{ type: 'web_search_20250305', name: 'web_search' }] as unknown as Anthropic.Messages.Tool[],
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const textBlocks = msg.content.filter(b => b.type === 'text').map(b => (b as any).text as string);
+    for (let i = textBlocks.length - 1; i >= 0; i--) {
+      const raw = textBlocks[i].trim().replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed.territoryDetected && parsed.whyThisTerritory) {
+          console.log(`[Territory] Analysis complete for ${territory}`);
+          return parsed as TerritoryContext;
+        }
+      } catch {
+        const m = raw.match(/\{[\s\S]*"territoryDetected"[\s\S]*\}/);
+        if (m) {
+          try { const p = JSON.parse(m[0]); if (p.territoryDetected) return p as TerritoryContext; } catch { /* skip */ }
+        }
+      }
+    }
+    console.warn('[Territory] Could not parse territory context response');
+    return null;
+  } catch (e) {
+    console.error('[Territory] analyzeTerritoryContext failed (non-fatal):', e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+
 export async function generateCoverLetterWithClaude(params: {
   jobTitle: string;
   companyName: string;
@@ -819,8 +939,9 @@ export async function generateCoverLetterWithClaude(params: {
   existingResearch?: string | null;
   temperature?: number;
   model?: string;
+  territoryContext?: TerritoryContext | null;
 }): Promise<CoverLetterResult> {
-  const { jobTitle, companyName, jobDescription, resumeText, userName, existingResearch } = params;
+  const { jobTitle, companyName, jobDescription, resumeText, userName, existingResearch, territoryContext } = params;
   const temperature = params.temperature ?? 1;
   const MODEL_CL = params.model || 'claude-opus-4-6';
 
@@ -898,6 +1019,11 @@ CRITICAL RULES FOR HUMAN-SOUNDING WRITING:
 - Total length: 250-350 words maximum — hiring managers do not read long cover letters
 - The letter must never mention Claude, AI, or that it was generated`;
 
+  // Build territory block if context exists
+  const territoryBlock = territoryContext
+    ? `\nTERRITORY INTELLIGENCE:\nThis role is specifically for the ${territoryContext.territoryDetected} territory.\nWhy this territory matters: ${territoryContext.whyThisTerritory}\nKey industries to reference: ${territoryContext.keyIndustries.join(', ')}\nLikely target accounts in territory: ${territoryContext.majorProspects.join(', ')}\nMarket moment: ${territoryContext.marketMoment}\nWhy the candidate fits this territory specifically: ${territoryContext.candidateAdvantage}\n\nADDITIONAL COVER LETTER INSTRUCTIONS FOR TERRITORY ROLES:\n- The opening paragraph should reference something specific about why this territory is strategically important for this company right now\n- If the candidate has sold to, worked with, or has relationships in this territory based on their resume, call it out explicitly — "Having spent my career closing enterprise deals across the ${territoryContext.territoryDetected} including accounts like X and Y..."\n- Reference 1-2 specific prospect types or industries concentrated in this territory to show you understand the opportunity\n- Do NOT just say "I am based in the ${territoryContext.territoryDetected}" — show you understand the business opportunity in that geography`
+    : '';
+
   const userPrompt = `Write a cover letter for this application. Here is all the context you need:
 
 ROLE: ${jobTitle} at ${companyName}
@@ -910,14 +1036,14 @@ ${resumeText.slice(0, 2000)}
 
 MY NAME: ${userName || 'The Candidate'}
 
-${factsBlock}
+${factsBlock}${territoryBlock}
 
 INSTRUCTIONS:
 Paragraph 1 — Opening: Reference something specific and recent about the company that shows genuine research. Connect it to why this role at this company matters right now. Do NOT open with "I am applying for" — start with the company insight.
 
 Paragraph 2 — My fit: Pull 2-3 specific, quantified achievements from my resume that directly map to what this role requires. Be concrete — numbers, company names, outcomes. Do not be generic.
 
-Paragraph 3 — Why this company specifically: Show that you understand their market position, what they are building, and why my specific experience makes me valuable to them at this exact moment. Reference the company moment if research is available.
+Paragraph 3 — Why this company specifically: Show that you understand their market position, what they are building, and why my specific experience makes me valuable to them at this exact moment. Reference the company moment if research is available.${territoryContext ? `\n\nParagraph 3 must also weave in the territory opportunity — show you understand the ${territoryContext.territoryDetected} market specifically. Reference why this geography matters to the company and how your background uniquely fits it.` : ''}
 
 Paragraph 4 — Close: Confident, direct, brief. Express genuine interest without begging. End with a specific call to action.
 
@@ -976,8 +1102,9 @@ export async function tailorResumeV2WithClaude(params: {
   resumeText: string;
   companyResearchContext?: string | null;
   model?: string;
+  territoryContext?: TerritoryContext | null;
 }): Promise<TailoredResumeV2Result> {
-  const { jobTitle, companyName, jobDescription, resumeText, companyResearchContext } = params;
+  const { jobTitle, companyName, jobDescription, resumeText, companyResearchContext, territoryContext } = params;
   const MODEL = params.model || 'claude-opus-4-6';
 
   console.log(`[TailorV2] Starting 3-step tailoring for ${jobTitle} @ ${companyName}`);
@@ -1098,6 +1225,10 @@ Return ONLY a JSON object:
   // ── STEP 3: Resume generation ─────────────────────────────────────────────
   const companyMoment = companyResearchContext ? `\n\nCOMPANY RESEARCH CONTEXT (use to make the summary feel specific to this company):\n${companyResearchContext.slice(0, 1000)}` : '';
 
+  const territoryResumeBlock = territoryContext
+    ? `\n\nTERRITORY CONTEXT FOR THIS ROLE:\nTerritory: ${territoryContext.territoryDetected}\nKey industries in territory: ${territoryContext.keyIndustries.join(', ')}\nLikely target accounts: ${territoryContext.majorProspects.join(', ')}\nWhy candidate fits this territory: ${territoryContext.candidateAdvantage}\n\nADDITIONAL RESUME TAILORING INSTRUCTIONS FOR TERRITORY ROLES:\n- In the professional summary, if the candidate has relevant geographic or industry experience for this territory, surface it explicitly\n- If the candidate has sold to companies headquartered or operating heavily in this territory, reframe those bullets to make the geographic relevance clear\n- If the candidate's past accounts include companies that are in the same industry as the major prospects in this territory, highlight that industry expertise\n- Add the territory name naturally in the summary if the candidate has genuine relevant experience there — do not fabricate geographic experience`
+    : '';
+
   const systemPrompt = `You are an expert resume writer who specializes in helping enterprise technology sales professionals land roles at hardware, semiconductor, AI infrastructure, networking, and industrial technology companies. You write resumes that pass ATS screening and impress human recruiters.
 
 CRITICAL RULES:
@@ -1143,7 +1274,7 @@ EXPERIENCES TO DOWNPLAY:
 ${gapAnalysis.experienceToDownplay.join('\n')}
 
 SUMMARY ANGLE:
-${gapAnalysis.summaryAngle}${companyMoment}
+${gapAnalysis.summaryAngle}${companyMoment}${territoryResumeBlock}
 
 BUYER PERSONA FOR THIS ROLE:
 ${atsResearch.buyerPersona}

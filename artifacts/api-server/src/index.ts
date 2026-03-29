@@ -17,7 +17,7 @@ import {
   getOutputs, generateOutputs, getObjections, generateObjections,
   getNarrative, saveNarrative, draftNarrative
 } from './positioning.js';
-import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier, generateCoverLetterWithClaude, tailorResumeV2WithClaude } from './agent.js';
+import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier, generateCoverLetterWithClaude, tailorResumeV2WithClaude, detectTerritory, analyzeTerritoryContext } from './agent.js';
 import type { SubScores, OpportunityTier, TierSettings, TailoringAnalysis } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
 // RepVue: link-out only (no scraping — RepVue blocks automated requests)
@@ -1466,7 +1466,15 @@ app.post('/api/jobs/:id/cover-letter', async (req: Request, res: Response) => {
       ? JSON.stringify(briefRows[0].brief_json).slice(0, 2000)
       : null;
 
-    // 6. Generate cover letter (two-step: research + generation)
+    // 6. Territory detection + analysis (non-fatal)
+    const detectedTerritory = detectTerritory(job.title, job.description ?? '');
+    let territoryCtx = null;
+    if (detectedTerritory) {
+      console.log(`[CoverLetter] Territory detected: "${detectedTerritory}" — running territory intelligence`);
+      territoryCtx = await analyzeTerritoryContext(job.title, job.company, detectedTerritory, resumeText);
+    }
+
+    // 7. Generate cover letter (two-step: research + generation)
     // Use a slightly varied temperature on regenerate to get a different letter
     const temperature = force ? Math.min(1.9, 0.9 + Math.random() * 0.8) : 1.0;
     console.log(`[CoverLetter] Generating for job #${jobId} (${job.title} @ ${job.company}), force=${force}, model=${documentModel}, temperature=${temperature.toFixed(2)}`);
@@ -1480,6 +1488,7 @@ app.post('/api/jobs/:id/cover-letter', async (req: Request, res: Response) => {
       existingResearch,
       temperature,
       model: documentModel,
+      territoryContext: territoryCtx,
     });
 
     console.log(`[CoverLetter] Generated (${result.coverLetter.length} chars) | researchFailed=${result.researchFailed}`);
@@ -1566,7 +1575,15 @@ app.post('/api/jobs/:id/tailor-resume', async (req: Request, res: Response) => {
     const { rows: dmRows2 } = await pool.query("SELECT value FROM settings WHERE key='document_model'");
     const documentModel2: string = dmRows2[0]?.value || 'claude-opus-4-6';
 
-    // 6. Three-step tailoring
+    // 6. Territory detection + analysis (non-fatal)
+    const detectedTerritory2 = detectTerritory(job.title, job.description ?? '');
+    let territoryCtx2 = null;
+    if (detectedTerritory2) {
+      console.log(`[TailorV2] Territory detected: "${detectedTerritory2}" — running territory intelligence`);
+      territoryCtx2 = await analyzeTerritoryContext(job.title, job.company, detectedTerritory2, resumeText);
+    }
+
+    // 7. Three-step tailoring
     console.log(`[TailorV2] Endpoint: job #${jobId} (${job.title} @ ${job.company}), force=${force}, model=${documentModel2}`);
     const result = await tailorResumeV2WithClaude({
       jobTitle: job.title,
@@ -1575,6 +1592,7 @@ app.post('/api/jobs/:id/tailor-resume', async (req: Request, res: Response) => {
       resumeText,
       companyResearchContext,
       model: documentModel2,
+      territoryContext: territoryCtx2,
     });
 
     // 7. Cache (keep 3 most recent per job)

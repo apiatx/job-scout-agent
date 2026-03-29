@@ -132,6 +132,34 @@ Logic:
 - `isRemoteInTerritory(loc)`: detects "Remote, City" style territory roles
 - `reclassifyJobsLocally()`: re-applies location check + computeTier to all scored jobs
 
+## Document Generation Features
+
+### Cover Letter Generator
+- Endpoint: `POST /api/jobs/:id/cover-letter` (`?force=true` to bypass cache)
+- 2-step pipeline: (1) Claude web-search research → specific company facts, (2) Claude letter generation grounded in research
+- Caches 3 most recent per job in `cover_letters` table
+- Uses `document_model` setting (default `claude-opus-4-6`); temperature varied on regenerate for different output
+
+### Resume Tailoring V2
+- Endpoint: `POST /api/jobs/:id/tailor-resume` (`?force=true` to bypass cache)
+- 3-step pipeline: (1) ATS keyword research with web search, (2) gap analysis (no web), (3) tailored resume generation
+- Caches in `tailored_resumes` table; response includes `ats_research`, `gap_analysis`, `resume_text`
+- Uses `document_model` setting (default `claude-opus-4-6`)
+
+### AI Model Selector
+- Setting key: `document_model` — `claude-opus-4-6` (default) or `claude-sonnet-4-6`
+- Saved via `GET/PUT /api/settings/document_model`
+- Both endpoints read this at request time — no restart required
+- Frontend: "AI Model for Documents" dropdown on Settings page; model badge shown in both modals after generation
+
+### Territory Intelligence
+- Auto-detects geographic/vertical territories from job title + description (Southeast, Northeast, SLED, Federal, Mid-Atlantic, Pacific Northwest, Midwest, Bay Area, Texas, Florida, etc.)
+- If detected: runs `analyzeTerritoryContext()` — an additional Claude web-search call using `claude-haiku-4-5` (non-fatal, parallel to existing research)
+- `TerritoryContext` fields: `territoryDetected`, `whyThisTerritory`, `keyIndustries`, `majorProspects`, `recentWins`, `competitiveLandscape`, `marketMoment`, `candidateAdvantage`
+- Cover letter: territory block injected into generation prompt — opening paragraph references territory strategic importance, candidate experience in that geography called out explicitly
+- Resume tailoring: territory block injected into step 3 — summary and bullets reframed to surface geographic/industry relevance
+- If no territory detected: step skipped entirely, zero performance impact
+
 ## API Routes
 
 - `GET/PUT /api/criteria` — All search criteria including new tier settings
@@ -143,7 +171,9 @@ Logic:
 - `POST /api/scout/run`, `GET /api/scout/status`, `GET /api/scout/auto-status`
 - `POST /api/jobs/{id}/outreach` — Claude-generated LinkedIn DM (connection request + follow-up DM)
 - **Auto-scheduler**: On startup, schedules a check every 15 min; auto-runs if last completed run > 20 hours ago. No user action required after first setup.
-- `GET/PUT /api/settings/:key` — Key-value settings (resume text, etc.)
+- `GET/PUT /api/settings/:key` — Key-value settings (resume text, document_model, etc.)
+- `POST /api/jobs/{id}/cover-letter` — Cover letter generation with research + territory intelligence
+- `POST /api/jobs/{id}/tailor-resume` — Resume tailoring V2 with ATS analysis + territory intelligence
 - `GET /api/gmail/status`, `GET /api/gmail/setup-url`, `GET /api/gmail/callback`, `POST /api/gmail/disconnect`, `POST /api/gmail/send-digest`
 
 ## Gmail Setup
