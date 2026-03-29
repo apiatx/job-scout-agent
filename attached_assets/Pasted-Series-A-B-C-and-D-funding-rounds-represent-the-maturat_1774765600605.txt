@@ -1,0 +1,44 @@
+Series A, B, C, and D funding rounds represent the maturation of a company from a promising startup into a mature, scaling enterprise. The phase where a company is "selling like crazy," experiencing intense adoption and hypergrowth, is generally the Series B and Series C stages. 
+Medium
+Medium
+ +3
+Here are the key differences between the series, focused on company characteristics:
+1. Series A: Proof of Scalability (The Foundation) 
+Purpose: To optimize the product-market fit, establish a repeatable business model, and begin initial revenue generation.
+Characteristics: The company has a product and early customers, but needs to prove they can acquire more customers efficiently.
+Goal: To establish a scalable, sustainable business model rather than just high revenue. 
+gigCMO
+gigCMO
+ +4
+2. Series B: The Hypergrowth Phase (Scaling Operations)
+Purpose: To scale up, increase market share, and take the company to the next level.
+Characteristics: This is the primary hypergrowth phase where the company has found product-market fit and is "scaling without the wheels coming off". The company is hiring rapidly, expanding sales/marketing, and increasing its workforce.
+Goal: Rapid acceleration of growth after proving the model in Series A. 
+gigCMO
+gigCMO
+ +4
+3. Series C: Scaling & Dominance (Rapid Expansion)
+Purpose: To accelerate growth, enter international markets, or acquire other companies to maintain market dominance.
+Characteristics: The company is already successful and is looking to "dominate" its market. Investors are often larger institutions, hedge funds, or private equity.
+Goal: Preparing for a "liquidity event," such as an IPO or acquisition. 
+Investopedia
+Investopedia
+ +4
+4. Series D+: Late Stage & Exit Preparation
+Purpose: Further expansion before going public or staying private longer.
+Characteristics: Companies at this stage have a proven business model and strong market position, or they are raising capital to survive before an exit ("down round" risk).
+Goal: Achieving profitability, preparing for IPO, or making a major acquisition. 
+Startups.com
+Startups.com
+ +2
+Summary of Differences
+Feature 	Series A	Series B	Series C	Series D+
+Focus	Product-Market Fit	Hypergrowth	Market Dominance	Exit Preparation
+Stage	Early stage	Expansion stage	Mature stage	Mature/Late
+Revenue	Early traction	Strong/Rapidly growing	Proven/High	Substantial
+Risk	High	Moderate	Low	Very Low
+The "Selling Like Crazy" Phase
+The Series B stage is widely considered the point of hypergrowth. This is when the company moves beyond proving that people want the product (Series A) to needing to build the machine that can sell it to thousands or millions of users. It is often described as the "dizzying" point where "servers start failing, your customer support starts working weekends and your CEO starts to grow bald". 
+Startups.com
+Startups.com
+ +2

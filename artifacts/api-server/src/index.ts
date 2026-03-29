@@ -10,6 +10,8 @@ import type { ScrapedJob } from './scraper.js';
 import { runGeminiJobDiscovery, deduplicateJobLists, isDirectCompanyUrl, normalizeUrl as normalizeJobUrl } from './gemini_discovery.js';
 import { generateCareerIntel } from './career_intel.js';
 import type { CareerIntelCriteria } from './career_intel.js';
+import { generatePreIpo, initPreIpoDB, getLatestPreIpo, savePreIpo } from './preipo.js';
+import type { PreIpoCriteria } from './preipo.js';
 import {
   initPositioningDB, getProfile, saveProfile, getStories, saveStory, deleteStory,
   getOutputs, generateOutputs, getObjections, generateObjections,
@@ -286,6 +288,7 @@ async function initDb(): Promise<void> {
   `);
 
   await initPositioningDB(pool);
+  await initPreIpoDB(pool);
 
   // Add columns if they don't exist (for existing installs)
   const safeAddColumn = async (table: string, col: string, type: string) => {
@@ -1188,6 +1191,43 @@ app.post('/api/career-intel/refresh', async (_req, res: Response) => {
     res.json({ data: result, generated_at: result.generated_at, stale: false });
   } catch (e) {
     console.error('[CareerIntel] Refresh failed:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// ── Pre-IPO Intelligence ───────────────────────────────────────────────────────
+// GET  /api/preipo        — return cached result (stale flag if >24h)
+// POST /api/preipo/refresh — regenerate synchronously and persist
+
+app.get('/api/preipo', async (_req, res: Response) => {
+  try {
+    const cached = await getLatestPreIpo(pool);
+    if (!cached) { res.json({ data: null, stale: false }); return; }
+    res.json({ data: cached.data, generated_at: cached.data.generated_at, stale: cached.stale });
+  } catch (e) {
+    console.error('[PreIPO] GET failed:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+app.post('/api/preipo/refresh', async (_req, res: Response) => {
+  try {
+    const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
+    const c = cRows[0] ?? {};
+    const criteria: PreIpoCriteria = {
+      target_roles:    c.target_roles    ?? [],
+      industries:      c.industries      ?? [],
+      locations:       c.locations       ?? [],
+      must_have:       c.must_have       ?? [],
+      vertical_niches: c.vertical_niches ?? [],
+      min_salary:      c.min_salary      ?? null,
+    };
+    console.log('[PreIPO] Manual refresh triggered via API');
+    const result = await generatePreIpo(criteria);
+    await savePreIpo(pool, result);
+    res.json({ data: result, generated_at: result.generated_at, stale: false });
+  } catch (e) {
+    console.error('[PreIPO] Refresh failed:', e);
     res.status(500).json({ error: String(e) });
   }
 });
@@ -3078,6 +3118,65 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .intel-footer{font-size:11px;color:var(--muted);margin-top:20px;padding-top:14px;border-top:1px solid var(--border)}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media(max-width:700px){.intel-cards{grid-template-columns:1fr}.intel-themes-grid{grid-template-columns:1fr}}
+/* ── Pre-IPO Intelligence ─────────────────────────────────────────────────── */
+.preipo-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px;flex-wrap:wrap}
+.preipo-meta{font-size:11px;color:var(--muted);margin-top:2px}
+.preipo-thesis-box{background:linear-gradient(135deg,#1a1600 0%,#0e0e0e 100%);border:1px solid #f5c84266;border-radius:10px;padding:16px 18px;margin-bottom:20px;display:grid;grid-template-columns:auto 1fr;gap:10px 16px;align-items:start}
+.preipo-thesis-icon{font-size:28px;line-height:1;margin-top:2px}
+.preipo-thesis-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--gold);margin-bottom:5px}
+.preipo-thesis-text{font-size:13px;color:var(--text);line-height:1.65}
+.preipo-market-ctx{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 18px;font-size:12.5px;line-height:1.7;color:var(--text);margin-bottom:18px}
+.preipo-stage-filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px}
+.preipo-stage-btn{padding:5px 14px;font-size:12px;font-weight:600;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;transition:all .13s}
+.preipo-stage-btn:hover{border-color:var(--gold);color:var(--text)}
+.preipo-stage-btn.active{background:var(--gold);color:#000;border-color:var(--gold)}
+.preipo-stage-btn.seriesb{border-color:#f5c84266;color:#f5c842}
+.preipo-stage-btn.seriesb.active{background:var(--gold);color:#000}
+.preipo-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(350px,1fr));gap:14px}
+.preipo-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px;transition:border-color .15s;position:relative}
+.preipo-card:hover{border-color:var(--gold)}
+.preipo-card.is-seriesb{border-color:#f5c84233}
+.preipo-card.is-seriesb:hover{border-color:var(--gold)}
+.preipo-card-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.preipo-card-name{font-size:14px;font-weight:700;color:var(--text)}
+.preipo-card-url{font-size:11px;color:var(--muted);text-decoration:none;display:block;margin-top:2px}
+.preipo-card-url:hover{color:var(--gold)}
+.preipo-card-badges{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0}
+.preipo-stage-badge{padding:3px 9px;border-radius:5px;font-size:11px;font-weight:700;white-space:nowrap}
+.preipo-stage-a{background:#7c8dff22;color:#7c8dff;border:1px solid #7c8dff44}
+.preipo-stage-b{background:#f5c84222;color:#f5c842;border:1px solid #f5c84244}
+.preipo-stage-c{background:#00c86e22;color:#00c86e;border:1px solid #00c86e44}
+.preipo-stage-d{background:#ff900022;color:#ff9000;border:1px solid #ff900044}
+.preipo-action-badge{padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+.preipo-action-now{background:#00c86e22;color:#00c86e;border:1px solid #00c86e44}
+.preipo-action-watch{background:#f5c84222;color:#f5c842;border:1px solid #f5c84244}
+.preipo-action-network{background:#7c8dff22;color:#7c8dff;border:1px solid #7c8dff44}
+.preipo-action-monitor{background:#88888822;color:#888;border:1px solid #88888844}
+.preipo-momentum{display:flex;align-items:center;gap:8px}
+.preipo-momentum-bar{flex:1;height:5px;background:#ffffff12;border-radius:3px;overflow:hidden}
+.preipo-momentum-fill{height:100%;border-radius:3px;transition:width .4s}
+.preipo-momentum-val{font-size:11px;color:var(--muted);white-space:nowrap;width:36px;text-align:right}
+.preipo-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.preipo-val{font-size:12px;color:var(--text);line-height:1.6;margin-top:2px}
+.preipo-signals{display:flex;flex-direction:column;gap:3px;margin-top:2px}
+.preipo-signal{font-size:11px;color:#00c86e;padding-left:13px;position:relative;line-height:1.5}
+.preipo-signal::before{content:'↑';position:absolute;left:0;font-size:10px}
+.preipo-risk{font-size:11px;color:#ff6b6b;padding-left:13px;position:relative;line-height:1.5}
+.preipo-risk::before{content:'!';position:absolute;left:0;font-weight:700}
+.preipo-chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:3px}
+.preipo-chip{font-size:11px;background:#ffffff0d;border:1px solid var(--border);border-radius:4px;padding:2px 8px;color:var(--muted)}
+.preipo-divider{height:1px;background:var(--border);margin:2px 0}
+.preipo-cites{display:flex;flex-direction:column;gap:3px;margin-top:2px}
+.preipo-cite{font-size:11px;color:var(--muted);text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;display:block}
+.preipo-cite:hover{color:var(--gold)}
+.preipo-footer{font-size:11px;color:var(--muted);margin-top:20px;padding-top:14px;border-top:1px solid var(--border)}
+.preipo-empty{padding:48px 0;text-align:center;color:var(--muted);font-size:13px}
+.preipo-loading-wrap{display:flex;align-items:center;gap:16px;padding:48px 0;justify-content:center}
+.preipo-spinner{width:22px;height:22px;border:2px solid var(--border);border-top-color:var(--gold);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0}
+.preipo-loading-msg{font-size:13px;color:var(--muted);line-height:1.6}
+.preipo-error-box{background:#ff6b6b18;border:1px solid #ff6b6b44;border-radius:8px;padding:14px 16px;font-size:13px;color:#ff6b6b;margin-bottom:16px}
+.preipo-seriesb-label{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--gold);position:absolute;top:12px;right:12px;opacity:.7}
+@media(max-width:700px){.preipo-grid{grid-template-columns:1fr}}
 /* ── Positioning Engine ────────────────────────────────────────────────────── */
 .pos-layout{display:flex;flex-direction:column;height:100%;padding:24px;gap:20px;max-width:1100px}
 .pos-steps{display:flex;gap:6px;flex-wrap:wrap}
@@ -3204,6 +3303,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="tab sub-tab" id="tab-saved" onclick="showTab('saved')" data-tooltip="Jobs you've starred. Generate tailored resumes and cover letters from each one.">&nbsp;&nbsp;Saved Jobs</div>
   <div class="tab" id="tab-research" onclick="showTab('research')" data-tooltip="Deep-dive company research powered by Claude. Culture, financials, hiring signals, and interview prep before you apply.">Research</div>
   <div class="tab" id="tab-intel" onclick="showTab('intel')" data-tooltip="Gemini scans the web daily for companies actively hiring in your space. Market trends, emerging themes, hot companies to target now.">Career Intel</div>
+  <div class="tab" id="tab-preipo" onclick="showTab('preipo')" data-tooltip="Explosive pre-IPO companies worth joining NOW. Series B is the sweet spot — proven PMF, scaling sales motion, meaningful equity. Ranked by momentum score using real funding data.">Pre-IPO</div>
   <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Does two things: (1) tells the scraper which ATS pages to hit, and (2) boosts every listed company's score. Keep to your genuine top 10–15 or the boost is meaningless.">Companies</div>
   <div class="tab" id="tab-resume" onclick="showTab('resume')" data-tooltip="Your uploaded resume. The first 2,500 characters go to Claude on every scoring run so it can judge whether you actually qualify — not just keyword match.">Resume</div>
   <div class="tab" id="tab-email" onclick="showTab('email')" data-tooltip="Daily email digest of your top matches sent to your inbox. Configure send time, preview the content, and manage your Gmail connection here.">Daily Jobs Report</div>
@@ -3391,6 +3491,53 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="intel-cards" id="intel-cards"></div>
 
     <div class="intel-footer" id="intel-footer"></div>
+  </div>
+</div>
+
+<div class="panel" id="panel-preipo">
+  <div class="preipo-header">
+    <div>
+      <div class="sec-title" style="margin-bottom:4px">Pre-IPO Opportunity Radar</div>
+      <div class="preipo-meta" id="preipo-meta">Powered by Gemini + Google Search &mdash; identifies hypergrowth companies by funding stage</div>
+    </div>
+    <button class="btn btn-gold btn-sm" id="preipo-refresh-btn" onclick="refreshPreIpo()">Refresh Radar</button>
+  </div>
+
+  <div id="preipo-loading" style="display:none">
+    <div class="preipo-loading-wrap">
+      <div class="preipo-spinner"></div>
+      <div class="preipo-loading-msg">Gemini is scanning funding data, growth signals, and hiring intelligence&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;90 seconds</span></div>
+    </div>
+  </div>
+
+  <div id="preipo-empty" style="display:none">
+    <div class="preipo-empty">No Pre-IPO data yet.<br>Click &ldquo;Refresh Radar&rdquo; to scan for explosive growth companies worth joining now.</div>
+  </div>
+
+  <div id="preipo-error" style="display:none" class="preipo-error-box"></div>
+
+  <div id="preipo-content" style="display:none">
+    <div class="preipo-thesis-box" id="preipo-thesis-box">
+      <div class="preipo-thesis-icon">&#x26A1;</div>
+      <div>
+        <div class="preipo-thesis-title">Why Series B is the Sales Sweet Spot Right Now</div>
+        <div class="preipo-thesis-text" id="preipo-thesis-text"></div>
+      </div>
+    </div>
+
+    <div class="preipo-market-ctx" id="preipo-market-ctx"></div>
+
+    <div class="preipo-stage-filters" id="preipo-stage-filters">
+      <button class="preipo-stage-btn active" data-stage="all" onclick="filterPreIpo('all')">All</button>
+      <button class="preipo-stage-btn" data-stage="Series A" onclick="filterPreIpo('Series A')">Series A</button>
+      <button class="preipo-stage-btn seriesb" data-stage="Series B" onclick="filterPreIpo('Series B')">&#x2B50; Series B &mdash; Hypergrowth</button>
+      <button class="preipo-stage-btn" data-stage="Series C" onclick="filterPreIpo('Series C')">Series C</button>
+      <button class="preipo-stage-btn" data-stage="Series D+" onclick="filterPreIpo('Series D+')">Series D+</button>
+    </div>
+
+    <div class="preipo-grid" id="preipo-grid"></div>
+
+    <div class="preipo-footer" id="preipo-footer"></div>
   </div>
 </div>
 
@@ -3923,7 +4070,7 @@ function sizeClawd() {
 window.addEventListener('resize', sizeClawd);
 
 // ── tabs ─────────────────────────────────────────────────────────────────
-var TABS = ['jobs','saved','research','intel','companies','resume','email','runs','positioning','settings','clawd'];
+var TABS = ['jobs','saved','research','intel','preipo','companies','resume','email','runs','positioning','settings','clawd'];
 function showTab(name) {
   TABS.forEach(function(t) {
     document.getElementById('tab-' + t).classList.toggle('active', t === name);
@@ -3939,6 +4086,7 @@ function showTab(name) {
   if (name === 'email')     { loadGmailStatus(); loadEmailPreview(); loadDigestTime(); }
   if (name === 'settings')  loadCriteria();
   if (name === 'intel')     loadCareerIntel();
+  if (name === 'preipo')    loadPreIpo();
   if (name === 'positioning') loadPositioning();
 }
 
@@ -5569,6 +5717,208 @@ async function refreshCareerIntel(silent) {
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Refresh Intel'; }
   }
+}
+
+// ── Pre-IPO Intelligence ──────────────────────────────────────────────────
+var preIpoLoaded = false;
+var preIpoAllCompanies = [];
+
+function pEl(id) { return document.getElementById(id); }
+
+function setPreIpoState(state) {
+  ['loading','empty','error','content'].forEach(function(s) {
+    pEl('preipo-' + s).style.display = s === state ? '' : 'none';
+  });
+}
+
+async function loadPreIpo() {
+  if (preIpoLoaded) return;
+  setPreIpoState('loading');
+  try {
+    var res = await fetch('/api/preipo');
+    var json = await res.json();
+    if (!res.ok) throw new Error(json.error || 'Failed to load Pre-IPO data');
+    if (!json.data) { setPreIpoState('empty'); return; }
+    preIpoLoaded = true;
+    renderPreIpo(json.data, json.generated_at, json.stale);
+    if (json.stale) {
+      pEl('preipo-meta').innerHTML += ' &nbsp;<span style="color:#f5c842">(stale &mdash; refreshing&hellip;)</span>';
+      refreshPreIpo(true);
+    }
+  } catch(e) {
+    pEl('preipo-error').textContent = 'Error loading Pre-IPO data: ' + e.message;
+    setPreIpoState('error');
+  }
+}
+
+async function refreshPreIpo(silent) {
+  var btn = pEl('preipo-refresh-btn');
+  if (!silent) setPreIpoState('loading');
+  if (btn) { btn.disabled = true; btn.textContent = 'Scanning\u2026'; }
+  try {
+    var res = await fetch('/api/preipo/refresh', { method: 'POST' });
+    var json = await res.json();
+    if (!res.ok) throw new Error(json.error || 'Refresh failed');
+    preIpoLoaded = true;
+    renderPreIpo(json.data, json.generated_at, false);
+  } catch(e) {
+    if (!silent) {
+      pEl('preipo-error').textContent = 'Refresh failed: ' + e.message;
+      setPreIpoState('error');
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Refresh Radar'; }
+  }
+}
+
+function renderPreIpo(data, generatedAt, stale) {
+  preIpoAllCompanies = data.companies || [];
+
+  // Thesis box
+  if (data.series_b_thesis) pEl('preipo-thesis-text').textContent = data.series_b_thesis;
+
+  // Market context
+  if (data.market_context) pEl('preipo-market-ctx').textContent = data.market_context;
+
+  // Meta line
+  var dt = generatedAt ? new Date(generatedAt).toLocaleString() : '';
+  var modelNote = data.model_used ? ' via ' + data.model_used : '';
+  var srcNote = data.grounding_sources_count > 0 ? ' \u00B7 ' + data.grounding_sources_count + ' sources' : '';
+  pEl('preipo-meta').textContent = 'Generated ' + dt + modelNote + srcNote + (stale ? ' \u00B7 stale' : '');
+
+  // Render all companies, sorted by momentum
+  filterPreIpo('all');
+  setPreIpoState('content');
+
+  // Stage counts for filter buttons
+  var stageCounts = { all: preIpoAllCompanies.length };
+  preIpoAllCompanies.forEach(function(c) {
+    var s = c.funding_stage || 'Unknown';
+    stageCounts[s] = (stageCounts[s] || 0) + 1;
+  });
+  document.querySelectorAll('.preipo-stage-btn').forEach(function(btn) {
+    var stage = btn.getAttribute('data-stage');
+    var count = stageCounts[stage] || 0;
+    if (count > 0) btn.setAttribute('data-count', count);
+  });
+
+  // Footer
+  pEl('preipo-footer').textContent = 'Data sourced via Gemini + Google Search grounding. Verify funding details independently before acting.';
+}
+
+function filterPreIpo(stage) {
+  // Update active button
+  document.querySelectorAll('.preipo-stage-btn').forEach(function(btn) {
+    btn.classList.toggle('active', btn.getAttribute('data-stage') === stage);
+  });
+
+  var companies = stage === 'all'
+    ? preIpoAllCompanies
+    : preIpoAllCompanies.filter(function(c) { return c.funding_stage === stage; });
+
+  var grid = pEl('preipo-grid');
+  if (companies.length === 0) {
+    grid.innerHTML = '<div class="preipo-empty" style="grid-column:1/-1">No companies found for this stage.</div>';
+    return;
+  }
+  grid.innerHTML = companies.map(buildPreIpoCard).join('');
+}
+
+function buildPreIpoCard(c) {
+  var isB = c.funding_stage === 'Series B';
+  var stageClass = {
+    'Series A': 'preipo-stage-a',
+    'Series B': 'preipo-stage-b',
+    'Series C': 'preipo-stage-c',
+    'Series D+': 'preipo-stage-d'
+  }[c.funding_stage] || 'preipo-stage-a';
+
+  var actionClass = {
+    'apply_now':    'preipo-action-now',
+    'watch_closely':'preipo-action-watch',
+    'network_in':   'preipo-action-network',
+    'monitor':      'preipo-action-monitor'
+  }[c.action] || 'preipo-action-monitor';
+  var actionLabel = {
+    'apply_now':    'Apply Now',
+    'watch_closely':'Watch Closely',
+    'network_in':   'Network In',
+    'monitor':      'Monitor'
+  }[c.action] || c.action;
+
+  var score = c.momentum_score || 0;
+  var scoreColor = score >= 90 ? '#00c86e' : score >= 75 ? '#f5c842' : score >= 60 ? '#7c8dff' : '#888';
+
+  var signals = (c.hypergrowth_signals || []).slice(0, 4).map(function(s) {
+    return '<div class="preipo-signal">' + s + '</div>';
+  }).join('');
+
+  var risks = (c.risk_flags || []).slice(0, 3).map(function(r) {
+    return '<div class="preipo-risk">' + r + '</div>';
+  }).join('');
+
+  var roles = (c.likely_roles || []).slice(0, 4).map(function(r) {
+    return '<span class="preipo-chip">' + r + '</span>';
+  }).join('');
+
+  var investors = (c.lead_investors || []).slice(0, 3).join(', ');
+
+  var cites = (c.source_citations || []).slice(0, 2).map(function(s) {
+    return '<a href="' + s.url + '" target="_blank" rel="noopener" class="preipo-cite">' + s.title + '</a>';
+  }).join('');
+
+  var urlHtml = c.company_url
+    ? '<a href="' + c.company_url + '" target="_blank" rel="noopener" class="preipo-card-url">' + c.company_url.replace(/^https?:\/\//, '') + '</a>'
+    : '';
+
+  var fundingLine = [
+    c.last_round_size,
+    c.last_round_date ? ('&bull; ' + c.last_round_date) : '',
+    investors ? ('&bull; ' + investors) : ''
+  ].filter(Boolean).join(' ');
+
+  var equityLine = c.equity_upside || '';
+  var ipoLine = c.ipo_timeline_guess ? ('IPO: ' + c.ipo_timeline_guess) : '';
+
+  return '<div class="preipo-card' + (isB ? ' is-seriesb' : '') + '">' +
+    (isB ? '<div class="preipo-seriesb-label">&#x26A1; Hypergrowth</div>' : '') +
+    '<div class="preipo-card-top">' +
+      '<div>' +
+        '<div class="preipo-card-name">' + c.company_name + '</div>' +
+        (c.vertical ? '<div style="font-size:11px;color:var(--muted);margin-top:1px">' + c.vertical + (c.founded_year ? ' &bull; Founded ' + c.founded_year : '') + '</div>' : '') +
+        urlHtml +
+      '</div>' +
+      '<div class="preipo-card-badges">' +
+        '<span class="preipo-stage-badge ' + stageClass + '">' + (c.funding_stage || 'Unknown') + '</span>' +
+        '<span class="preipo-action-badge ' + actionClass + '">' + actionLabel + '</span>' +
+      '</div>' +
+    '</div>' +
+
+    '<div class="preipo-momentum">' +
+      '<span class="preipo-lbl" style="white-space:nowrap;width:70px">Momentum</span>' +
+      '<div class="preipo-momentum-bar"><div class="preipo-momentum-fill" style="width:' + score + '%;background:' + scoreColor + '"></div></div>' +
+      '<span class="preipo-momentum-val" style="color:' + scoreColor + '">' + score + '</span>' +
+    '</div>' +
+
+    (c.why_explosive_now ? '<div class="preipo-card-section"><div class="preipo-lbl">Why Explosive Now</div><div class="preipo-val">' + c.why_explosive_now + '</div></div>' : '') +
+
+    (signals ? '<div class="preipo-card-section"><div class="preipo-lbl">Hypergrowth Signals</div>' + signals + '</div>' : '') +
+
+    (fundingLine ? '<div class="preipo-card-section"><div class="preipo-lbl">Funding</div><div class="preipo-val">' + fundingLine + '</div></div>' : '') +
+
+    (c.sales_opportunity ? '<div class="preipo-divider"></div><div class="preipo-card-section"><div class="preipo-lbl">Sales Opportunity</div><div class="preipo-val">' + c.sales_opportunity + '</div></div>' : '') +
+
+    (c.estimated_ote_range ? '<div class="preipo-card-section"><div class="preipo-lbl">Est. OTE</div><div class="preipo-val" style="color:var(--gold);font-weight:600">' + c.estimated_ote_range + '</div></div>' : '') +
+
+    (roles ? '<div class="preipo-card-section"><div class="preipo-lbl">Likely Roles</div><div class="preipo-chips">' + roles + '</div></div>' : '') +
+
+    ((equityLine || ipoLine) ? '<div class="preipo-card-section"><div class="preipo-lbl">Equity &amp; Exit</div><div class="preipo-val">' + [equityLine, ipoLine].filter(Boolean).join(' &mdash; ') + '</div></div>' : '') +
+
+    (risks ? '<div class="preipo-divider"></div><div class="preipo-card-section"><div class="preipo-lbl">Risk Flags</div>' + risks + '</div>' : '') +
+
+    (cites ? '<div class="preipo-card-section"><div class="preipo-lbl">Sources</div><div class="preipo-cites">' + cites + '</div></div>' : '') +
+
+  '</div>';
 }
 
 // ── Positioning Engine ────────────────────────────────────────────────────
