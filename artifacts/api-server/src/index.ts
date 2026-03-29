@@ -5868,7 +5868,7 @@ function buildPreIpoCard(c) {
   }).join('');
 
   var urlHtml = c.company_url
-    ? '<a href="' + c.company_url + '" target="_blank" rel="noopener" class="preipo-card-url">' + c.company_url.replace(/^https?:\/\//, '') + '</a>'
+    ? '<a href="' + c.company_url + '" target="_blank" rel="noopener" class="preipo-card-url">' + c.company_url.replace(/^https?:\\/\\//, '') + '</a>'
     : '';
 
   var fundingLine = [
