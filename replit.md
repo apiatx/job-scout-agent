@@ -36,7 +36,7 @@ artifacts/api-server/
 - `jobs` — Job matches with AI scores, tiers, sub_scores JSONB
 - `settings` — Key/value store (resume text, active_resume_id, schedule, etc.)
 - `saved_resumes` — Named resume versions (id, name, content, created_at)
-- `scout_runs` — Run history
+- `scout_runs` — Run history (+ `current_stage TEXT`, `jobs_in_pipeline INT` for live progress tracking)
 - `tailored_docs` — Generated resumes/cover letters per job
 - `research_briefs` — Claude company research cache
 - `salary_estimates` — Claude salary estimate cache
@@ -140,7 +140,9 @@ Logic:
 - `PATCH /api/jobs/{id}/status`, `POST /api/jobs/{id}/generate-docs`
 - `POST /api/jobs/rescore-all` — Re-score all unscored jobs with Claude (batches of 6)
 - `POST /api/jobs/reclassify-local` — Re-classify all scored jobs using stored sub_scores (no AI calls)
-- `POST /api/scout/run`, `GET /api/scout/status`
+- `POST /api/scout/run`, `GET /api/scout/status`, `GET /api/scout/auto-status`
+- `POST /api/jobs/{id}/outreach` — Claude-generated LinkedIn DM (connection request + follow-up DM)
+- **Auto-scheduler**: On startup, schedules a check every 15 min; auto-runs if last completed run > 20 hours ago. No user action required after first setup.
 - `GET/PUT /api/settings/:key` — Key-value settings (resume text, etc.)
 - `GET /api/gmail/status`, `GET /api/gmail/setup-url`, `GET /api/gmail/callback`, `POST /api/gmail/disconnect`, `POST /api/gmail/send-digest`
 

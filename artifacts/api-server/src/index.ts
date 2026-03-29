@@ -25,6 +25,8 @@ import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
 const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT) || 8080;
+const AUTO_RUN_CHECK_MS = 15 * 60 * 1000;   // check every 15 min
+const AUTO_RUN_THRESHOLD_H = 20;             // trigger if no run in 20 hours
 
 if (!process.env.DATABASE_URL) {
   console.error('ERROR: DATABASE_URL environment variable is not set.');
@@ -309,6 +311,8 @@ async function initDb(): Promise<void> {
   await safeAddColumn('criteria', 'experience_levels', "TEXT[] NOT NULL DEFAULT '{}'");
   await safeAddColumn('criteria', 'min_ote', 'INT');
   await safeAddColumn('saved_resumes', 'content_html', 'TEXT NOT NULL DEFAULT \'\'');
+  await safeAddColumn('scout_runs', 'current_stage', "TEXT NOT NULL DEFAULT ''");
+  await safeAddColumn('scout_runs', 'jobs_in_pipeline', 'INT NOT NULL DEFAULT 0');
   // Migrate remote_strict → allowed_work_modes for existing rows
   await pool.query(`
     UPDATE criteria
@@ -1338,6 +1342,77 @@ app.delete('/api/jobs/:id/save', async (req: Request, res: Response) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+// ── LinkedIn outreach message generator ───────────────────────────────────
+app.post('/api/jobs/:id/outreach', async (req: Request, res: Response) => {
+  try {
+    const jobId = Number(req.params.id);
+    const { rows: jobRows } = await pool.query('SELECT * FROM jobs WHERE id=$1', [jobId]);
+    if (jobRows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
+    const job = jobRows[0] as any;
+
+    const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
+    const criteria = cRows[0] as any ?? {};
+    const { rows: resumeRows } = await pool.query('SELECT content FROM saved_resumes ORDER BY saved_at DESC LIMIT 1');
+    const resume = (resumeRows[0]?.content ?? '').slice(0, 2000);
+
+    const prompt = `You are helping a job seeker reach out to someone at ${job.company} about this role: "${job.title}".
+
+Candidate profile (resume excerpt):
+${resume || `Sales professional with experience in ${(criteria.industries ?? []).join(', ') || 'enterprise software'}`}
+
+Why this job fits:
+${job.why_good_fit || 'Strong match for skills and experience'}
+
+Write two short outreach messages:
+
+1. LinkedIn Connection Request (≤300 characters, no subject line, casual and genuine, mention the specific role):
+[CONNECTION REQUEST]
+<message here>
+
+2. LinkedIn DM after connecting (3-4 sentences, warm but professional, reference the role, ONE clear ask — a 15-min call):
+[LINKEDIN DM]
+<message here>
+
+Do not use generic phrases like "I hope this message finds you well". Be specific. Use first person.`;
+
+    const anthropic = getAnthropicClient();
+    const msg = await anthropic.messages.create({
+      model: 'claude-haiku-4-5',
+      max_tokens: 600,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const raw = (msg.content[0] as any).text as string;
+
+    const connMatch = raw.match(/\[CONNECTION REQUEST\]\s*([\s\S]*?)(?=\[LINKEDIN DM\]|$)/i);
+    const dmMatch  = raw.match(/\[LINKEDIN DM\]\s*([\s\S]*?)$/i);
+
+    res.json({
+      connection_request: connMatch ? connMatch[1].trim() : raw.slice(0, 300),
+      linkedin_dm: dmMatch ? dmMatch[1].trim() : raw,
+    });
+  } catch (e) {
+    console.error('Outreach generation error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// ── Auto-run status endpoint ───────────────────────────────────────────────
+app.get('/api/scout/auto-status', async (_req, res: Response) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT started_at FROM scout_runs WHERE status='completed' ORDER BY started_at DESC LIMIT 1"
+    );
+    const lastRun = rows[0]?.started_at ? new Date(rows[0].started_at) : null;
+    const hoursSince = lastRun ? (Date.now() - lastRun.getTime()) / 3_600_000 : null;
+    const nextRunInH = hoursSince != null ? Math.max(0, AUTO_RUN_THRESHOLD_H - hoursSince) : 0;
+    res.json({
+      last_run: lastRun,
+      next_run_in_hours: Math.round(nextRunInH * 10) / 10,
+      threshold_hours: AUTO_RUN_THRESHOLD_H,
+    });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 // Opportunity Rescore — backfill sub-scores and tiers for existing jobs
 let rescoreRunning = false;
 
@@ -2299,6 +2374,10 @@ async function runScoutInBackground(runId: number): Promise<void> {
       experienceLevels: criteria.experience_levels ?? ['senior'],
     };
 
+    const setStage = async (stage: string) => {
+      await pool.query(`UPDATE scout_runs SET current_stage=$1 WHERE id=$2`, [stage, runId]).catch(() => {});
+    };
+
     const { rows: companies } = await pool.query('SELECT * FROM companies');
     console.log(`\n════════════════════════════════════════════════════════════`);
     console.log(`SCOUT RUN #${runId} — ${companies.length} companies loaded from database`);
@@ -2314,6 +2393,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     let companiesScanned = 0;
     const perCompanyStats: { name: string; type: string; jobs: number; error?: string }[] = [];
 
+    await setStage(`Scraping ${companies.length} ATS job boards…`);
     // ── Stage 2a: Scrape Greenhouse, Lever, and Workday companies ──
     for (const c of companies) {
       const co = c as { id: number; name: string; ats_type: string; ats_slug: string | null; careers_url: string | null; scan_failures: number; ats_types_tried: string[] };
@@ -2368,6 +2448,8 @@ async function runScoutInBackground(runId: number): Promise<void> {
       }
     }
 
+    await setStage(`ATS done (${allJobs.length} found) — searching LinkedIn & Indeed via JobSpy…`);
+    await pool.query(`UPDATE scout_runs SET jobs_in_pipeline=$1 WHERE id=$2`, [allJobs.length, runId]).catch(() => {});
     // ── Stage 2b: JobSpy — LinkedIn + Indeed + (Glassdoor/ZipRecruiter via proxy) ──
     try {
       const jobSpyResults = await runJobSpyScraper({
@@ -2412,6 +2494,8 @@ async function runScoutInBackground(runId: number): Promise<void> {
       allJobs.push(...safeJobSpyJobs.map(j => ({ ...j, source: sourceByUrl.get(j.applyUrl) ?? 'JobSpy' })));
     }
 
+    await setStage(`JobSpy done (${allJobs.length} total) — running Gemini discovery…`);
+    await pool.query(`UPDATE scout_runs SET jobs_in_pipeline=$1 WHERE id=$2`, [allJobs.length, runId]).catch(() => {});
     // ── Stage 2c: Gemini + Google Search grounding — supplemental discovery ──
     let geminiJobsFound = 0;
     let geminiDeduped = 0;
@@ -2597,6 +2681,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
       return;
     }
 
+    await setStage(`Scoring ${newJobs.length} new jobs with Claude AI…`);
     // Load the candidate's resume for resume-aware scoring
     const { rows: resumeSettingRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
     const candidateResume: string = resumeSettingRows[0]?.value ?? '';
@@ -2656,6 +2741,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
       );
     }
 
+    await setStage(`${matches.length} matches saved — estimating salaries…`);
     console.log(`\n──── DATABASE INSERT ───────────────────────────────────────`);
     console.log(`Saved ${matches.length} jobs to database for scout run #${runId}`);
 
@@ -2796,6 +2882,32 @@ app.use((_req: Request, res: Response) => {
 
 // ── Start server ──────────────────────────────────────────────────────────
 
+// ── Auto-run scheduler ─────────────────────────────────────────────────────
+async function checkAutoRun(): Promise<void> {
+  if (scoutRunning) return;
+  try {
+    const { rows: cRows } = await pool.query('SELECT id FROM criteria LIMIT 1');
+    if (cRows.length === 0) return;
+    const { rows: runRows } = await pool.query(
+      "SELECT started_at FROM scout_runs WHERE status='completed' ORDER BY started_at DESC LIMIT 1"
+    );
+    if (runRows.length > 0) {
+      const hoursSince = (Date.now() - new Date(runRows[0].started_at).getTime()) / 3_600_000;
+      if (hoursSince < AUTO_RUN_THRESHOLD_H) return;
+    }
+    console.log('[AutoRun] Triggering scheduled scout run…');
+    const { rows: newRun } = await pool.query(
+      "INSERT INTO scout_runs (status, jobs_found) VALUES ('running', 0) RETURNING *"
+    );
+    scoutRunning = true;
+    runScoutInBackground(newRun[0].id)
+      .catch(console.error)
+      .finally(() => { scoutRunning = false; });
+  } catch (e) {
+    console.error('[AutoRun] Check error:', e);
+  }
+}
+
 initDb()
   .then(async () => {
     // Auto-reclassify all existing jobs using current tier logic (free, no Claude)
@@ -2803,6 +2915,10 @@ initDb()
       const n = await reclassifyJobsLocally();
       if (n > 0) console.log(`Startup reclassify: updated ${n} job tiers to match current logic`);
     } catch (e) { console.warn('Startup reclassify skipped:', e); }
+
+    // Start auto-scheduler: check immediately after 2 min, then every 15 min
+    setTimeout(checkAutoRun, 2 * 60 * 1000);
+    setInterval(checkAutoRun, AUTO_RUN_CHECK_MS);
 
     const server = app.listen(PORT, () => {
       console.log(`Job Scout Agent listening on port ${PORT}`);
@@ -2870,6 +2986,22 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .btn-red{background:var(--red);color:#fff}
 .btn-sm{padding:5px 12px;font-size:12px}
 .run-msg{font-size:12px;color:var(--muted)}
+.run-stage{font-size:11px;color:var(--gold);margin-left:4px;font-style:italic}
+.run-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.auto-run-badge{font-size:11px;color:var(--muted);padding:3px 9px;border:1px solid #2a2a2a;border-radius:20px;margin-left:auto;white-space:nowrap}
+
+/* Outreach modal */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px}
+.modal-box{background:var(--surface);border:1px solid var(--border);border-radius:12px;width:100%;max-width:540px;padding:24px;position:relative}
+.modal-title{font-size:15px;font-weight:700;margin-bottom:16px;color:var(--text)}
+.modal-section{margin-bottom:18px}
+.modal-label{font-size:11px;font-weight:700;color:var(--gold);letter-spacing:.06em;text-transform:uppercase;margin-bottom:6px}
+.modal-text{background:#111;border:1px solid #282828;border-radius:8px;padding:12px;font-size:13px;line-height:1.65;color:var(--text);white-space:pre-wrap;word-break:break-word;min-height:48px}
+.modal-char-count{font-size:10px;color:var(--muted);text-align:right;margin-top:3px}
+.modal-close{position:absolute;top:12px;right:14px;background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;line-height:1}
+.modal-close:hover{color:var(--text)}
+.modal-copy-btn{font-size:11px;padding:4px 11px;margin-top:5px}
+.modal-spinner{text-align:center;padding:32px;color:var(--muted);font-size:13px}
 
 /* layout */
 .app-body{display:flex;flex:1;min-height:0}
@@ -2937,6 +3069,26 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .jobs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;margin-top:16px}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
 .card-head{padding:16px 18px 12px;border-bottom:1px solid #1e1e1e}
+
+/* ── Redesigned card components ─── */
+.card-tier-row{display:flex;align-items:center;justify-content:space-between;padding:13px 16px 0}
+.score-chip{font-size:19px;font-weight:800;color:var(--gold);line-height:1;min-width:36px;text-align:right}
+.score-chip.score-green{color:var(--green)}
+.score-chip.score-red{color:var(--red)}
+.card-title-block{padding:7px 16px 10px}
+.card-v2-title{font-size:15px;font-weight:700;line-height:1.3;color:var(--text)}
+.card-co-line{font-size:12px;color:var(--muted);margin-top:3px;display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.card-co-name{color:var(--gold);font-weight:600}
+.new-pill{background:rgba(76,175,136,.18);color:var(--green);border:1px solid rgba(76,175,136,.3);border-radius:10px;padding:1px 7px;font-size:10px;font-weight:700}
+.card-signal{margin:0 14px 10px;background:rgba(200,169,110,.07);border:1px solid rgba(200,169,110,.2);border-radius:8px;padding:10px 12px}
+.signal-label{font-size:10px;font-weight:700;color:var(--gold);letter-spacing:.07em;text-transform:uppercase;margin-bottom:5px;display:flex;align-items:center;gap:5px}
+.signal-text{font-size:12.5px;line-height:1.65;color:var(--text)}
+.card-meta-strip{padding:8px 16px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;border-top:1px solid #1c1c1c}
+.meta-salary{color:var(--green);font-size:12px;font-weight:600}
+.card-foot{padding:10px 14px 13px;display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.btn-reach{background:rgba(124,141,255,.12);color:#7c8dff;border:1px solid rgba(124,141,255,.3)}
+.btn-reach:hover{background:rgba(124,141,255,.22)}
+.btn-apply{background:var(--gold);color:#0f0f0f;font-weight:700}
 .score-row{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px}
 .score-val{color:var(--gold);font-size:13px;font-weight:600}
 .bar-bg{height:3px;background:#222;border-radius:2px}
@@ -3295,6 +3447,19 @@ textarea:focus,input:focus{border-color:var(--gold)}
 <div class="run-bar">
   <button class="btn btn-gold" id="run-btn" onclick="runScout()">&#9654; Run Scout Now</button>
   <span class="run-msg" id="run-msg"></span>
+  <span class="run-stage" id="run-stage" style="display:none"></span>
+  <span class="auto-run-badge" id="auto-run-badge" style="display:none"></span>
+</div>
+
+<!-- Outreach modal -->
+<div class="modal-overlay" id="outreach-modal" style="display:none" onclick="if(event.target===this)closeOutreach()">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeOutreach()">&times;</button>
+    <div class="modal-title" id="outreach-title">Reach Out</div>
+    <div id="outreach-body">
+      <div class="modal-spinner">Drafting your message with Claude&#8230;</div>
+    </div>
+  </div>
 </div>
 
 <div class="app-body">
@@ -4298,63 +4463,90 @@ function renderRepVueBadge(j) {
 
 function renderJobCard(j, opts) {
   opts = opts || {};
-  var barColor = j.match_score >= 80 ? 'var(--green)' : j.match_score >= 50 ? 'var(--gold)' : 'var(--red)';
   var isSaved = !!j.saved_at;
-  var newBadge = (opts.showNew && isNew(j)) ? '<span class="new-badge">NEW</span>' : '';
-  var savedDate = (opts.showSavedDate && j.saved_at) ? '<div class="saved-date">Saved ' + new Date(j.saved_at).toLocaleDateString() + '</div>' : '';
-  var saveLabel = isSaved ? 'Saved' : 'Save';
+  var saveLabel = isSaved ? '\u2605 Saved' : '\u2606 Save';
   var saveClass = isSaved ? 'save-btn saved' : 'save-btn';
 
-  // Salary display logic
+  // Score chip colour
+  var scoreChipClass = j.match_score >= 80 ? 'score-chip score-green' : j.match_score >= 50 ? 'score-chip' : 'score-chip score-red';
+
+  // Tier badge
+  var tBadge = tierBadgeHtml(j) || '<span style="color:var(--muted);font-size:11px">Unscored</span>';
+
+  // Company line: name · location · age
+  var ageTxt = jobAge(j);
+  var coLineParts = ['<span class="card-co-name">' + esc(j.company) + '</span>'];
+  if (j.location) coLineParts.push(esc(j.location));
+  if (ageTxt) coLineParts.push('<span>' + esc(ageTxt) + '</span>');
+  if (opts.showNew && isNew(j)) coLineParts.push('<span class="new-pill">NEW</span>');
+  if (opts.showSavedDate && j.saved_at) coLineParts.push('<span style="font-size:10px">saved ' + new Date(j.saved_at).toLocaleDateString() + '</span>');
+
+  // Salary
   var salaryHtml = '';
   if (j.salary && j.salary !== 'Unknown' && j.salary !== 'N/A' && j.salary.trim() !== '') {
-    salaryHtml = '<span style="color:var(--green)">\\uD83D\\uDCB0 ' + esc(j.salary) + '</span>';
+    salaryHtml = '<span class="meta-salary">\uD83D\uDCB0 ' + esc(j.salary) + '</span>';
   } else if (j.salary_estimate) {
     salaryHtml = formatSalaryEstimate(typeof j.salary_estimate === 'string' ? JSON.parse(j.salary_estimate) : j.salary_estimate);
   }
 
-  var repvueBadge = renderRepVueBadge(j);
-
+  // AI risk badge
   var aiRiskBadge = '';
   if (j.ai_risk && j.ai_risk !== 'unknown') {
-    var riskLabel = j.ai_risk === 'LOW' ? '\\u2705 AI Safe' : j.ai_risk === 'MEDIUM' ? '\\u26A0\\uFE0F AI Medium' : '\\u26D4 AI Risk';
+    var riskLabel = j.ai_risk === 'LOW' ? '\u2705 AI Safe' : j.ai_risk === 'MEDIUM' ? '\u26A0\uFE0F AI Med' : '\u26D4 AI Risk';
     var riskTitle = j.ai_risk_reason ? esc(j.ai_risk_reason) : '';
     aiRiskBadge = '<span class="ai-risk-badge ai-risk-' + esc(j.ai_risk) + '" title="' + riskTitle + '">' + riskLabel + '</span>';
   }
 
-  var tierClass = tierCssClass(j);
-  var tBadge = tierBadgeHtml(j);
+  // Territory badge
+  var territoryBadge = isRemoteInTerritory(j.location) ? '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600;background:rgba(255,159,67,.12);color:#ff9f43;border:1px solid rgba(255,159,67,.3)" title="Territory role — must be based near listed city">\u26A0 Territory</span>' : '';
+
+  // Source badge
+  var srcBadge = j.source ? '<span class="source-badge" data-src="' + esc(j.source) + '">' + esc(j.source) + '</span>' : '';
+
+  // RepVue badge
+  var repvueBadge = renderRepVueBadge(j);
+
+  // Sub-scores toggle
   var ssHtml = subScoresHtml(j);
-  var ssToggle = j.sub_scores ? '<button class="sub-score-toggle" onclick="toggleSubScores(' + j.id + ')">Scoring Details</button>' : '';
-  var territoryBadge = isRemoteInTerritory(j.location) ? '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600;background:rgba(255,159,67,.12);color:#ff9f43;border:1px solid rgba(255,159,67,.3)" title="This job requires you to live near the listed city, not work from anywhere.">&#x26A0; Territory</span>' : '';
+  var ssToggle = j.sub_scores ? '<button class="sub-score-toggle" style="font-size:10px;margin-left:auto" onclick="toggleSubScores(' + j.id + ')">Details</button>' : '';
+
+  // Show "Reach Out" only for Top Target and Fast Win
+  var tier = (j.opportunity_tier || '').toLowerCase();
+  var showReach = tier.indexOf('top') !== -1 || tier.indexOf('fast') !== -1;
+  // Use data-* attributes to avoid escaping issues in onclick
+  var reachBtn = showReach ? '<button class="btn btn-reach btn-sm" data-jid="' + j.id + '" data-jtit="' + esc(j.title) + '" data-jco="' + esc(j.company) + '" onclick="openOutreach(this.dataset.jid,this.dataset.jtit,this.dataset.jco)">\u2709 Reach Out</button>' : '';
+
+  var tierClass = tierCssClass(j);
 
   return '<div class="card ' + tierClass + '">' +
-    '<div class="card-head">' +
-      '<div class="score-row">' +
-        '<span style="display:flex;align-items:center;gap:8px">' + (tBadge || '<span style="color:var(--muted);font-size:11px">Unscored</span>') + '</span>' +
-        '<span class="score-val">' + esc(j.match_score) + ' / 100</span>' +
-      '</div>' +
-      '<div class="bar-bg"><div class="bar-fg" style="width:' + esc(j.match_score) + '%;background:' + barColor + '"></div></div>' +
-      '<div class="job-title">' + esc(j.title) + newBadge + '</div>' +
-      '<div class="job-co">' + esc(j.company) + '</div>' +
-      savedDate +
+    // ── Tier row: badge + score chip
+    '<div class="card-tier-row">' +
+      '<span>' + tBadge + '</span>' +
+      '<span class="' + scoreChipClass + '">' + esc(j.match_score) + '</span>' +
     '</div>' +
-    '<div class="card-meta">' +
-      '<span>\\uD83D\\uDCCD ' + esc(j.location) + '</span>' +
+    // ── Title block
+    '<div class="card-title-block">' +
+      '<div class="card-v2-title">' + esc(j.title) + '</div>' +
+      '<div class="card-co-line">' + coLineParts.join('<span style="color:#333;margin:0 1px">&nbsp;\u00B7&nbsp;</span>') + '</div>' +
+    '</div>' +
+    // ── Signal: Why this fits you
+    (j.why_good_fit ? '<div class="card-signal"><div class="signal-label">\uD83C\uDFAF Why this fits you</div><div class="signal-text">' + esc(j.why_good_fit) + '</div></div>' : '') +
+    // ── Meta strip: salary, risk, source, territory
+    '<div class="card-meta-strip">' +
       salaryHtml +
       aiRiskBadge +
       territoryBadge +
+      srcBadge +
       repvueBadge +
-      (j.source ? '<span class="source-badge" data-src="' + esc(j.source) + '">' + esc(j.source) + '</span>' : '') +
-      (jobAge(j) ? '<span class="age-badge">' + jobAge(j) + '</span>' : '') +
       ssToggle +
     '</div>' +
     ssHtml +
-    (j.why_good_fit ? '<div class="card-why">' + esc(j.why_good_fit) + '</div>' : '') +
+    // ── Actions
     '<div class="card-foot">' +
-      '<a href="' + esc(j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-gold btn-sm">View Posting \\u2192</a>' +
+      '<a href="' + esc(j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-apply btn-sm">Apply Now \u2192</a>' +
+      reachBtn +
       '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ')">Tailor Resume</button>' +
-      '<button class="btn btn-ghost btn-sm" id="research-btn-' + j.id + '" onclick="researchCompany(' + j.id + ')">\\uD83D\\uDD0D Research Company</button>' +
+      '<button class="btn btn-ghost btn-sm" id="research-btn-' + j.id + '" onclick="researchCompany(' + j.id + ')">\uD83D\uDD0D Research</button>' +
       '<button class="' + saveClass + '" onclick="toggleSave(' + j.id + ')" id="save-btn-' + j.id + '">' + saveLabel + '</button>' +
     '</div>' +
   '</div>';
@@ -4994,8 +5186,11 @@ var pollTimer = null;
 async function runScout() {
   var btn = document.getElementById('run-btn');
   var msg = document.getElementById('run-msg');
+  var stageEl = document.getElementById('run-stage');
+  var autoEl = document.getElementById('auto-run-badge');
   btn.disabled = true;
-  msg.textContent = 'Starting\\u2026';
+  stageEl.style.display = 'none';
+  msg.textContent = 'Starting\u2026';
   try {
     var res = await fetch('/api/scout/run', { method:'POST' });
     if (!res.ok) {
@@ -5010,7 +5205,9 @@ async function runScout() {
     return;
   }
   document.getElementById('dot').className = 'dot running';
-  msg.textContent = 'Scraping job boards and scoring with Claude\\u2026';
+  if (autoEl) autoEl.style.display = 'none';
+  msg.textContent = 'Scouting\u2026';
+  var jobRefreshTimer = null;
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(async function() {
     try {
@@ -5018,18 +5215,26 @@ async function runScout() {
       var runs = await r.json();
       var latest = runs[0];
       if (!latest) return;
+      // Show live stage
+      if (latest.current_stage && stageEl) {
+        stageEl.textContent = latest.current_stage;
+        stageEl.style.display = 'inline';
+      }
       if (latest.status !== 'running') {
         clearInterval(pollTimer); pollTimer = null;
+        if (jobRefreshTimer) { clearInterval(jobRefreshTimer); jobRefreshTimer = null; }
         btn.disabled = false;
+        stageEl.style.display = 'none';
         document.getElementById('dot').className = 'dot';
         _jobsRetries = 0;
         loadStats();
+        loadAutoRunBadge();
         if (latest.status === 'completed') {
           var found = latest.matches_found || latest.jobs_found;
-          msg.textContent = 'Done! Found ' + found + ' new match' + (found !== 1 ? 'es' : '') + ' this run';
+          msg.textContent = 'Done! ' + found + ' new match' + (found !== 1 ? 'es' : '') + ' found';
           loadJobs().then(function() {
             if (_allJobs.length > found) {
-              msg.textContent = 'Done! Found ' + found + ' new match' + (found !== 1 ? 'es' : '') + ' (' + _allJobs.length + ' total)';
+              msg.textContent = 'Done! ' + found + ' new match' + (found !== 1 ? 'es' : '') + ' (\u2022 ' + _allJobs.length + ' total)';
             }
           });
         } else {
@@ -5038,7 +5243,76 @@ async function runScout() {
       }
     } catch(e) {}
   }, 3000);
+  // Auto-refresh job list every 45s during scan so user sees jobs as they're scored
+  jobRefreshTimer = setInterval(function() {
+    if (pollTimer) loadJobs().catch(function(){});
+    else { clearInterval(jobRefreshTimer); jobRefreshTimer = null; }
+  }, 45000);
 }
+
+async function loadAutoRunBadge() {
+  try {
+    var r = await fetch('/api/scout/auto-status');
+    var d = await r.json();
+    var el = document.getElementById('auto-run-badge');
+    if (!el) return;
+    if (d.next_run_in_hours <= 0) {
+      el.textContent = '\u23F0 Auto-run: due soon';
+    } else {
+      var h = d.next_run_in_hours;
+      var label = h < 1 ? 'in ' + Math.round(h * 60) + 'm' : 'in ' + Math.round(h) + 'h';
+      el.textContent = '\u23F0 Next auto-run ' + label;
+    }
+    el.style.display = 'inline';
+  } catch(e) { /* ignore */ }
+}
+
+// ── Outreach modal ──────────────────────────────────────────────────────────
+async function openOutreach(jobId, title, company) {
+  var modal = document.getElementById('outreach-modal');
+  var titleEl = document.getElementById('outreach-title');
+  var body = document.getElementById('outreach-body');
+  titleEl.textContent = '\u2709 Reach out about ' + title + ' @ ' + company;
+  body.innerHTML = '<div class="modal-spinner">Drafting with Claude\u2026</div>';
+  modal.style.display = 'flex';
+  try {
+    var res = await fetch('/api/jobs/' + jobId + '/outreach', { method: 'POST' });
+    if (!res.ok) { throw new Error('Failed'); }
+    var d = await res.json();
+    var connLen = (d.connection_request || '').length;
+    body.innerHTML =
+      '<div class="modal-section">' +
+        '<div class="modal-label">\uD83D\uDD17 LinkedIn Connection Request (' + connLen + '/300 chars)</div>' +
+        '<div class="modal-text" id="outreach-conn">' + esc(d.connection_request || '') + '</div>' +
+        '<div class="modal-char-count">' + connLen + ' characters</div>' +
+        '<button class="btn btn-ghost btn-sm modal-copy-btn" onclick="copyConn(this)">\uD83D\uDCCB Copy</button>' +
+      '</div>' +
+      '<div class="modal-section">' +
+        '<div class="modal-label">\uD83D\uDCAC LinkedIn DM (after connecting)</div>' +
+        '<div class="modal-text" id="outreach-dm">' + esc(d.linkedin_dm || '') + '</div>' +
+        '<button class="btn btn-ghost btn-sm modal-copy-btn" onclick="copyDm(this)">\uD83D\uDCCB Copy</button>' +
+      '</div>' +
+      '<div style="font-size:11px;color:var(--muted);margin-top:4px">Tip: search LinkedIn for a recruiter or hiring manager at ' + esc(company) + ' before sending.</div>';
+  } catch(e) {
+    body.innerHTML = '<div style="color:var(--red);padding:16px">Failed to generate outreach. Please try again.</div>';
+  }
+}
+
+function closeOutreach() {
+  document.getElementById('outreach-modal').style.display = 'none';
+}
+
+function copyOutreach(elId, btn) {
+  var text = document.getElementById(elId).textContent;
+  navigator.clipboard.writeText(text).then(function() {
+    btn.textContent = '\u2713 Copied!';
+    setTimeout(function() { btn.textContent = '\uD83D\uDCCB Copy'; }, 2000);
+  }).catch(function() {
+    btn.textContent = 'Select & copy manually';
+  });
+}
+function copyConn(btn) { copyOutreach('outreach-conn', btn); }
+function copyDm(btn)   { copyOutreach('outreach-dm', btn); }
 
 // ── settings / criteria ────────────────────────────────────────────────────
 var _criteriaTagState = {};
@@ -6202,6 +6476,46 @@ loadJobs();
 loadStats();
 loadGmailStatus();
 loadCriteria();  // always load settings from DB on page load so they survive refresh/redeploy
+loadAutoRunBadge();
+// If a run was already in progress when page loaded, resume polling
+(async function() {
+  try {
+    var r = await fetch('/api/scout/status');
+    var runs = await r.json();
+    var latest = runs[0];
+    if (latest && latest.status === 'running') {
+      document.getElementById('dot').className = 'dot running';
+      document.getElementById('run-btn').disabled = true;
+      document.getElementById('run-msg').textContent = 'Scout run in progress\u2026';
+      if (latest.current_stage) {
+        var stg = document.getElementById('run-stage');
+        if (stg) { stg.textContent = latest.current_stage; stg.style.display = 'inline'; }
+      }
+      // Resume polling
+      if (!pollTimer) {
+        pollTimer = setInterval(async function() {
+          try {
+            var r2 = await fetch('/api/scout/status');
+            var runs2 = await r2.json();
+            var l2 = runs2[0];
+            if (!l2) return;
+            var stg2 = document.getElementById('run-stage');
+            if (l2.current_stage && stg2) { stg2.textContent = l2.current_stage; stg2.style.display = 'inline'; }
+            if (l2.status !== 'running') {
+              clearInterval(pollTimer); pollTimer = null;
+              document.getElementById('run-btn').disabled = false;
+              if (stg2) stg2.style.display = 'none';
+              document.getElementById('dot').className = 'dot';
+              loadStats(); loadJobs(); loadAutoRunBadge();
+              var found = l2.matches_found || l2.jobs_found || 0;
+              document.getElementById('run-msg').textContent = l2.status === 'completed' ? 'Done! ' + found + ' matches found' : 'Run failed: ' + (l2.error || 'unknown');
+            }
+          } catch(e2) {}
+        }, 3000);
+      }
+    }
+  } catch(e) {}
+})();
 </script>
 </body>
 </html>`;
