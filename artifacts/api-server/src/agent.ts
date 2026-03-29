@@ -637,11 +637,16 @@ export async function tailorResumeWithClaude(
   options?: { targetPages?: 1 | 2; model?: string }
 ): Promise<{ resume: string; coverLetter: string; suggestedEdits?: string; analysis?: TailoringAnalysis }> {
 
-  // Estimate base resume word count to calibrate page target
+  // Measure the original resume's exact character length — this is the hard constraint
+  // The user's uploaded resume is assumed to fit perfectly on one page.
+  // The tailored output must match it closely so no re-formatting is needed.
+  const baseCharCount = baseResume.trim().length;
+  const charMin = Math.round(baseCharCount * 0.93);
+  const charMax = Math.round(baseCharCount * 1.07);
+
+  // Keep word count only for page-count heuristic
   const baseWordCount = baseResume.trim().split(/\s+/).length;
   const targetPages = options?.targetPages ?? (baseWordCount > 600 ? 2 : 1);
-  const wordMin = targetPages === 1 ? 480 : 850;
-  const wordMax = targetPages === 1 ? 680 : 1150;
 
   const systemPrompt = `You are the world's foremost ATS-optimization specialist and executive resume strategist. Your resumes have a 94% interview callback rate because you follow an ironclad process:
 
@@ -666,11 +671,19 @@ Every experience bullet must:
 2. Include the quantifiable result (ARR, %, headcount, deal size, quota %, timeline)
 3. Mirror the JD's language naturally within the bullet
 
-PHASE 4 — PAGE LENGTH DISCIPLINE:
-The resume MUST fit the target page count. This is non-negotiable.
-- 1-page target: ${wordMin}-${wordMax} words in the body. Cut ruthlessly — one role gets 2-3 bullets max, older roles may be collapsed.
-- 2-page target: ${wordMin}-${wordMax} words. Expand bullets with context and achievements.
-Count your words before finalizing. If over limit, edit down. If under, enrich.
+PHASE 4 — LENGTH MATCHING (THE MOST CRITICAL CONSTRAINT):
+The original resume is ${baseCharCount} characters. The tailored resume MUST be between ${charMin} and ${charMax} characters (±7% of original length). This is non-negotiable.
+
+WHY this matters: The candidate's original resume fits perfectly on exactly one page. If your output is longer, it overflows to a second page and the candidate has to manually delete words in Word to fix it — potentially cutting content you carefully placed. If it's shorter, there is wasted white space. Either way, the formatting is broken.
+
+HOW to achieve this:
+- Every character you ADD (new keyword, new bullet, expanded phrasing) requires you to CUT an equal number of characters elsewhere
+- Prioritize: add high-signal JD keywords → cut low-signal filler words and weak phrases
+- Trim verbose phrases: "was responsible for managing" → "managed"; "in order to" → "to"; "a wide variety of" → "various"
+- Collapse older/less-relevant bullets: 3 bullets → 2 tighter bullets with the same information density
+- Never pad to fill space — be dense and purposeful
+
+BEFORE FINALIZING: Count your output characters. If outside ${charMin}–${charMax}, keep editing until you're within range.
 
 PHASE 5 — REASONING LOG (after writing the resume):
 Write a clear, honest explanation of every meaningful change you made in the tailored resume — what was changed, what you removed, what you added, and exactly why. Reference the JD signals that drove each decision. Be specific: name the bullet, name the keyword, name the section. This helps the candidate understand and trust the output.
@@ -717,26 +730,28 @@ ${job.description ? `Job Description:\n${job.description.slice(0, 4000)}` : ''}
 ${job.why_good_fit ? `\nStrategic fit notes: ${job.why_good_fit}` : ''}
 
 ═══════════════════════════════
-CANDIDATE BASE RESUME (~${baseWordCount} words)
+CANDIDATE BASE RESUME (${baseCharCount} characters)
 ═══════════════════════════════
 ${baseResume}
 
 ═══════════════════════════════
-TARGET
+TARGET — READ THIS BEFORE WRITING
 ═══════════════════════════════
-Page count: ${targetPages} page${targetPages > 1 ? 's' : ''} (${wordMin}–${wordMax} words in resume body)
+Page count: ${targetPages} page${targetPages > 1 ? 's' : ''}
+HARD LENGTH CONSTRAINT: Your resume output must be ${charMin}–${charMax} characters (original: ${baseCharCount}). Do not go outside this range. The original fits one page — exceeding ${charMax} chars causes page overflow; going under ${charMin} chars leaves wasted space. Tailor the content, not the volume.
 
 Respond ONLY with a valid JSON object — no markdown fences, no text outside the JSON:
 {
   "analysis": {
     "targetPageCount": ${targetPages},
-    "wordTarget": "${wordMin}–${wordMax}",
+    "originalCharCount": ${baseCharCount},
+    "charTarget": "${charMin}–${charMax}",
     "requiredSkills": ["exact phrase from JD", "...up to 10"],
     "preferredSkills": ["...", "...up to 6"],
     "methodologies": ["MEDDPICC", "...any found"],
     "keySignals": ["Enterprise hunter", "...3-5 nuance signals you detected"],
     "keywordsPlaced": ["list every JD keyword you successfully wove into the resume"],
-    "pageEstimate": "~X words → fits Y page(s)"
+    "outputCharEstimate": "~XXXX characters → fits Y page(s)"
   },
   "resume": "# Full Name\\n\\n## Summary\\n[2-3 sentence power summary mirroring JD language]\\n\\n## Experience\\n**Job Title** — **Company Name** | Location | Dates\\n- [Strong verb] + [achievement] + [metric]\\n...\\n\\n## Key Skills\\n[JD-matched skills first, comma-separated]\\n\\n## Education\\n...",
   "coverLetter": "# Cover Letter\\n\\n[First name Last name]\\n[City, State | phone | email]\\n\\n[Opening paragraph: 2-3 sentences. Start with a real, specific observation about the company or role — not a compliment, a real hook. Then make the connection to why you're reaching out. No corporate filler.]\\n\\n[Middle paragraph: 2-3 sentences. Drop 1-2 specific achievements with real numbers. Connect them directly to what the role needs. Be concrete.]\\n\\n[Closing paragraph: 1-2 sentences. Direct and confident. No groveling.]\\n\\n[First name only]",
@@ -759,6 +774,14 @@ Respond ONLY with a valid JSON object — no markdown fences, no text outside th
   try {
     const text = block.text.trim().replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
     const parsed = JSON.parse(text) as { resume: string; coverLetter: string; suggestedEdits?: string; analysis?: TailoringAnalysis };
+
+    // Log character count compliance so we can monitor how well Claude is hitting the target
+    const outputChars = (parsed.resume ?? '').length;
+    const drift = outputChars - baseCharCount;
+    const driftPct = Math.round((drift / baseCharCount) * 100);
+    const inRange = outputChars >= charMin && outputChars <= charMax;
+    console.log(`[Tailor] Length check: original=${baseCharCount} chars | output=${outputChars} chars | drift=${drift > 0 ? '+' : ''}${drift} (${driftPct > 0 ? '+' : ''}${driftPct}%) | ${inRange ? '✅ within ±7% tolerance' : '⚠️ OUTSIDE tolerance (' + charMin + '–' + charMax + ')'}`);
+
     return {
       resume: parsed.resume ?? '',
       coverLetter: parsed.coverLetter ?? '',
