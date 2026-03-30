@@ -1,0 +1,259 @@
+Good progress, but I need to correct the goal of this feature.
+
+The goal is NOT mainly to suppress bad jobs from the jobs page.
+
+The goal is:
+
+* if JobSpy returns a broken, stale, inaccurate, or lower-quality job link,
+* the system should actively find the real live posting,
+* fetch the real current job description from that source,
+* replace the inaccurate/outdated metadata,
+* and upgrade the job record so the jobs page shows the best available version of that job.
+
+In other words:
+Do not treat broken/unresolved links as a reason to simply hide jobs.
+Treat them as a recovery/resolution problem.
+The system should work hard to recover the real posting and the real job description wherever it actually lives on the internet.
+
+I need a second implementation pass focused on canonical recovery + metadata replacement, not just suppression or link health scoring.
+
+What to build now:
+
+PART 1: CORE GOAL
+For every discovered job, especially jobs from JobSpy:
+
+* determine whether the current link/data is trustworthy
+* if not, search for the real live posting
+* resolve to the best canonical URL
+* fetch the real current job description from that canonical source
+* replace stale/wrong title/link/description/location/company metadata when better validated data is found
+* preserve the original record only as debug/source provenance
+
+Important:
+The jobs page should display the recovered, corrected job record whenever possible.
+Do NOT make suppression the default behavior.
+Suppression should only happen if the system truly cannot recover a trustworthy version after multiple resolution attempts.
+
+PART 2: EXPAND RESOLUTION BEYOND BROKEN LINKS
+The current implementation appears focused too heavily on broken-link handling.
+I need canonical resolution to trigger not only when a link is broken, but also when:
+
+* the title appears inaccurate or mismatched
+* the company appears mismatched
+* the description looks incomplete/outdated/generic
+* the destination page is a generic careers page instead of a job-detail page
+* the page is an aggregator and a better direct source may exist
+* the page redirects to a stale or irrelevant destination
+* metadata quality is weak even if the link is technically live
+
+PART 3: FETCH THE REAL JOB DESCRIPTION
+This is critical.
+
+When a better canonical URL is found:
+
+* fetch the actual current job description from that resolved page
+* parse and store the corrected metadata
+* update the job record to use the recovered description as the authoritative description shown in the UI
+
+Recover and replace fields when possible:
+
+* canonical_url
+* canonical_source
+* resolved_title
+* resolved_company
+* resolved_location
+* resolved_description
+* resolved_employment_type
+* resolved_seniority
+* resolved_posted_at
+* resolved_skills or extracted keyword set
+* metadata_last_verified_at
+
+If the original JobSpy metadata differs from the recovered metadata:
+
+* prefer the recovered validated metadata for display/ranking/tailoring
+* preserve original metadata separately for debugging if useful
+
+PART 4: PAGE / JOB IDENTITY VALIDATION
+Add true semantic validation fields, not just link health:
+
+* title_match_score
+* company_match_score
+* description_quality_score
+* page_type (job_detail | careers_home | search_results | aggregator | unknown)
+* metadata_match_score
+* validation_status (validated | recovered | suspicious | failed)
+
+Validation should answer:
+
+* is this page actually the expected job?
+* is it a real job detail page?
+* does the company match?
+* does the title substantially match?
+* is the description detailed/current enough to trust?
+* did we find a better canonical source?
+
+PART 5: CANONICAL SOURCE PREFERENCE
+Use this preference order when selecting the best source:
+
+1. direct company careers or ATS job detail page
+
+   * greenhouse
+   * lever
+   * ashby
+   * workday
+   * bamboohr
+   * smartrecruiters
+   * company careers domain
+2. another reliable direct source if job-detail page exists
+3. aggregator only if no better canonical source can be found
+
+Important:
+If a live aggregator page exists but a direct ATS/company job page also exists, upgrade to the direct page and fetch that metadata instead.
+
+PART 6: GEMINI AS RECOVERY ENGINE
+Use Gemini grounded web search as an active job recovery engine.
+
+When the original job link/data is weak, Gemini should:
+
+* search for the real posting
+* search ATS domains
+* search the company’s careers site
+* compare candidate URLs
+* help identify which candidate page is the actual canonical job page
+* help extract the correct title/company/location/description from grounded evidence
+
+Gemini should help recover the real posting, not just say that the old one is bad.
+
+Example search patterns:
+
+* "[company] [job title] careers"
+* site:[company-domain] careers "[job title]"
+* site:boards.greenhouse.io "[company]" "[job title]"
+* site:jobs.lever.co "[company]" "[job title]"
+* site:jobs.ashbyhq.com "[company]" "[job title]"
+* "[company] [job title] workday"
+* "[company] [job title] remote"
+
+PART 7: REPLACEMENT / MERGE LOGIC
+When canonical recovery succeeds, merge intelligently.
+
+The job record should support:
+
+* original_url
+* original_title
+* original_description
+* original_source
+* canonical_url
+* canonical_source
+* resolved_title
+* resolved_description
+* resolved_metadata_json
+* was_resolved_by_gemini
+* validation_notes
+
+Display logic:
+
+* frontend should show recovered/canonical metadata by default
+* original metadata should remain hidden/internal unless useful for debugging
+
+This means the user sees the best recovered version of the job, not the stale scraped version.
+
+PART 8: RANKING / JOBS PAGE BEHAVIOR
+The jobs page should prefer:
+
+* validated direct-source jobs
+* recovered direct-source jobs
+* richer, more current job descriptions
+* higher metadata confidence
+
+Do not simply hide jobs because the first link failed.
+Try to recover the correct posting first.
+Only suppress if:
+
+* no trustworthy canonical URL can be found
+* no trustworthy description can be fetched
+* job identity remains too ambiguous after recovery attempts
+
+PART 9: BACKEND FLOW
+Please restructure the pipeline so it works more like this:
+
+1. collect jobs from JobSpy
+2. collect jobs from Gemini discovery if enabled
+3. normalize into common schema
+4. dedupe
+5. validate current URLs and metadata
+6. resolve canonical URLs for weak/broken/suspicious jobs
+7. fetch actual current description from canonical source
+8. replace/merge metadata with recovered validated metadata
+9. apply deterministic hard filters
+10. score/rank using corrected job data
+11. return corrected job records to the frontend
+
+Important:
+Corrected metadata should be used in filtering, scoring, and tailoring where possible.
+
+PART 10: API / FRONTEND RESPONSE
+Update the jobs response so the frontend can use the corrected record.
+
+Include fields like:
+
+* display_url
+* canonical_url
+* original_url
+* display_title
+* resolved_title
+* original_title
+* display_description
+* resolved_description
+* original_description
+* canonical_source
+* validation_status
+* page_type
+* title_match_score
+* company_match_score
+* description_quality_score
+* metadata_match_score
+* was_resolved_by_gemini
+* validation_notes
+
+Frontend behavior:
+
+* Apply button should use display_url / canonical_url
+* job card/detail view should display corrected title/description when recovered
+* optional badge:
+
+  * Verified
+  * Recovered
+  * Direct Source
+
+PART 11: IMPLEMENTATION PRIORITY
+Do not over-focus on suppression logic.
+Prioritize:
+
+1. canonical recovery
+2. fetching the real current job description
+3. replacing inaccurate data
+4. then confidence/suppression only as a last line of defense
+
+PART 12: REPORT BACK
+When finished, provide:
+
+1. summary of what changed
+2. files modified
+3. what triggers recovery
+4. how canonical URL selection works
+5. how real job descriptions are fetched and merged
+6. which fields now use recovered metadata
+7. how many jobs were successfully upgraded from bad/weak links to validated direct/canonical postings
+8. how many still remain unresolved after recovery attempts
+
+Before coding, inspect and summarize the current architecture for:
+
+* current JobSpy ingestion
+* current Gemini discovery
+* current link validation module
+* current jobs API response shape
+* current frontend Apply button / job detail rendering
+
+Then implement this recovery-first canonical job correction layer safely against the actual codebase.

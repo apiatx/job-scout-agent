@@ -14,7 +14,11 @@ A full-stack automated job search agent that discovers job listings via a **hybr
 - **Frontend**: Server-rendered HTML templates embedded in index.ts (single-file approach)
 - **Job scraping**: Direct API calls to Greenhouse, Lever, Workday REST APIs; JobSpy Python script for Indeed/LinkedIn/Glassdoor
 - **URL health check**: Background HEAD-request checker marks `url_ok` on all job links; broken links surface as warnings in UI
-- **Canonical URL resolution**: `link_validator.ts` classifies source trust (ATS direct/company/aggregator/unknown), computes `link_confidence` (high/medium/low/unknown), and uses Gemini grounded search to find live canonical URLs for broken links (score ≥ 50 threshold)
+- **Job Recovery Engine** (`link_validator.ts`): Two-phase background system that replaces bad scraped data in the DB record itself (not suppression — recovery):
+  - **Phase A (fast, parallel)**: Fetches real job descriptions from Greenhouse/Lever public JSON APIs for ATS-direct jobs with missing/short descriptions. Runs 10 concurrent fetches. No Gemini needed, no rate limits. Tries both `boards.greenhouse.io` and `job-boards.greenhouse.io` subdomains.
+  - **Phase B (slow, sequential)**: Uses Gemini grounded web search to find canonical ATS URLs for aggregator-sourced (LinkedIn/Indeed/etc.) and broken-link jobs. Capped at 15 jobs/run with 1.5s between calls.
+  - **Display fields**: `enrichJobRecord()` returns `display_title`, `display_description`, `display_url`, `display_location` — prefer resolved/recovered data over original scraped data, with guards against listing-page content (e.g. "Current openings at X").
+  - **Validation status badge**: Cards show "✔ Recovered" (teal), "✔ Verified" (green), "✔ Direct" (faint green) based on `validation_status` field.
 
 ## Project Structure
 
@@ -36,7 +40,8 @@ artifacts/api-server/
 
 - `criteria` — All user-configurable search settings
 - `companies` — Target companies (greenhouse/lever/workday/plain types)
-- `jobs` — Job matches with AI scores, tiers, sub_scores JSONB, `user_action`, `user_action_at`, `interview_prep_json`, `interview_prep_at`, `canonical_url`, `canonical_source`, `original_url`, `link_confidence`, `was_resolved_by_gemini`, `validation_notes`
+- `jobs` — Job matches with AI scores, tiers, sub_scores JSONB, `user_action`, `user_action_at`, `interview_prep_json`, `interview_prep_at`
+  - Recovery columns: `canonical_url`, `canonical_source`, `original_url`, `original_title`, `original_description`, `link_confidence`, `was_resolved_by_gemini`, `validation_notes`, `validation_status` ('validated'|'recovered'|'suspicious'|'failed'|'pending'), `page_type`, `resolved_title`, `resolved_description`, `resolved_location`, `resolved_metadata_json`, `metadata_last_verified_at`
 - `settings` — Key/value store (resume text `key='resume'`, schedule, etc.)
 - `saved_resumes` — Named resume versions (id, name, content, created_at)
 - `scout_runs` — Run history (+ `current_stage TEXT`, `jobs_in_pipeline INT` for live progress tracking)

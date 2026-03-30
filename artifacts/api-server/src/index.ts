@@ -393,9 +393,18 @@ async function initDb(): Promise<void> {
   await safeAddColumn('jobs', 'canonical_url', 'TEXT');
   await safeAddColumn('jobs', 'canonical_source', 'TEXT');
   await safeAddColumn('jobs', 'original_url', 'TEXT');
+  await safeAddColumn('jobs', 'original_title', 'TEXT');
+  await safeAddColumn('jobs', 'original_description', 'TEXT');
   await safeAddColumn('jobs', 'link_confidence', 'TEXT');
   await safeAddColumn('jobs', 'was_resolved_by_gemini', 'BOOLEAN NOT NULL DEFAULT false');
   await safeAddColumn('jobs', 'validation_notes', 'TEXT');
+  await safeAddColumn('jobs', 'validation_status', "TEXT NOT NULL DEFAULT 'pending'");
+  await safeAddColumn('jobs', 'page_type', 'TEXT');
+  await safeAddColumn('jobs', 'resolved_title', 'TEXT');
+  await safeAddColumn('jobs', 'resolved_description', 'TEXT');
+  await safeAddColumn('jobs', 'resolved_location', 'TEXT');
+  await safeAddColumn('jobs', 'resolved_metadata_json', 'JSONB');
+  await safeAddColumn('jobs', 'metadata_last_verified_at', 'TIMESTAMPTZ');
   await safeAddColumn('jobs', 'is_hardware', 'BOOLEAN NOT NULL DEFAULT false');
   await safeAddColumn('jobs', 'created_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()');
   await safeAddColumn('jobs', 'status', "TEXT NOT NULL DEFAULT 'new'");
@@ -1153,13 +1162,47 @@ function enrichJobRecord(job: Record<string, unknown>, criteria: CriteriaForRepo
     })(),
     date_posted: job.date_posted ?? null,
     url_ok:      job.url_ok      ?? null,
-    // Canonical URL resolution fields
+    // ── Canonical URL & validation fields ──────────────────────────────────────
     canonical_url:           (job.canonical_url as string | null) ?? applyUrl,
     original_url:            (job.original_url  as string | null) ?? applyUrl,
     canonical_source:        (job.canonical_source as string | null) ?? classifySourceTrust(applyUrl),
     link_confidence:         (job.link_confidence as string | null) ?? computeLinkConfidence(applyUrl, job.url_ok as boolean | null, false),
     was_resolved_by_gemini:  job.was_resolved_by_gemini ?? false,
     validation_notes:        job.validation_notes ?? null,
+    validation_status:       (job.validation_status as string | null) ?? 'pending',
+    page_type:               (job.page_type as string | null) ?? null,
+    // ── Resolved / recovered metadata fields ───────────────────────────────────
+    resolved_title:          (job.resolved_title as string | null) ?? null,
+    resolved_description:    (job.resolved_description as string | null) ?? null,
+    resolved_location:       (job.resolved_location as string | null) ?? null,
+    original_title:          (job.original_title as string | null) ?? (job.title as string),
+    original_description:    (job.original_description as string | null) ?? null,
+    metadata_last_verified_at: (job.metadata_last_verified_at as string | null) ?? null,
+    // ── Display fields: prefer recovered/canonical data over scraped ────────────
+    // Only use resolved_title if it looks like an actual job title (not a careers listing page)
+    display_title: (() => {
+      const rt = job.resolved_title as string | null;
+      if (rt) {
+        const low = rt.toLowerCase().trim();
+        const isBadTitle = low.startsWith('current opening') || low.startsWith('open role') ||
+          low.startsWith('job opportunit') || low.startsWith('career') ||
+          low.endsWith('careers') || low.endsWith(' jobs') || /\bcurrent opening/.test(low);
+        if (!isBadTitle) return rt;
+      }
+      return job.title as string;
+    })(),
+    display_description: (() => {
+      const rd = job.resolved_description as string | null;
+      if (rd) {
+        const low = rd.toLowerCase().slice(0, 80);
+        const isBad = low.includes('current opening') || low.includes('create a job alert') ||
+          low.includes('open roles') || low.includes('job opportunities');
+        if (!isBad) return rd;
+      }
+      return (job.description as string | null) ?? null;
+    })(),
+    display_url:         ((job.canonical_url as string | null) ?? applyUrl),
+    display_location:    ((job.resolved_location as string | null) ?? (job.location as string | null) ?? null),
   };
 }
 
@@ -3781,10 +3824,10 @@ async function runScoutInBackground(runId: number): Promise<void> {
       // Look up momentum warning for this company (if checked)
       const momWarning = momentumMap.get(m.company.toLowerCase().trim())?.warning ?? null;
       await pool.query(
-        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, original_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, original_url, original_title, original_description, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
          ON CONFLICT (apply_url) DO NOTHING`,
-        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), geminiMeta?.groundingMetadata ? JSON.stringify(geminiMeta.groundingMetadata) : null, geminiMeta?.confidence ?? null, momWarning, datePosted]
+        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.applyUrl, m.title, m.description ?? null, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), geminiMeta?.groundingMetadata ? JSON.stringify(geminiMeta.groundingMetadata) : null, geminiMeta?.confidence ?? null, momWarning, datePosted]
       );
     }
 
@@ -5958,7 +6001,8 @@ function renderJobCard(j, opts) {
   // Company line: name · location · age
   var ageTxt = jobAge(j);
   var coLineParts = ['<span class="card-co-name" style="cursor:pointer;text-decoration:underline;text-underline-offset:2px;text-decoration-color:rgba(245,200,66,.3)" title="Filter to ' + esc(j.company) + ' jobs" onclick="filterToCompany(' + JSON.stringify(j.company) + ')">' + esc(j.company) + '</span>'];
-  if (j.location) coLineParts.push(esc(j.location));
+  var displayLoc = j.display_location || j.location;
+  if (displayLoc) coLineParts.push(esc(displayLoc));
   if (ageTxt) coLineParts.push('<span>' + esc(ageTxt) + '</span>');
   if (isNew(j)) coLineParts.push('<span class="new-pill">\u2728 NEW</span>');
   if (opts.showSavedDate && j.saved_at) coLineParts.push('<span style="font-size:10px">saved ' + new Date(j.saved_at).toLocaleDateString() + '</span>');
@@ -5985,15 +6029,20 @@ function renderJobCard(j, opts) {
   // Source badge
   var srcBadge = j.source ? '<span class="source-badge" data-src="' + esc(j.source) + '">' + esc(j.source) + '</span>' : '';
 
-  // Link confidence / canonical source badge
-  var linkConf = j.link_confidence || 'unknown';
-  var linkResolved = !!j.was_resolved_by_gemini;
-  var linkBroken = j.url_ok === false && !linkResolved;
+  // Recovery status badge (replaces old link-confidence badge)
+  var validationStatus = j.validation_status || 'pending';
+  var linkBroken = j.url_ok === false && validationStatus !== 'recovered' && validationStatus !== 'validated';
   var confidenceBadge = '';
-  if (linkResolved) {
-    confidenceBadge = '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:600;background:rgba(0,200,150,.12);color:#00c896;border:1px solid rgba(0,200,150,.3)" title="Broken link was resolved to a verified canonical posting by AI web search">\u2714 Link Resolved</span>';
-  } else if (linkConf === 'high' && (j.canonical_source === 'ats_direct' || (j.apply_url || '').match(/greenhouse|lever\.co|ashbyhq|workday/i))) {
-    confidenceBadge = '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:600;background:rgba(74,222,128,.08);color:#4ade80;border:1px solid rgba(74,222,128,.2)" title="Direct ATS link \u2014 verified live">\u2714 Direct Link</span>';
+  if (validationStatus === 'recovered') {
+    var recovSrc = j.canonical_source || '';
+    var recovTitle = recovSrc.includes('ats') ? 'Direct ATS posting recovered from ' + recovSrc
+      : recovSrc.includes('company') ? 'Company careers page recovered from ' + recovSrc
+      : 'Job posting recovered from alternative source';
+    confidenceBadge = '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:600;background:rgba(0,200,150,.15);color:#00c896;border:1px solid rgba(0,200,150,.35)" title="' + recovTitle + '">\u2714 Recovered</span>';
+  } else if (validationStatus === 'validated') {
+    confidenceBadge = '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:600;background:rgba(74,222,128,.1);color:#4ade80;border:1px solid rgba(74,222,128,.25)" title="Job metadata validated from direct ATS source">\u2714 Verified</span>';
+  } else if (j.canonical_source === 'ats_direct' || (j.apply_url || '').match(/greenhouse|lever\.co|ashbyhq|workday/i)) {
+    confidenceBadge = '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:600;background:rgba(74,222,128,.06);color:#4ade80;border:1px solid rgba(74,222,128,.18)" title="Direct ATS link">\u2714 Direct</span>';
   }
 
   // RepVue badge
@@ -6057,7 +6106,7 @@ function renderJobCard(j, opts) {
     '</div>' +
     // ── Title block
     '<div class="card-title-block">' +
-      '<div class="card-v2-title">' + esc(j.title) + '</div>' +
+      '<div class="card-v2-title">' + esc(j.display_title || j.title) + '</div>' +
       '<div class="card-co-line">' + coLineParts.join('<span style="color:#333;margin:0 1px">&nbsp;\u00B7&nbsp;</span>') + '</div>' +
     '</div>' +
     // ── Signal: Why this fits you
@@ -6080,7 +6129,7 @@ function renderJobCard(j, opts) {
     ssHtml +
     // ── Actions
     '<div class="card-foot">' +
-      '<a href="' + esc(j.canonical_url || j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-apply btn-sm' + (linkBroken ? ' btn-link-warn' : '') + '" title="' + (linkBroken ? '\u26a0 Link may be broken or expired \u2014 try searching the company careers page' : linkResolved ? '\u2714 Link verified and resolved by AI web search' : 'Apply to this job') + '">Apply Now \u2192' + (linkBroken ? ' \u26a0' : '') + '</a>' +
+      '<a href="' + esc(j.display_url || j.canonical_url || j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-apply btn-sm' + (linkBroken ? ' btn-link-warn' : '') + '" title="' + (linkBroken ? '\u26a0 Link may be broken or expired \u2014 try searching the company careers page' : (validationStatus === 'recovered' || validationStatus === 'validated') ? '\u2714 Verified direct source link' : 'Apply to this job') + '">Apply Now \u2192' + (linkBroken ? ' \u26a0' : '') + '</a>' +
       reachBtn +
       '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ')">Tailor Resume</button>' +
       '<button class="btn btn-ghost btn-sm" data-jid="' + j.id + '" data-jtit="' + esc(j.title) + '" data-jco="' + esc(j.company) + '" onclick="openCoverLetter(this.dataset.jid,this.dataset.jtit,this.dataset.jco)">\u270D Cover Letter</button>' +
