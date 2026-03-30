@@ -377,6 +377,11 @@ async function initDb(): Promise<void> {
   `).catch(() => {});
   await safeAddColumn('jobs', 'saved_at', 'TIMESTAMPTZ');
   await safeAddColumn('scout_runs', 'companies_scanned', 'INT NOT NULL DEFAULT 0');
+  await safeAddColumn('criteria', 'company_public', 'BOOLEAN NOT NULL DEFAULT true');
+  await safeAddColumn('criteria', 'company_private', 'BOOLEAN NOT NULL DEFAULT true');
+  await safeAddColumn('criteria', 'company_revenue_bands', "TEXT[] NOT NULL DEFAULT '{}'");
+  await safeAddColumn('criteria', 'company_employee_bands', "TEXT[] NOT NULL DEFAULT '{}'");
+  await safeAddColumn('criteria', 'company_funding_stages', "TEXT[] NOT NULL DEFAULT '{}'");
   await safeAddColumn('scout_runs', 'matches_found', 'INT NOT NULL DEFAULT 0');
   await safeAddColumn('jobs', 'source', "TEXT NOT NULL DEFAULT ''");
   await safeAddColumn('criteria', 'proxy_url', "TEXT NOT NULL DEFAULT ''");
@@ -754,6 +759,7 @@ app.put('/api/criteria', async (req: Request, res: Response) => {
       your_name, your_email, remote_strict,
       experience_level, stretch_companies, vertical_niches, top_target_score, fast_win_score, stretch_score,
       allowed_work_modes, experience_levels, proxy_url,
+      company_public, company_private, company_revenue_bands, company_employee_bands, company_funding_stages,
     } = req.body;
     const { rows: existing } = await pool.query('SELECT id FROM criteria LIMIT 1');
     const params = [
@@ -770,12 +776,17 @@ app.put('/api/criteria', async (req: Request, res: Response) => {
       experience_levels && experience_levels.length > 0 ? experience_levels : ['senior'],
       proxy_url ?? '',
       min_ote ?? null,
+      company_public !== false,
+      company_private !== false,
+      company_revenue_bands ?? [],
+      company_employee_bands ?? [],
+      company_funding_stages ?? [],
     ];
     let savedRow: Record<string, unknown>;
     if (existing.length === 0) {
       const { rows } = await pool.query(
-        `INSERT INTO criteria (target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email, remote_strict, experience_level, stretch_companies, vertical_niches, top_target_score, fast_win_score, stretch_score, allowed_work_modes, experience_levels, proxy_url, min_ote)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING *`, params
+        `INSERT INTO criteria (target_roles, industries, min_salary, work_type, locations, must_have, nice_to_have, avoid, your_name, your_email, remote_strict, experience_level, stretch_companies, vertical_niches, top_target_score, fast_win_score, stretch_score, allowed_work_modes, experience_levels, proxy_url, min_ote, company_public, company_private, company_revenue_bands, company_employee_bands, company_funding_stages)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26) RETURNING *`, params
       );
       savedRow = rows[0];
     } else {
@@ -783,8 +794,9 @@ app.put('/api/criteria', async (req: Request, res: Response) => {
         `UPDATE criteria SET target_roles=$1, industries=$2, min_salary=$3, work_type=$4, locations=$5,
          must_have=$6, nice_to_have=$7, avoid=$8, your_name=$9, your_email=$10, remote_strict=$11,
          experience_level=$12, stretch_companies=$13, vertical_niches=$14, top_target_score=$15, fast_win_score=$16, stretch_score=$17,
-         allowed_work_modes=$18, experience_levels=$19, proxy_url=$20, min_ote=$21
-         WHERE id=$22 RETURNING *`, [...params, existing[0].id]
+         allowed_work_modes=$18, experience_levels=$19, proxy_url=$20, min_ote=$21,
+         company_public=$22, company_private=$23, company_revenue_bands=$24, company_employee_bands=$25, company_funding_stages=$26
+         WHERE id=$27 RETURNING *`, [...params, existing[0].id]
       );
       savedRow = rows[0];
     }
@@ -4116,6 +4128,10 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .tag{display:inline-flex;align-items:center;gap:4px;background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:3px 8px;font-size:12px;color:var(--text)}
 .tag .x{cursor:pointer;color:var(--muted);font-size:14px;line-height:1}
 .tag .x:hover{color:var(--red)}
+.co-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--text);cursor:pointer;user-select:none;transition:border-color .15s,background .15s}
+.co-chip:hover{border-color:var(--gold);color:var(--gold)}
+.co-chip input[type=checkbox]{accent-color:var(--gold);cursor:pointer}
+.co-chip:has(input:checked){background:#2a220a;border-color:var(--gold);color:var(--gold)}
 .hint{font-size:9px;text-transform:none;letter-spacing:0;color:var(--muted);font-weight:400}
 
 .empty{padding:48px;text-align:center;color:var(--muted);font-size:13px}
@@ -5055,6 +5071,64 @@ textarea:focus,input:focus{border-color:var(--gold)}
       <label>Vertical Niche Signals <span class="hint">(title keywords that push a role above your level — Federal, SLED, Healthcare, etc.)</span></label>
       <input type="text" id="set-niches-input" placeholder="e.g. federal, SLED, healthcare, FSI">
       <div class="tag-list" id="set-niches-tags"></div>
+    </div>
+  </div>
+
+  <div class="sec-title" style="margin:24px 0 16px">Company Size &amp; Stage</div>
+  <div style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.6">Set the type and size of company you want to join. These preferences inform how jobs are ranked and researched — leave everything checked to stay open to all.</div>
+  <div class="settings-grid">
+    <div class="fg full" style="padding:14px 16px;background:#141414;border:1px solid var(--border);border-radius:8px">
+      <label style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:12px;display:block">Company Type <span class="hint">(select all that apply)</span></label>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
+        <label style="display:flex;align-items:flex-start;gap:9px;cursor:pointer">
+          <input type="checkbox" id="co-type-public" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0">
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--text)">Public</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">Publicly traded — NYSE, NASDAQ, etc.</div>
+          </div>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:9px;cursor:pointer">
+          <input type="checkbox" id="co-type-private" style="margin-top:2px;accent-color:var(--gold);flex-shrink:0" onchange="toggleFundingStages()">
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--text)">Private</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">Privately held — startups, PE-backed, etc.</div>
+          </div>
+        </label>
+      </div>
+      <div id="funding-stage-row" style="display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+        <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px;letter-spacing:.05em;text-transform:uppercase">Pre-IPO Funding Stage</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <label class="co-chip"><input type="checkbox" id="fs-series-a" class="co-chip-cb"><span>Series A</span></label>
+          <label class="co-chip"><input type="checkbox" id="fs-series-b" class="co-chip-cb"><span>Series B</span></label>
+          <label class="co-chip"><input type="checkbox" id="fs-series-c" class="co-chip-cb"><span>Series C</span></label>
+          <label class="co-chip"><input type="checkbox" id="fs-series-d" class="co-chip-cb"><span>Series D+</span></label>
+          <label class="co-chip"><input type="checkbox" id="fs-bootstrapped" class="co-chip-cb"><span>Bootstrapped</span></label>
+          <label class="co-chip"><input type="checkbox" id="fs-pe-backed" class="co-chip-cb"><span>PE-Backed</span></label>
+        </div>
+      </div>
+    </div>
+    <div class="fg full" style="padding:14px 16px;background:#141414;border:1px solid var(--border);border-radius:8px">
+      <label style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px;display:block">Revenue Size <span class="hint">(select all you'd consider)</span></label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <label class="co-chip"><input type="checkbox" id="rev-0-25m" class="co-chip-cb"><span>$0–25M</span></label>
+        <label class="co-chip"><input type="checkbox" id="rev-25-50m" class="co-chip-cb"><span>$25–50M</span></label>
+        <label class="co-chip"><input type="checkbox" id="rev-50-100m" class="co-chip-cb"><span>$50–100M</span></label>
+        <label class="co-chip"><input type="checkbox" id="rev-100-500m" class="co-chip-cb"><span>$100–500M</span></label>
+        <label class="co-chip"><input type="checkbox" id="rev-500m-1b" class="co-chip-cb"><span>$500M–1B</span></label>
+        <label class="co-chip"><input type="checkbox" id="rev-1b-10b" class="co-chip-cb"><span>$1B–10B</span></label>
+        <label class="co-chip"><input type="checkbox" id="rev-10b-plus" class="co-chip-cb"><span>$10B+</span></label>
+      </div>
+    </div>
+    <div class="fg full" style="padding:14px 16px;background:#141414;border:1px solid var(--border);border-radius:8px">
+      <label style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:8px;display:block">Employee Count <span class="hint">(select all you'd consider)</span></label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <label class="co-chip"><input type="checkbox" id="emp-1-10" class="co-chip-cb"><span>1–10</span></label>
+        <label class="co-chip"><input type="checkbox" id="emp-10-100" class="co-chip-cb"><span>10–100</span></label>
+        <label class="co-chip"><input type="checkbox" id="emp-100-500" class="co-chip-cb"><span>100–500</span></label>
+        <label class="co-chip"><input type="checkbox" id="emp-500-1k" class="co-chip-cb"><span>500–1K</span></label>
+        <label class="co-chip"><input type="checkbox" id="emp-1k-10k" class="co-chip-cb"><span>1K–10K</span></label>
+        <label class="co-chip"><input type="checkbox" id="emp-10k-plus" class="co-chip-cb"><span>10K+</span></label>
+      </div>
     </div>
   </div>
 
@@ -6193,7 +6267,7 @@ function renderPreferenceProfile(data) {
     var col = colors[e[0]] || '#888';
     return '<span style="background:' + col + '22;color:' + col + ';border:1px solid ' + col + '44;border-radius:4px;padding:3px 10px;font-size:12px">' + e[0].charAt(0).toUpperCase() + e[0].slice(1) + ': <strong>' + e[1] + '</strong></span>';
   }).join('');
-  var profileHtml = esc(data.profile).replace(/\\*\\*([^*]+)\\*\\*/g, '<strong style="color:var(--gold)">$1</strong>').replace(/\n/g, '<br>');
+  var profileHtml = esc(data.profile).replace(/\\*\\*([^*]+)\\*\\*/g, '<strong style="color:var(--gold)">$1</strong>').replace(/\\n/g, '<br>');
   return '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">' + statPills + '</div>' +
     '<div style="background:#0d0d0d;border:1px solid #252525;border-radius:8px;padding:16px;font-size:13px;line-height:1.75;color:var(--text)">' + profileHtml + '</div>' +
     '<div style="font-size:11px;color:var(--muted);margin-top:8px">Based on ' + esc(data.action_count) + ' tracked actions</div>';
@@ -7278,6 +7352,12 @@ async function setDocumentModel(model) {
   if (msg) { msg.style.display = ''; setTimeout(function(){ msg.style.display = 'none'; }, 2000); }
 }
 
+function toggleFundingStages() {
+  var isPrivate = document.getElementById('co-type-private');
+  var row = document.getElementById('funding-stage-row');
+  if (row) row.style.display = (isPrivate && isPrivate.checked) ? '' : 'none';
+}
+
 async function loadCriteria() {
   try {
     var c;
@@ -7325,6 +7405,28 @@ async function loadCriteria() {
     // Default vertical niches if none saved
     var defaultNiches = ['federal','government','SLED','FSI','DOD','defense','public sector','healthcare','pharma','banking','financial services'];
     setTags('vertical_niches', 'set-niches-tags', (c.vertical_niches && c.vertical_niches.length > 0) ? c.vertical_niches : defaultNiches);
+    // Company type checkboxes
+    document.getElementById('co-type-public').checked  = c.company_public  !== false;
+    document.getElementById('co-type-private').checked = c.company_private !== false;
+    toggleFundingStages();
+    // Funding stage chips
+    var fundingStages = c.company_funding_stages || [];
+    ['series-a','series-b','series-c','series-d','bootstrapped','pe-backed'].forEach(function(s) {
+      var el = document.getElementById('fs-' + s);
+      if (el) el.checked = fundingStages.includes(s);
+    });
+    // Revenue band chips
+    var revBands = c.company_revenue_bands || [];
+    ['0-25m','25-50m','50-100m','100-500m','500m-1b','1b-10b','10b-plus'].forEach(function(b) {
+      var el = document.getElementById('rev-' + b);
+      if (el) el.checked = revBands.includes(b);
+    });
+    // Employee count chips
+    var empBands = c.company_employee_bands || [];
+    ['1-10','10-100','100-500','500-1k','1k-10k','10k-plus'].forEach(function(b) {
+      var el = document.getElementById('emp-' + b);
+      if (el) el.checked = empBands.includes(b);
+    });
     if (!_criteriaInitialized) {
       initTagInput('set-loc-input', 'set-loc-tags', 'locations');
       initTagInput('set-roles-input', 'set-roles-tags', 'roles');
@@ -7363,6 +7465,27 @@ async function saveCriteria() {
     if (el && el.checked) expLevels.push(lvl);
   });
   if (expLevels.length === 0) expLevels = ['senior'];
+  // Collect company type
+  var coPublic  = document.getElementById('co-type-public').checked;
+  var coPrivate = document.getElementById('co-type-private').checked;
+  // Collect funding stages (only relevant when private is checked)
+  var fundingStages = [];
+  ['series-a','series-b','series-c','series-d','bootstrapped','pe-backed'].forEach(function(s) {
+    var el = document.getElementById('fs-' + s);
+    if (el && el.checked) fundingStages.push(s);
+  });
+  // Collect revenue bands
+  var revBands = [];
+  ['0-25m','25-50m','50-100m','100-500m','500m-1b','1b-10b','10b-plus'].forEach(function(b) {
+    var el = document.getElementById('rev-' + b);
+    if (el && el.checked) revBands.push(b);
+  });
+  // Collect employee bands
+  var empBands = [];
+  ['1-10','10-100','100-500','500-1k','1k-10k','10k-plus'].forEach(function(b) {
+    var el = document.getElementById('emp-' + b);
+    if (el && el.checked) empBands.push(b);
+  });
   var body = {
     min_salary: Number(document.getElementById('set-salary').value) || null,
     min_ote: Number(document.getElementById('set-ote').value) || null,
@@ -7380,7 +7503,12 @@ async function saveCriteria() {
     nice_to_have: _criteriaTagState.nice_to_have || [],
     avoid: _criteriaTagState.avoid || [],
     vertical_niches: _criteriaTagState.vertical_niches || [],
-    proxy_url: (document.getElementById('set-proxy-url').value || '').trim()
+    proxy_url: (document.getElementById('set-proxy-url').value || '').trim(),
+    company_public: coPublic,
+    company_private: coPrivate,
+    company_funding_stages: fundingStages,
+    company_revenue_bands: revBands,
+    company_employee_bands: empBands
   };
   try {
     var res = await fetch('/api/criteria', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
