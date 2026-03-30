@@ -40,16 +40,20 @@ export type LinkConfidence  = 'high' | 'medium' | 'low' | 'unknown';
 export type ValidationStatus = 'validated' | 'recovered' | 'suspicious' | 'failed' | 'pending';
 export type PageType        = 'job_detail' | 'careers_home' | 'aggregator' | 'unknown';
 
+export type AshbyMatchMethod = 'uuid_exact' | 'url_exact' | 'title_location' | 'title_similarity';
+
 export interface FetchedJobData {
-  title?:          string;
-  company?:        string;
-  location?:       string;
-  description?:    string;
-  employmentType?: string;
-  postedAt?:       string;
-  pageType:        PageType;
-  sourceApi:       string;       // 'greenhouse' | 'lever' | 'ashby' | 'html'
-  resolvedUrl?:    string;       // canonical URL discovered by fetcher (Ashby jobUrl, etc.)
+  title?:               string;
+  company?:             string;
+  location?:            string;
+  description?:         string;
+  employmentType?:      string;
+  postedAt?:            string;
+  pageType:             PageType;
+  sourceApi:            string;         // 'greenhouse' | 'lever' | 'ashby' | 'html'
+  resolvedUrl?:         string;         // canonical URL discovered by fetcher (Ashby jobUrl, etc.)
+  matchMethod?:         AshbyMatchMethod; // how the Ashby posting was matched
+  matchConfidence?:     number;           // 0-1 confidence score for the match
 }
 
 // ── Domain classification ─────────────────────────────────────────────────────
@@ -323,148 +327,213 @@ async function fetchFromHtml(url: string): Promise<FetchedJobData | null> {
   }
 }
 
+// ── Ashby matcher constants ────────────────────────────────────────────────────
+
 /**
- * Ashby Public Job Board API (documented, no auth required).
- *
- * Endpoint: GET https://api.ashbyhq.com/posting-api/job-board/{JOB_BOARD_NAME}
- * Response:  { jobs: [{ id, title, location, jobUrl, applyUrl, descriptionHtml, descriptionPlain, ... }] }
- *
- * URL pattern: jobs.ashbyhq.com/{JOB_BOARD_NAME}/{posting-id}[/application]
- *
- * Strategy:
- *   1. Extract JOB_BOARD_NAME (first path segment) and posting-id (second path segment) from the stored URL.
- *   2. Fetch all jobs for that board (single GET — no pagination needed, usually < 500 jobs).
- *   3. Match by posting UUID first (job.id === posting-id from our URL).
- *   4. Fall back to normalized title similarity match if UUID doesn't match (e.g. fake IDs).
- *   5. Return description, location, title, and resolvedUrl (real jobUrl from API).
+ * Role-level words that carry strong semantic meaning in job titles.
+ * A substitution of one of these for another is penalised heavily —
+ * e.g. "Strategic" ↔ "Enterprise", "Senior" ↔ "Mid-Market" etc.
  */
-async function fetchFromAshbyApi(url: string): Promise<FetchedJobData | null> {
-  // Extract JOB_BOARD_NAME and posting-id from URL
-  // e.g. https://jobs.ashbyhq.com/ramp/63df0ffc-bdc6-40ba-906f-fe03378536b0
-  const urlMatch = url.match(/jobs\.ashbyhq\.com\/([^/?#]+)(?:\/([^/?#]+))?/i);
-  if (!urlMatch) return null;
-  const boardName = urlMatch[1];           // e.g. "ramp"
-  const postingIdFromUrl = urlMatch[2]?.split('/')[0] ?? ''; // UUID or fake placeholder
+const ROLE_LEVEL_WORDS: readonly string[] = [
+  'strategic', 'enterprise', 'senior', 'mid-market', 'midmarket',
+  'director', 'manager', 'principal', 'lead', 'junior', 'associate',
+  'vp', 'president', 'head', 'staff', 'founding',
+];
 
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 12000);
-    const res = await fetch(`https://api.ashbyhq.com/posting-api/job-board/${encodeURIComponent(boardName)}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobScout/1.0)', 'Accept': 'application/json' },
-      signal: ctrl.signal,
-    });
-    clearTimeout(timer);
-    if (!res.ok) return null;
+/** Thresholds for each match strategy */
+const ASHBY_THRESHOLDS = {
+  title_location:  0.75,   // title words + location also matches → lower bar
+  title_similarity: 0.85,  // title-only fallback → stricter
+  role_substitution_penalty: 0.25, // per substituted role word
+} as const;
 
-    const data = await res.json() as Record<string, unknown>;
-    const jobs = (data.jobs ?? data.jobPostings ?? []) as Record<string, unknown>[];
-    if (!jobs.length) return null;
+/** Normalize text for matching: lowercase, strip punctuation, collapse spaces */
+function normText(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
 
-    // ── Match priority 1: exact UUID match (posting-id from URL === job.id from API)
-    let matched: Record<string, unknown> | undefined = jobs.find(
-      j => (j.id as string)?.toLowerCase() === postingIdFromUrl.toLowerCase()
-    );
-
-    // ── Match priority 2: title similarity (normalized exact substring or word overlap)
-    if (!matched) {
-      // We don't have the job title here — will be called with storedTitle context if needed.
-      // Skip fuzzy matching at this layer; title-aware matching is handled by the Phase A wrapper.
-    }
-
-    if (!matched) return null;
-
-    const title = (matched.title as string) || undefined;
-    const location = (matched.location as string) || undefined;
-    const rawHtml = (matched.descriptionHtml as string) ?? '';
-    const rawPlain = (matched.descriptionPlain as string) ?? '';
-    const descSource = rawHtml || rawPlain;
-    const desc = descSource
-      ? rawHtml
-        ? descSource.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 8000)
-        : rawPlain.slice(0, 8000)
-      : undefined;
-    const resolvedUrl = (matched.jobUrl as string) || undefined;
-
-    return {
-      title,
-      location,
-      description: desc || undefined,
-      pageType: 'job_detail',
-      sourceApi: 'ashby',
-      resolvedUrl,
-    };
-  } catch {
-    return null;
-  }
+/** Normalize location to a rough region string for comparison */
+function normLocation(s: string): string {
+  return s.toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 /**
- * Title-aware Ashby fetcher for Phase A.
- * When UUID matching fails, tries title similarity against all board jobs.
- * Called from Phase A (not from the generic dispatcher) because it needs the stored title.
+ * Scores how well `apiTitle` matches `storedTitle` using word overlap
+ * with a penalty for substituted role-level words.
+ *
+ * Returns a score in [0, 1]. Scores below the relevant threshold are rejected
+ * by the caller.
+ */
+function scoreTitle(storedTitle: string, apiTitle: string): number {
+  const normStored = normText(storedTitle);
+  const normApi    = normText(apiTitle);
+
+  const storedWords = normStored.split(' ').filter(w => w.length > 2);
+  if (!storedWords.length) return 0;
+
+  // Word overlap: fraction of stored words that appear anywhere in the API title
+  const matchedWords = storedWords.filter(w => normApi.includes(w));
+  const overlap = matchedWords.length / storedWords.length;
+
+  // Role-word substitution penalty:
+  // For each role word in storedTitle, check if the API title has a DIFFERENT role word instead
+  const storedRoleWords = ROLE_LEVEL_WORDS.filter(r => normStored.includes(r));
+  const apiRoleWords    = ROLE_LEVEL_WORDS.filter(r => normApi.includes(r));
+
+  let penalty = 0;
+  for (const r of storedRoleWords) {
+    if (!normApi.includes(r)) {
+      // Role word missing from API title
+      if (apiRoleWords.some(ar => ar !== r)) {
+        // A different role word is present — substitution
+        penalty += ASHBY_THRESHOLDS.role_substitution_penalty;
+      } else {
+        // Role word simply absent — lighter penalty (it's already captured in overlap)
+        penalty += 0.05;
+      }
+    }
+  }
+
+  return Math.max(0, overlap - penalty);
+}
+
+/** Extract the description from an Ashby API job record */
+function extractAshbyDesc(job: Record<string, unknown>): string | undefined {
+  const rawHtml  = (job.descriptionHtml  as string) ?? '';
+  const rawPlain = (job.descriptionPlain as string) ?? '';
+  if (rawHtml) {
+    const stripped = rawHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 8000);
+    return stripped || undefined;
+  }
+  return rawPlain.slice(0, 8000) || undefined;
+}
+
+/**
+ * Core Ashby matching engine.
+ *
+ * Given a pre-fetched list of board jobs and inputs (stored URL, stored title,
+ * stored location), runs the four matching strategies in priority order and
+ * returns the best match with its method and confidence, or null if nothing
+ * passes the required threshold.
+ *
+ * Priority:
+ *   1. UUID exact     — posting id from stored URL matches job.id from API    → confidence 1.0
+ *   2. URL exact      — stored URL matches job.jobUrl or job.applyUrl exactly  → confidence 1.0
+ *   3. title+location — title score ≥ 0.75 AND location region overlaps        → confidence = score
+ *   4. title-only     — title score ≥ 0.85, strict role-word check             → confidence = score
+ */
+function matchAshbyPosting(
+  boardJobs: Record<string, unknown>[],
+  postingIdFromUrl: string,
+  storedUrl: string,
+  storedTitle: string,
+  storedLocation: string,
+): { job: Record<string, unknown>; method: AshbyMatchMethod; confidence: number } | null {
+
+  // ── Priority 1: UUID exact match ──────────────────────────────────────────
+  if (postingIdFromUrl) {
+    const byUuid = boardJobs.find(
+      j => (j.id as string)?.toLowerCase() === postingIdFromUrl.toLowerCase()
+    );
+    if (byUuid) return { job: byUuid, method: 'uuid_exact', confidence: 1.0 };
+  }
+
+  // ── Priority 2: URL exact match ───────────────────────────────────────────
+  // Normalise stored URL for comparison (strip /application suffix, strip query)
+  const normStoredUrl = storedUrl.replace(/\/application(\?.*)?$/, '').replace(/\?.*$/, '').toLowerCase();
+  const byUrl = boardJobs.find(j => {
+    const jobUrl   = ((j.jobUrl   as string) ?? '').toLowerCase();
+    const applyUrl = ((j.applyUrl as string) ?? '').replace(/\/application(\?.*)?$/, '').toLowerCase();
+    return jobUrl === normStoredUrl || applyUrl === normStoredUrl;
+  });
+  if (byUrl) return { job: byUrl, method: 'url_exact', confidence: 1.0 };
+
+  // ── Priority 3 & 4: title-based matching ─────────────────────────────────
+  // Score all jobs, tracking both title score and location match
+  const normStoredLoc = normLocation(storedLocation);
+
+  type Candidate = { job: Record<string, unknown>; titleScore: number; locMatch: boolean };
+  const candidates: Candidate[] = boardJobs.map(j => {
+    const apiTitle   = (j.title    as string) ?? '';
+    const apiLoc     = (j.location as string) ?? '';
+    const titleScore = scoreTitle(storedTitle, apiTitle);
+    // Location match: at least one significant location word shared
+    const normApiLoc  = normLocation(apiLoc);
+    const locWords    = normStoredLoc.split(' ').filter(w => w.length > 3 && w !== 'remote');
+    const locMatch    = locWords.length > 0
+      ? locWords.some(w => normApiLoc.includes(w))
+      : normStoredLoc.includes('remote') && normApiLoc.includes('remote');
+    return { job: j, titleScore, locMatch };
+  });
+
+  // Best by title score
+  candidates.sort((a, b) => b.titleScore - a.titleScore);
+  const best = candidates[0];
+  if (!best) return null;
+
+  // Priority 3: title + location
+  if (best.locMatch && best.titleScore >= ASHBY_THRESHOLDS.title_location) {
+    return { job: best.job, method: 'title_location', confidence: Math.min(1, best.titleScore * 1.05) };
+  }
+
+  // Priority 4: title-only (stricter threshold)
+  if (best.titleScore >= ASHBY_THRESHOLDS.title_similarity) {
+    return { job: best.job, method: 'title_similarity', confidence: best.titleScore };
+  }
+
+  return null;
+}
+
+// ── Public Ashby API fetcher ────────────────────────────────────────────────
+
+/**
+ * Fetches the Ashby job board ONCE and runs the hardened 4-priority matcher.
+ * Used by Phase A and by the generic dispatcher.
+ *
+ * Endpoint: GET https://api.ashbyhq.com/posting-api/job-board/{JOB_BOARD_NAME}
+ * URL pattern: jobs.ashbyhq.com/{JOB_BOARD_NAME}/{posting-id}[/application]
  */
 export async function fetchFromAshbyApiWithTitle(
   url: string,
   storedTitle: string,
+  storedLocation = '',
 ): Promise<FetchedJobData | null> {
-  // First try the standard UUID-based fetch
-  const byUuid = await fetchFromAshbyApi(url);
-  if (byUuid) return byUuid;
-
-  // UUID didn't match — try title similarity across the board
-  const urlMatch = url.match(/jobs\.ashbyhq\.com\/([^/?#]+)/i);
+  // Extract board name and posting-id from URL
+  const urlMatch = url.match(/jobs\.ashbyhq\.com\/([^/?#]+)(?:\/([^/?#]+))?/i);
   if (!urlMatch) return null;
-  const boardName = urlMatch[1];
+  const boardName      = urlMatch[1];
+  const postingIdRaw   = urlMatch[2]?.split('/')[0] ?? '';
+  // Strip trailing ?… from posting ID
+  const postingIdFromUrl = postingIdRaw.replace(/\?.*$/, '');
 
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 12000);
-    const res = await fetch(`https://api.ashbyhq.com/posting-api/job-board/${encodeURIComponent(boardName)}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobScout/1.0)', 'Accept': 'application/json' },
-      signal: ctrl.signal,
-    });
+    const res = await fetch(
+      `https://api.ashbyhq.com/posting-api/job-board/${encodeURIComponent(boardName)}`,
+      { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobScout/1.0)', 'Accept': 'application/json' }, signal: ctrl.signal },
+    );
     clearTimeout(timer);
     if (!res.ok) return null;
 
     const data = await res.json() as Record<string, unknown>;
-    const jobs = (data.jobs ?? data.jobPostings ?? []) as Record<string, unknown>[];
-    if (!jobs.length) return null;
+    const boardJobs = (data.jobs ?? data.jobPostings ?? []) as Record<string, unknown>[];
+    if (!boardJobs.length) return null;
 
-    // Normalize: lowercase, strip punctuation, collapse spaces
-    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
-    const normStored = norm(storedTitle);
+    const match = matchAshbyPosting(boardJobs, postingIdFromUrl, url, storedTitle, storedLocation);
+    if (!match) return null;
 
-    // Score each job by word overlap with stored title
-    const scoredJobs = jobs.map(j => {
-      const jTitle = norm((j.title as string) ?? '');
-      const storedWords = normStored.split(' ').filter(w => w.length > 2);
-      const matches = storedWords.filter(w => jTitle.includes(w)).length;
-      const overlap = storedWords.length > 0 ? matches / storedWords.length : 0;
-      return { j, overlap };
-    });
-
-    const best = scoredJobs.sort((a, b) => b.overlap - a.overlap)[0];
-    if (!best || best.overlap < 0.6) return null; // need ≥ 60% word overlap
-
-    const matched = best.j;
-    const title = (matched.title as string) || undefined;
-    const location = (matched.location as string) || undefined;
-    const rawHtml = (matched.descriptionHtml as string) ?? '';
-    const rawPlain = (matched.descriptionPlain as string) ?? '';
-    const descSource = rawHtml || rawPlain;
-    const desc = descSource
-      ? rawHtml
-        ? descSource.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 8000)
-        : rawPlain.slice(0, 8000)
-      : undefined;
+    const { job: matched, method, confidence } = match;
 
     return {
-      title,
-      location,
-      description: desc || undefined,
-      pageType: 'job_detail',
-      sourceApi: 'ashby',
-      resolvedUrl: (matched.jobUrl as string) || undefined,
+      title:           (matched.title    as string)  || undefined,
+      location:        (matched.location as string)  || undefined,
+      description:     extractAshbyDesc(matched),
+      pageType:        'job_detail',
+      sourceApi:       'ashby',
+      resolvedUrl:     (matched.jobUrl   as string)  || undefined,
+      matchMethod:     method,
+      matchConfidence: Math.round(confidence * 1000) / 1000,
     };
   } catch {
     return null;
@@ -487,7 +556,7 @@ export async function fetchJobDescriptionFromCanonicalUrl(url: string): Promise<
       if (result?.description) return result;
     }
     if (lower.includes('ashbyhq.com')) {
-      const result = await fetchFromAshbyApi(url);
+      const result = await fetchFromAshbyApiWithTitle(url, '', '');
       if (result?.description) return result;
     }
     // For all other ATSes/company pages: HTML fetch
@@ -769,7 +838,9 @@ async function writeRecoveryResult(
          metadata_last_verified_at  = NOW(),
          url_ok                     = CASE WHEN $4 = true THEN true ELSE url_ok END,
          url_checked_at             = CASE WHEN $4 = true THEN NOW() ELSE url_checked_at END,
-         page_type                  = COALESCE($11, page_type)
+         page_type                  = COALESCE($11, page_type),
+         recovery_match_method      = COALESCE($13, recovery_match_method),
+         recovery_match_confidence  = COALESCE($14, recovery_match_confidence)
      WHERE id = $12`,
     [
       canonicalUrl,
@@ -782,13 +853,17 @@ async function writeRecoveryResult(
       fetchedData?.description?.trim() || null,
       fetchedData?.location?.trim() || null,
       fetchedData ? JSON.stringify({
-        sourceApi: fetchedData.sourceApi,
-        pageType:  fetchedData.pageType,
-        postedAt:  fetchedData.postedAt,
-        fetchedAt: new Date().toISOString(),
+        sourceApi:       fetchedData.sourceApi,
+        pageType:        fetchedData.pageType,
+        postedAt:        fetchedData.postedAt,
+        matchMethod:     fetchedData.matchMethod,
+        matchConfidence: fetchedData.matchConfidence,
+        fetchedAt:       new Date().toISOString(),
       }) : null,
       fetchedData?.pageType || null,
       jobId,
+      fetchedData?.matchMethod  ?? null,
+      fetchedData?.matchConfidence != null ? fetchedData.matchConfidence : null,
     ],
   );
 
@@ -849,10 +924,10 @@ export async function runCanonicalResolutionInBackground(
             const url: string = job.canonical_url ?? job.apply_url ?? '';
             if (!url) { aFail++; return; }
 
-            // Use title-aware Ashby fetcher; generic dispatcher for everything else
+            // Use title+location-aware Ashby fetcher; generic dispatcher for everything else
             let fetchedData: FetchedJobData | null;
             if (url.toLowerCase().includes('ashbyhq.com')) {
-              fetchedData = await fetchFromAshbyApiWithTitle(url, job.title ?? '');
+              fetchedData = await fetchFromAshbyApiWithTitle(url, job.title ?? '', job.location ?? '');
             } else {
               fetchedData = await fetchJobDescriptionFromCanonicalUrl(url);
             }

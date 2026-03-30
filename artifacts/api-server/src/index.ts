@@ -412,6 +412,8 @@ async function initDb(): Promise<void> {
   await safeAddColumn('jobs', 'ai_risk_reason', 'TEXT');
   await safeAddColumn('jobs', 'opportunity_tier', "TEXT NOT NULL DEFAULT 'unscored'");
   await safeAddColumn('jobs', 'sub_scores', 'JSONB');
+  await safeAddColumn('jobs', 'recovery_match_method', 'TEXT');
+  await safeAddColumn('jobs', 'recovery_match_confidence', 'NUMERIC(5,3)');
   await safeAddColumn('companies', 'scan_failures', 'INT NOT NULL DEFAULT 0');
   await safeAddColumn('companies', 'last_scan_error', 'TEXT');
   await safeAddColumn('companies', 'detect_status', "TEXT NOT NULL DEFAULT 'manual'");
