@@ -18,6 +18,8 @@ import {
   generateDeepValue, initDeepValueDB, getLatestDeepValue, saveDeepValue,
   scanWatchlistCompanyJobs, upsertCompanyJobScan, getCompanyJobScanResults
 } from './deep_value.js';
+import { generateJobMarketPulse, buildStats } from './job_market_pulse.js';
+import type { JobMarketPulseResult, ScoutCompanyStat } from './job_market_pulse.js';
 import {
   initPositioningDB, getProfile, saveProfile, getStories, saveStory, deleteStory,
   getOutputs, generateOutputs, getObjections, generateObjections,
@@ -307,6 +309,12 @@ async function initDb(): Promise<void> {
     );
 
     CREATE TABLE IF NOT EXISTS career_intel (
+      id           SERIAL PRIMARY KEY,
+      result_json  JSONB NOT NULL,
+      generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS job_market_pulse (
       id           SERIAL PRIMARY KEY,
       result_json  JSONB NOT NULL,
       generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1369,6 +1377,88 @@ app.post('/api/career-intel/refresh', async (_req, res: Response) => {
     res.json({ data: result, generated_at: result.generated_at, stale: false });
   } catch (e) {
     console.error('[CareerIntel] Refresh failed:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// ── Job Market Pulse ─────────────────────────────────────────────────────────
+// GET  /api/job-market-pulse         — cached result (stale if >24h)
+// POST /api/job-market-pulse/refresh — generate fresh analysis
+
+app.get('/api/job-market-pulse', async (_req, res: Response) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT result_json, generated_at FROM job_market_pulse ORDER BY generated_at DESC LIMIT 1`
+    );
+    if (rows.length === 0) {
+      res.json({ data: null, stale: true, message: 'No pulse data yet. Click Refresh to generate.' }); return;
+    }
+    const row = rows[0];
+    const stale = Date.now() - new Date(row.generated_at).getTime() > 24 * 60 * 60 * 1000;
+    res.json({ data: row.result_json, generated_at: row.generated_at, stale });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/job-market-pulse/refresh', async (_req, res: Response) => {
+  try {
+    const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
+    if (cRows.length === 0) {
+      res.status(400).json({ error: 'Configure your search settings first.' }); return;
+    }
+    const c = cRows[0];
+
+    // Pull scout-collected company stats from the last 30 days
+    const { rows: jobRows } = await pool.query(`
+      SELECT
+        company,
+        COUNT(*)::int               AS job_count,
+        ARRAY_AGG(DISTINCT title)   AS roles,
+        AVG(min_salary)             AS avg_salary,
+        MAX(min_salary)             AS max_salary,
+        MAX(created_at)::text       AS newest_posting,
+        ARRAY_AGG(DISTINCT location) FILTER (WHERE location IS NOT NULL AND location <> '') AS locations
+      FROM jobs
+      WHERE created_at >= NOW() - INTERVAL '30 days'
+        AND company IS NOT NULL AND company <> ''
+      GROUP BY company
+      ORDER BY job_count DESC
+      LIMIT 20
+    `);
+
+    const scoutStats: ScoutCompanyStat[] = jobRows.map(r => ({
+      company_name:   r.company,
+      job_count:      r.job_count,
+      roles:          (r.roles ?? []).filter(Boolean).slice(0, 6),
+      avg_salary:     r.avg_salary ? Math.round(Number(r.avg_salary)) : null,
+      max_salary:     r.max_salary ? Math.round(Number(r.max_salary)) : null,
+      newest_posting: r.newest_posting ?? new Date().toISOString(),
+      locations:      (r.locations ?? []).filter(Boolean).slice(0, 4),
+    }));
+
+    if (scoutStats.length === 0) {
+      res.status(400).json({ error: 'No scout data collected yet — run the job scout first to collect company data.' }); return;
+    }
+
+    const criteria = {
+      target_roles: c.target_roles ?? [],
+      industries:   c.industries   ?? [],
+      min_salary:   c.min_salary   ?? null,
+    };
+
+    console.log(`[JobMarketPulse] Manual refresh — ${scoutStats.length} companies`);
+    const result = await generateJobMarketPulse(scoutStats, criteria);
+
+    await pool.query(
+      `INSERT INTO job_market_pulse (result_json, generated_at) VALUES ($1, NOW())`,
+      [JSON.stringify(result)]
+    );
+    await pool.query(
+      `DELETE FROM job_market_pulse WHERE id NOT IN (SELECT id FROM job_market_pulse ORDER BY generated_at DESC LIMIT 5)`
+    );
+
+    res.json({ data: result, generated_at: result.generated_at, stale: false });
+  } catch (e) {
+    console.error('[JobMarketPulse] Refresh failed:', e);
     res.status(500).json({ error: String(e) });
   }
 });
@@ -4843,6 +4933,57 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .intel-loading-msg{font-size:13px;color:var(--muted);line-height:1.6}
 .intel-error-box{background:#ff6b6b18;border:1px solid #ff6b6b44;border-radius:8px;padding:14px 16px;font-size:13px;color:#ff6b6b;margin-bottom:16px}
 .intel-footer{font-size:11px;color:var(--muted);margin-top:20px;padding-top:14px;border-top:1px solid var(--border)}
+
+/* ── Job Market Pulse ─────────────────────────────────────────────────────── */
+.pulse-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+.pulse-cards-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px;margin-top:8px}
+.pulse-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px;display:flex;flex-direction:column;gap:10px;transition:border-color .15s,box-shadow .15s}
+.pulse-card:hover{border-color:rgba(200,169,110,.35);box-shadow:0 2px 12px rgba(0,0,0,.3)}
+.pulse-card-header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.pulse-company-name{font-size:14px;font-weight:700;color:var(--text);line-height:1.3}
+.pulse-company-url{font-size:11px;color:var(--muted);text-decoration:none;display:block;margin-top:2px}
+.pulse-company-url:hover{color:var(--gold)}
+.pulse-signal-badge{flex-shrink:0;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;white-space:nowrap;letter-spacing:.04em}
+.pulse-sig-true_growth{background:rgba(74,222,128,.12);color:#4ade80;border:1px solid rgba(74,222,128,.3)}
+.pulse-sig-cautious{background:rgba(251,191,36,.12);color:#fbbf24;border:1px solid rgba(251,191,36,.3)}
+.pulse-sig-hype_risk{background:rgba(249,115,22,.12);color:#f97316;border:1px solid rgba(249,115,22,.3)}
+.pulse-sig-desperate_hiring{background:rgba(239,68,68,.12);color:#ef4444;border:1px solid rgba(239,68,68,.3)}
+.pulse-sig-ai_risk{background:rgba(168,85,247,.12);color:#a855f7;border:1px solid rgba(168,85,247,.3)}
+.pulse-sig-unknown{background:rgba(148,163,184,.1);color:#94a3b8;border:1px solid rgba(148,163,184,.25)}
+.pulse-sig-chip{padding:3px 9px;border-radius:5px;font-size:10px;font-weight:700;cursor:default}
+.pulse-rec-badge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px;letter-spacing:.05em}
+.pulse-rec-pursue{background:rgba(74,222,128,.15);color:#4ade80}
+.pulse-rec-watch{background:rgba(251,191,36,.15);color:#fbbf24}
+.pulse-rec-caution{background:rgba(249,115,22,.15);color:#f97316}
+.pulse-rec-avoid{background:rgba(239,68,68,.15);color:#ef4444}
+.pulse-section-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:4px}
+.pulse-section-value{font-size:12px;color:var(--text);line-height:1.65}
+.pulse-agent-box{background:#0d0d0d;border:1px solid rgba(200,169,110,.2);border-radius:8px;padding:12px 14px}
+.pulse-agent-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--gold);margin-bottom:6px}
+.pulse-agent-text{font-size:12px;color:var(--text);line-height:1.7}
+.pulse-risk-chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:4px}
+.pulse-risk-chip{font-size:11px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25);color:#ef4444;border-radius:4px;padding:2px 8px}
+.pulse-evidence-chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:4px}
+.pulse-evidence-chip{font-size:11px;background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.2);color:#4ade80;border-radius:4px;padding:2px 8px}
+.pulse-scout-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:8px 10px;background:#0a0a0a;border-radius:6px;border:1px solid var(--border)}
+.pulse-scout-stat{font-size:11px;color:var(--muted)}
+.pulse-scout-stat strong{color:var(--text);font-weight:700}
+.pulse-stat-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 14px}
+.pulse-stat-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:6px}
+.pulse-stat-value{font-size:22px;font-weight:800;color:var(--gold);line-height:1}
+.pulse-stat-sub{font-size:11px;color:var(--muted);margin-top:3px}
+.pulse-role-bars{margin-top:8px}
+.pulse-role-row{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.pulse-role-name{font-size:11px;color:var(--text);min-width:140px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pulse-role-bar-wrap{flex:1;height:5px;background:#ffffff10;border-radius:3px;overflow:hidden}
+.pulse-role-bar-fill{height:100%;background:var(--gold);border-radius:3px}
+.pulse-role-count{font-size:10px;color:var(--muted);min-width:20px;text-align:right}
+.pulse-mood-hot{background:linear-gradient(135deg,rgba(245,199,66,.08),rgba(249,115,22,.05));border:1px solid rgba(245,199,66,.2)}
+.pulse-mood-warm{background:linear-gradient(135deg,rgba(74,222,128,.06),rgba(251,191,36,.05));border:1px solid rgba(74,222,128,.15)}
+.pulse-mood-cooling{background:linear-gradient(135deg,rgba(148,163,184,.06),rgba(99,102,241,.05));border:1px solid rgba(148,163,184,.15)}
+.pulse-mood-mixed{background:linear-gradient(135deg,rgba(200,169,110,.07),rgba(99,102,241,.04));border:1px solid rgba(200,169,110,.15)}
+.pulse-citation-link{font-size:10px;color:var(--muted);text-decoration:none;display:inline-block;margin-right:6px;margin-top:4px}
+.pulse-citation-link:hover{color:var(--gold)}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media(max-width:700px){.intel-cards{grid-template-columns:1fr}.intel-themes-grid{grid-template-columns:1fr}}
 /* ── Pre-IPO Intelligence ─────────────────────────────────────────────────── */
@@ -5263,6 +5404,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="tab active" id="tab-jobs" onclick="showTab('jobs')" data-tooltip="Your scored job board. Claude rates every listing Top Target / Fast Win / Stretch / Probably Skip against your resume and settings.">Jobs</div>
     <div class="tab" id="tab-saved" onclick="showTab('saved')" data-tooltip="Jobs you've starred. Generate tailored resumes and cover letters from each one.">Saved Jobs</div>
     <div class="tab" id="tab-intel" onclick="showTab('intel')" data-tooltip="Gemini scans the web daily for companies actively hiring in your space. Market trends, emerging themes, hot companies to target now.">Career Intel</div>
+    <div class="tab" id="tab-pulse" onclick="showTab('pulse')" data-tooltip="Job Market Pulse — which companies are hiring most aggressively, what roles are trending, salary patterns from your scout data, and Gemini's verdict: true growth or hype?">Job Market Pulse</div>
     <div class="tab" id="tab-leaders" onclick="showTab('leaders')" data-tooltip="Claude-ranked top 5-10 sales-led companies per sector — SaaS, Cybersecurity, AI Infrastructure, Networking and more. The gold standard companies to target for your next move.">Industry Leaders</div>
     <div class="tab" id="tab-deepvalue" onclick="showTab('deepvalue')" data-tooltip="Gemini finds the cutting-edge infrastructure companies with the clearest 'why you need this' value prop — AI Infra, HPC, Semiconductors, Photonics, Networking, Data Center and more.">Deep Value</div>
     <div class="tab" id="tab-preipo" onclick="showTab('preipo')" data-tooltip="Explosive pre-IPO companies worth joining NOW. Series B is the sweet spot — proven PMF, scaling sales motion, meaningful equity. Ranked by momentum score using real funding data.">Pre-IPO</div>
@@ -5609,6 +5751,61 @@ textarea:focus,input:focus{border-color:var(--gold)}
         <div id="intel-scan-jobs" style="margin-top:12px"></div>
       </div>
     </div>
+  </div>
+</div>
+
+<div class="panel" id="panel-pulse">
+  <div class="pulse-header">
+    <div>
+      <div class="sec-title" style="margin-bottom:4px">Job Market Pulse</div>
+      <div class="intel-meta" id="pulse-meta">Scout data + Gemini search &mdash; hiring trends and signal analysis for your target companies</div>
+    </div>
+    <button class="btn btn-gold btn-sm" id="pulse-refresh-btn" onclick="refreshJobMarketPulse()">&#x26A1; Refresh Pulse</button>
+  </div>
+
+  <div id="pulse-loading" style="display:none">
+    <div class="intel-loading-wrap">
+      <div class="intel-spinner"></div>
+      <div class="intel-loading-msg">Gemini is analyzing hiring signals across your target companies&hellip;<br><span style="font-size:11px;color:var(--muted)">Assessing growth vs hype for each company &mdash; 30&ndash;90 seconds</span></div>
+    </div>
+  </div>
+
+  <div id="pulse-empty" style="display:none">
+    <div class="empty">No pulse data yet. Run your job scout first to collect company data, then click &ldquo;Refresh Pulse&rdquo; to generate the analysis.</div>
+  </div>
+
+  <div id="pulse-error" style="display:none;color:var(--red);background:#ff000011;border:1px solid #ff000033;border-radius:8px;padding:12px 14px;font-size:13px;margin-bottom:16px"></div>
+
+  <div id="pulse-content" style="display:none">
+
+    <!-- Market mood banner -->
+    <div id="pulse-mood-banner" style="border-radius:10px;padding:16px 20px;margin-bottom:20px;display:flex;align-items:flex-start;gap:14px">
+      <div id="pulse-mood-icon" style="font-size:28px;line-height:1;flex-shrink:0"></div>
+      <div>
+        <div id="pulse-headline" style="font-size:15px;font-weight:700;color:var(--text);margin-bottom:6px"></div>
+        <div id="pulse-commentary" style="font-size:13px;color:var(--muted);line-height:1.7"></div>
+      </div>
+    </div>
+
+    <!-- Scout stats bar -->
+    <div id="pulse-stats-bar" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:20px"></div>
+
+    <!-- Signal legend -->
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px;align-items:center">
+      <span style="font-size:11px;color:var(--muted);margin-right:4px;font-weight:600;text-transform:uppercase;letter-spacing:.06em">Signal:</span>
+      <span class="pulse-sig-chip pulse-sig-true_growth">True Growth</span>
+      <span class="pulse-sig-chip pulse-sig-cautious">Cautious</span>
+      <span class="pulse-sig-chip pulse-sig-hype_risk">Hype Risk</span>
+      <span class="pulse-sig-chip pulse-sig-desperate_hiring">Desperate Hiring</span>
+      <span class="pulse-sig-chip pulse-sig-ai_risk">AI Risk</span>
+      <span class="pulse-sig-chip pulse-sig-unknown">Unverified</span>
+    </div>
+
+    <!-- Company cards -->
+    <div class="intel-section-label">Company Signal Cards</div>
+    <div id="pulse-cards" class="pulse-cards-grid"></div>
+
+    <div id="pulse-footer" style="margin-top:16px;font-size:11px;color:var(--muted);text-align:right"></div>
   </div>
 </div>
 
@@ -6415,7 +6612,7 @@ function sizeClawd() {
 window.addEventListener('resize', sizeClawd);
 
 // ── tabs ─────────────────────────────────────────────────────────────────
-var TABS = ['jobs','saved','pipeline','research','intel','leaders','deepvalue','preipo','companies','resume','email','runs','positioning','settings','clawd'];
+var TABS = ['jobs','saved','pipeline','research','intel','pulse','leaders','deepvalue','preipo','companies','resume','email','runs','positioning','settings','clawd'];
 function showTab(name) {
   TABS.forEach(function(t) {
     var tabEl = document.getElementById('tab-' + t);
@@ -6434,6 +6631,7 @@ function showTab(name) {
   if (name === 'email')     { loadGmailStatus(); loadEmailPreview(); loadDigestTime(); }
   if (name === 'settings')  loadCriteria();
   if (name === 'intel')     loadCareerIntel();
+  if (name === 'pulse')     loadJobMarketPulse();
   if (name === 'leaders')   loadIndustryLeaders();
   if (name === 'deepvalue') loadDeepValue();
   if (name === 'preipo')    loadPreIpo();
@@ -9659,6 +9857,173 @@ function renderLeadersSectors(sectors) {
       '<div class="leaders-grid">' + (s.companies || []).map(renderLeaderCard).join('') + '</div>' +
     '</div>';
   }).join('');
+}
+
+// ── Job Market Pulse ─────────────────────────────────────────────────────────
+async function loadJobMarketPulse() {
+  var el = function(id) { return document.getElementById(id); };
+  try {
+    var res = await fetch('/api/job-market-pulse');
+    var json = await res.json();
+    if (!json.data) {
+      el('pulse-empty').style.display = '';
+      el('pulse-content').style.display = 'none';
+      el('pulse-loading').style.display = 'none';
+      el('pulse-meta').textContent = 'No analysis yet \u2014 click Refresh Pulse to generate';
+      return;
+    }
+    renderJobMarketPulse(json.data, json.generated_at, json.stale);
+  } catch(e) {
+    el('pulse-error').textContent = 'Error loading pulse data: ' + e.message;
+    el('pulse-error').style.display = '';
+  }
+}
+
+async function refreshJobMarketPulse() {
+  var el = function(id) { return document.getElementById(id); };
+  var btn = el('pulse-refresh-btn');
+  btn.disabled = true;
+  btn.textContent = 'Refreshing\u2026';
+  el('pulse-loading').style.display = '';
+  el('pulse-content').style.display = 'none';
+  el('pulse-empty').style.display = 'none';
+  el('pulse-error').style.display = 'none';
+  try {
+    var res = await fetch('/api/job-market-pulse/refresh', { method: 'POST' });
+    var json = await res.json();
+    el('pulse-loading').style.display = 'none';
+    if (!res.ok) {
+      el('pulse-error').textContent = json.error || 'Refresh failed';
+      el('pulse-error').style.display = '';
+    } else {
+      renderJobMarketPulse(json.data, json.generated_at, false);
+    }
+  } catch(e) {
+    el('pulse-loading').style.display = 'none';
+    el('pulse-error').textContent = 'Error: ' + e.message;
+    el('pulse-error').style.display = '';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '\u26A1 Refresh Pulse';
+  }
+}
+
+function renderJobMarketPulse(data, generatedAt, stale) {
+  var el = function(id) { return document.getElementById(id); };
+  el('pulse-empty').style.display = 'none';
+  el('pulse-loading').style.display = 'none';
+  el('pulse-content').style.display = '';
+
+  var genDate = generatedAt ? new Date(generatedAt).toLocaleString() : '';
+  el('pulse-meta').textContent = 'Generated ' + genDate + (stale ? ' \u2014 \u26A0\uFE0F Stale (>24h old), refresh for latest' : ' \u2014 Powered by Gemini + Google Search');
+
+  // Mood banner
+  var moodMap = {
+    hot:     { icon: '\uD83D\uDD25', cls: 'pulse-mood-hot' },
+    warm:    { icon: '\u2600\uFE0F', cls: 'pulse-mood-warm' },
+    cooling: { icon: '\uD83C\uDF2C\uFE0F', cls: 'pulse-mood-cooling' },
+    mixed:   { icon: '\uD83D\uDCA1', cls: 'pulse-mood-mixed' },
+  };
+  var mood = moodMap[data.market_mood] || moodMap.mixed;
+  var banner = el('pulse-mood-banner');
+  banner.className = mood.cls;
+  banner.style.cssText += ';border-radius:10px;padding:16px 20px;margin-bottom:20px;display:flex;align-items:flex-start;gap:14px';
+  el('pulse-mood-icon').textContent = mood.icon;
+  el('pulse-headline').textContent = data.pulse_headline || '';
+  el('pulse-commentary').textContent = data.market_commentary || '';
+
+  // Stats bar
+  var stats = data.stats || {};
+  var statsHtml = '';
+  statsHtml += '<div class="pulse-stat-card"><div class="pulse-stat-label">Companies Tracked</div><div class="pulse-stat-value">' + (stats.total_companies_tracked || 0) + '</div><div class="pulse-stat-sub">in last 30 days</div></div>';
+  statsHtml += '<div class="pulse-stat-card"><div class="pulse-stat-label">Total Jobs Found</div><div class="pulse-stat-value">' + (stats.total_jobs_30d || 0) + '</div><div class="pulse-stat-sub">by the scout</div></div>';
+  if (stats.top_roles && stats.top_roles.length > 0) {
+    var maxCount = stats.top_roles[0].count || 1;
+    var barsHtml = stats.top_roles.slice(0, 5).map(function(r) {
+      var pct = Math.round((r.count / maxCount) * 100);
+      return '<div class="pulse-role-row"><div class="pulse-role-name">' + esc(r.role) + '</div><div class="pulse-role-bar-wrap"><div class="pulse-role-bar-fill" style="width:' + pct + '%"></div></div><div class="pulse-role-count">' + r.count + '</div></div>';
+    }).join('');
+    statsHtml += '<div class="pulse-stat-card" style="grid-column:span 2"><div class="pulse-stat-label">Top Roles (Scout Data)</div><div class="pulse-role-bars" style="margin-top:8px">' + barsHtml + '</div></div>';
+  }
+  el('pulse-stats-bar').innerHTML = statsHtml;
+
+  // Company cards
+  var cards = data.companies || [];
+  if (cards.length === 0) {
+    el('pulse-cards').innerHTML = '<div class="empty">No company cards generated.</div>';
+  } else {
+    el('pulse-cards').innerHTML = cards.map(renderPulseCard).join('');
+  }
+
+  // Footer
+  el('pulse-footer').textContent = 'Model: ' + (data.model_used || 'unknown') + ' \u00B7 ' + (data.grounding_sources_count || 0) + ' grounding sources \u00B7 ' + genDate;
+}
+
+function renderPulseCard(c) {
+  var sigLabels = { true_growth:'True Growth', cautious:'Cautious', hype_risk:'Hype Risk', desperate_hiring:'Desperate Hiring', ai_risk:'AI Risk', unknown:'Unverified' };
+  var recLabels = { pursue:'Pursue', watch:'Watch', caution:'Caution', avoid:'Avoid' };
+  var sig = c.signal || 'unknown';
+  var rec = c.recommendation || 'watch';
+  var sigLabel = c.signal_label || sigLabels[sig] || sig;
+  var recLabel = recLabels[rec] || rec;
+
+  var evidenceHtml = '';
+  if (c.growth_evidence && c.growth_evidence.length > 0) {
+    evidenceHtml = '<div class="pulse-section-label">Growth Evidence</div><div class="pulse-evidence-chips">' +
+      c.growth_evidence.slice(0,4).map(function(e) { return '<span class="pulse-evidence-chip">' + esc(e) + '</span>'; }).join('') + '</div>';
+  }
+
+  var riskHtml = '';
+  if (c.risk_flags && c.risk_flags.length > 0) {
+    riskHtml = '<div class="pulse-section-label" style="margin-top:4px">Risk Flags</div><div class="pulse-risk-chips">' +
+      c.risk_flags.slice(0,4).map(function(r) { return '<span class="pulse-risk-chip">' + esc(r) + '</span>'; }).join('') + '</div>';
+  }
+
+  var aiVulnHtml = '';
+  if (c.ai_vulnerability) {
+    aiVulnHtml = '<div><div class="pulse-section-label" style="color:#a855f7">\uD83E\uDD16 AI Vulnerability</div><div class="pulse-section-value" style="color:#a855f7;opacity:.9">' + esc(c.ai_vulnerability) + '</div></div>';
+  }
+
+  var scoutHtml = '';
+  if (c.scout_job_count > 0) {
+    scoutHtml = '<div class="pulse-scout-row">' +
+      '<span class="pulse-scout-stat"><strong>' + c.scout_job_count + '</strong> jobs found</span>' +
+      (c.scout_avg_salary ? '<span class="pulse-scout-stat">Avg <strong>$' + Math.round(c.scout_avg_salary / 1000) + 'K</strong> base</span>' : '') +
+      (c.scout_roles && c.scout_roles.length > 0 ? '<span class="pulse-scout-stat">' + c.scout_roles.slice(0,3).map(function(r){ return esc(r); }).join(', ') + '</span>' : '') +
+    '</div>';
+  }
+
+  var citationsHtml = '';
+  if (c.source_citations && c.source_citations.length > 0) {
+    citationsHtml = '<div style="margin-top:4px">' +
+      c.source_citations.slice(0,3).map(function(s) {
+        return '<a href="' + esc(s.url) + '" target="_blank" rel="noopener" class="pulse-citation-link">\uD83D\uDD17 ' + esc(s.title || s.url) + '</a>';
+      }).join('') + '</div>';
+  }
+
+  return '<div class="pulse-card">' +
+    '<div class="pulse-card-header">' +
+      '<div>' +
+        (c.company_url ? '<a href="' + esc(c.company_url) + '" target="_blank" rel="noopener" class="pulse-company-name" style="text-decoration:none">' + esc(c.company_name) + '</a>' : '<div class="pulse-company-name">' + esc(c.company_name) + '</div>') +
+        (c.company_url ? '<a href="' + esc(c.company_url) + '" target="_blank" rel="noopener" class="pulse-company-url">' + esc(c.company_url.replace(/^https?:\\/\\//,'').split('\\/')[0]) + '</a>' : '') +
+      '</div>' +
+      '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px">' +
+        '<span class="pulse-signal-badge pulse-sig-' + sig + '">' + esc(sigLabel) + '</span>' +
+        '<span class="pulse-rec-badge pulse-rec-' + rec + '">' + esc(recLabel) + '</span>' +
+      '</div>' +
+    '</div>' +
+    (scoutHtml ? scoutHtml : '') +
+    '<div><div class="pulse-section-label">Signal Rationale</div><div class="pulse-section-value">' + esc(c.signal_rationale) + '</div></div>' +
+    (evidenceHtml ? evidenceHtml : '') +
+    (riskHtml ? riskHtml : '') +
+    (aiVulnHtml ? aiVulnHtml : '') +
+    '<div class="pulse-agent-box">' +
+      '<div class="pulse-agent-label">\uD83E\uDDE0 Agent Analysis</div>' +
+      '<div class="pulse-agent-text">' + esc(c.agent_analysis) + '</div>' +
+    '</div>' +
+    (c.hiring_driver ? '<div><div class="pulse-section-label">Hiring Driver</div><div class="pulse-section-value" style="color:var(--muted)">' + esc(c.hiring_driver) + '</div></div>' : '') +
+    (citationsHtml ? citationsHtml : '') +
+  '</div>';
 }
 
 async function loadIndustryLeaders() {
