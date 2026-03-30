@@ -163,6 +163,12 @@ function checkJobLocation(
       if (locations.length === 0) return true;
       return !!(pattern && pattern.test(loc));
     }
+    // "United States" / "US" / blank with no city = nationwide / de-facto remote-eligible
+    // ATS boards often use these for roles that are open to any US location.
+    // Pass through when remote_us is accepted rather than hard-blocking.
+    if (/^(united states|u\.?s\.?a?|nationwide|anywhere in the u\.?s\.?)$/i.test(loc.trim()) || loc.trim() === '' || loc.toLowerCase() === 'unknown') {
+      return modes.has('remote_us');
+    }
     // Physical on-site job
     if (!modes.has('onsite')) return false;
     if (locations.length === 0) return true;

@@ -660,7 +660,7 @@ async function isCompanySafe(companyName: string): Promise<boolean> {
       max_tokens: 8,
       messages: [{
         role: 'user',
-        content: `Is "${companyName}" a hardware company, cloud infrastructure provider, top AI company, irreplaceable data/database platform, or industrial/energy technology software company? Answer only YES or NO.`,
+        content: `Does "${companyName}" sell technology products or services to businesses (B2B)? This includes: SaaS software, cloud platforms, cybersecurity, networking, data/analytics, developer tools, sales/marketing tech, HR tech, fintech, infrastructure software, AI tools, hardware + software, or any enterprise/mid-market software. Answer YES for any legitimate B2B tech or software company. Answer NO only for: hospitals/health systems, insurance agencies, car dealerships, restaurants, retail/consumer brands, non-profits, staffing agencies, real estate brokers, construction firms, utilities, or government entities. Answer only YES or NO.`,
       }],
     });
 

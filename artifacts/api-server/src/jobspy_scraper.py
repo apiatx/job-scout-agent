@@ -64,7 +64,7 @@ def _proxy_status() -> str:
 # ── Scraping config ───────────────────────────────────────────────────────────
 
 RESULTS_INDEED       = 50   # Indeed: permissive, handles 50 reliably
-RESULTS_LINKEDIN     = 25   # LinkedIn: keep low to avoid rate limits
+RESULTS_LINKEDIN     = 50   # LinkedIn: 50 per term — rate limits handled by MAX_WORKERS_LINKEDIN=3
 RESULTS_GLASSDOOR    = 25   # Glassdoor: proxy needed in cloud environments
 RESULTS_ZIPRECRUITER = 25   # ZipRecruiter: Cloudflare-blocked without proxy
 
@@ -507,20 +507,31 @@ def main():
 
     source_dfs = []
 
-    # ── Phase 1: LinkedIn ─────────────────────────────────────────────────────
+    # ── Phase 1: LinkedIn (United States + Remote parallel) ───────────────────
+    # Two passes: nationwide search + explicit "Remote" location search.
+    # LinkedIn surfaces different listings for each — remote-flagged roles
+    # appear prominently when location="Remote" is used directly.
+    remote_linkedin_terms = linkedin_terms[:12]  # top 12 terms for remote pass
+    total_li_raw = len(linkedin_terms) * RESULTS_LINKEDIN + len(remote_linkedin_terms) * RESULTS_LINKEDIN
     print(
-        f"\nJobSpy [Phase 1/4]: LinkedIn — {len(linkedin_terms)} terms "
-        f"× {RESULTS_LINKEDIN} = up to {len(linkedin_terms)*RESULTS_LINKEDIN} raw",
+        f"\nJobSpy [Phase 1/4]: LinkedIn — {len(linkedin_terms)} US terms + {len(remote_linkedin_terms)} Remote terms "
+        f"× {RESULTS_LINKEDIN} = up to {total_li_raw} raw",
         file=sys.stderr,
     )
-    li_frames = run_concurrent(
+    li_us_frames = run_concurrent(
         search_linkedin,
         [(term, "United States") for term in linkedin_terms],
         MAX_WORKERS_LINKEDIN,
-        "LinkedIn",
+        "LinkedIn-US",
     )
-    li_df = concat_and_dedup(li_frames, "linkedin")
-    print(f"JobSpy [Phase 1/4]: LinkedIn → {len(li_df)} unique", file=sys.stderr)
+    li_remote_frames = run_concurrent(
+        search_linkedin,
+        [(term, "Remote") for term in remote_linkedin_terms],
+        MAX_WORKERS_LINKEDIN,
+        "LinkedIn-Remote",
+    )
+    li_df = concat_and_dedup(li_us_frames + li_remote_frames, "linkedin")
+    print(f"JobSpy [Phase 1/4]: LinkedIn → {len(li_df)} unique (US + Remote passes)", file=sys.stderr)
     source_dfs.append(li_df)
 
     # ── Phase 2: Indeed (national) ────────────────────────────────────────────
