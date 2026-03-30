@@ -8,7 +8,7 @@ import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, Unde
 import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, runJobSpyScraper, proxyConfigured } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
 import { runGeminiJobDiscovery, deduplicateJobLists, isDirectCompanyUrl, normalizeUrl as normalizeJobUrl } from './gemini_discovery.js';
-import { runCanonicalResolutionInBackground, computeLinkConfidence, classifySourceTrust } from './link_validator.js';
+import { runCanonicalResolutionInBackground, computeLinkConfidence, classifySourceTrust, enrichJobsPreScoring } from './link_validator.js';
 import { generateCareerIntel } from './career_intel.js';
 import type { CareerIntelCriteria } from './career_intel.js';
 import { generatePreIpo, initPreIpoDB, getLatestPreIpo, savePreIpo } from './preipo.js';
@@ -3700,6 +3700,24 @@ async function runScoutInBackground(runId: number): Promise<void> {
         [companiesScanned, allJobs.length, runId]
       );
       return;
+    }
+
+    // ── Pre-scoring ATS enrichment (Greenhouse / Lever / Ashby) ─────────────
+    // Fetch real job descriptions for ATS-direct jobs with short/missing descriptions
+    // BEFORE Claude scores them — so Claude sees the full JD, not a scraped stub.
+    {
+      const atsTargets = newJobs.filter(j => {
+        const url = (j.applyUrl ?? '').toLowerCase();
+        return (url.includes('greenhouse.io') || url.includes('lever.co') || url.includes('ashbyhq.com'))
+          && (j.description ?? '').replace(/<[^>]+>/g, '').trim().length < 200;
+      });
+      if (atsTargets.length > 0) {
+        console.log(`\n──── PRE-SCORING ATS ENRICHMENT ────────────────────────────`);
+        console.log(`  ${atsTargets.length} jobs with ATS URLs + short descriptions → fetching real JDs…`);
+        const { enriched } = await enrichJobsPreScoring(newJobs);
+        console.log(`  Done: ${enriched} descriptions enriched before Claude scoring`);
+        console.log(`───────────────────────────────────────────────────────────`);
+      }
     }
 
     await setStage(`Scoring ${newJobs.length} new jobs with Claude AI…`);

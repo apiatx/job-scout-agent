@@ -1,0 +1,85 @@
+What looks right
+
+These parts make sense:
+
+Greenhouse and Lever are your best near-term recovery wins.
+Moving fast ATS recovery before scoring is the right move, because scoring on scraped stubs is dumb when the real JD is available a second later.
+Company-career-page jobs being stuck in pending forever is a real product hole.
+Your current system is still too background-heavy, which means users can see weak records before recovery finishes.
+What I’d correct
+1. SmartRecruiters is not a clean “free, no-auth” layup
+
+Your agent said:
+
+SmartRecruiters API — free, structured JSON
+
+What I could confirm from SmartRecruiters’ official docs is that their Posting API supports only API key authentication and OAuth is not supported. That means it is not the same kind of easy anonymous public fetch that Greenhouse/Lever often are.
+
+So I would not treat SmartRecruiters as the next “easy free win” in the same category as Greenhouse/Lever.
+
+2. Ashby needs verification before you trust the exact endpoint
+
+The agent’s specific Ashby endpoint may be right, but I did not confirm that exact endpoint from official Ashby docs in this pass. So I’d treat Ashby as:
+
+very likely high ROI
+but verify the exact public endpoint and response format before coding around it
+
+That’s a “trust but verify” item, not a blocker.
+
+What I’d prioritize next
+Tier 1
+
+1. Move Greenhouse/Lever recovery pre-scoring
+This is the cleanest immediate quality lift.
+
+Why:
+
+it’s fast
+it’s already partially working
+it improves both display quality and Claude scoring quality
+Tier 2
+
+2. Include strong canonical_source='original' company-career-page jobs in Phase B
+This is probably your biggest coverage unlock, because your audit says 108+ jobs are basically marooned on the island right now.
+
+That’s a huge chunk of your corpus sitting there doing nothing.
+
+Tier 3
+
+3. Add Ashby next
+Because if the public endpoint works the way your agent thinks it does, that’s a very high-ROI addition.
+
+Tier 4
+
+4. Workday after that
+But only if you can do it in a robust way. Workday is where many good intentions go to die.
+
+The biggest strategic insight in that audit
+
+This line is the most important:
+
+recovery is always background-only, after the user can already see jobs
+
+That’s the main product-quality problem now.
+
+You want a split like this:
+
+Fast synchronous recovery before first render
+Greenhouse
+Lever
+maybe Ashby if easy
+Background recovery for harder cases
+aggregators
+weird company career pages
+Gemini-assisted canonical search
+
+That gives users a cleaner page immediately, without waiting 13 minutes for the whole orchestra to tune up.
+
+My blunt take
+
+The audit is good enough that I’d stop debating architecture and start executing this order:
+
+move Greenhouse/Lever pre-scoring
+send high-scoring original/company-career jobs into Gemini recovery
+verify and add Ashby
+don’t prioritize SmartRecruiters until you’ve confirmed the auth path is acceptable

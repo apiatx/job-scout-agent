@@ -323,6 +323,62 @@ async function fetchFromHtml(url: string): Promise<FetchedJobData | null> {
 }
 
 /**
+ * Ashby public Job Board API — no auth required.
+ * Endpoint: POST https://api.ashbyhq.com/jobBoard.getJobPosting
+ * Body: { jobPostingId: "{uuid}" }
+ * URL pattern: jobs.ashbyhq.com/{org}/{uuid}
+ */
+async function fetchFromAshbyApi(url: string): Promise<FetchedJobData | null> {
+  // Extract UUID from jobs.ashbyhq.com/{org}/{uuid}
+  const match = url.match(/ashbyhq\.com\/[^/?#]+\/([a-f0-9-]{8,})/i);
+  if (!match) return null;
+  const jobPostingId = match[1];
+
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    const res = await fetch('https://api.ashbyhq.com/jobBoard.getJobPosting', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (compatible; JobScout/1.0)',
+      },
+      body: JSON.stringify({ jobPostingId }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+
+    const data = await res.json() as Record<string, unknown>;
+    if (!data.success) return null;
+
+    const results = data.results as Record<string, unknown> | undefined;
+    if (!results) return null;
+
+    const title = (results.title as string) || undefined;
+    const rawHtml = (results.descriptionHtml as string) ?? (results.description as string) ?? '';
+    const desc = rawHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 6000);
+
+    // Location: Ashby returns an array of locations or a single location object
+    let location: string | undefined;
+    const locs = results.locationName as string | undefined
+      ?? (results.location as Record<string, string> | undefined)?.locationName
+      ?? undefined;
+    if (locs) location = locs;
+
+    return {
+      title,
+      location,
+      description: desc || undefined,
+      pageType: 'job_detail',
+      sourceApi: 'ashby',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Main dispatcher: fetches real job data from a canonical URL.
  * Tries API-first for known ATS platforms, falls back to HTML parsing.
  */
@@ -337,11 +393,60 @@ export async function fetchJobDescriptionFromCanonicalUrl(url: string): Promise<
       const result = await fetchFromLeverApi(url);
       if (result?.description) return result;
     }
-    // For Ashby and all other ATSes/company pages: HTML fetch
+    if (lower.includes('ashbyhq.com')) {
+      const result = await fetchFromAshbyApi(url);
+      if (result?.description) return result;
+    }
+    // For all other ATSes/company pages: HTML fetch
     return await fetchFromHtml(url);
   } catch {
     return null;
   }
+}
+
+// ── Pre-scoring enrichment (synchronous, called inline before Claude) ──────────
+
+/**
+ * Enriches newly discovered jobs with real descriptions BEFORE Claude scores them.
+ * Only runs for jobs with direct Greenhouse, Lever, or Ashby URLs and missing/short
+ * descriptions (< 200 chars). Mutates the jobs array in place. Fast: runs in parallel
+ * batches of 10, no Gemini, no rate limits.
+ *
+ * Called inline in the scout pipeline before scoreJobsWithClaude().
+ */
+export async function enrichJobsPreScoring(
+  jobs: Array<{ applyUrl: string; description?: string | null; title?: string; company?: string; location?: string }>,
+): Promise<{ enriched: number; skipped: number }> {
+  // Only target jobs with ATS URLs and missing/short descriptions
+  const targets = jobs.filter(j => {
+    const url = (j.applyUrl ?? '').toLowerCase();
+    const isAts = url.includes('greenhouse.io') || url.includes('lever.co') || url.includes('ashbyhq.com');
+    const descLen = (j.description ?? '').replace(/<[^>]+>/g, '').trim().length;
+    return isAts && descLen < 200;
+  });
+
+  if (!targets.length) return { enriched: 0, skipped: jobs.length };
+
+  let enriched = 0;
+  const CONCURRENCY = 10;
+
+  for (let i = 0; i < targets.length; i += CONCURRENCY) {
+    const batch = targets.slice(i, i + CONCURRENCY);
+    await Promise.all(batch.map(async (job) => {
+      try {
+        const fetched = await fetchJobDescriptionFromCanonicalUrl(job.applyUrl);
+        if (fetched?.description && !isListingPageDescription(fetched.description)) {
+          job.description = fetched.description;
+          if (fetched.title && !isListingPageTitle(fetched.title)) {
+            // Only replace title if fetched one looks like an actual job title
+          }
+          enriched++;
+        }
+      } catch { /* non-fatal */ }
+    }));
+  }
+
+  return { enriched, skipped: jobs.length - targets.length };
 }
 
 // ── Gemini URL resolver ───────────────────────────────────────────────────────
@@ -682,13 +787,17 @@ export async function runCanonicalResolutionInBackground(
       WHERE j.validation_status NOT IN ('validated', 'recovered')
         AND j.was_resolved_by_gemini IS NOT TRUE
         AND (
+          -- Broken links (any source)
           j.url_ok = false
+          -- Aggregator links that need upgrading to direct ATS
           OR j.canonical_source IN ('linkedin', 'indeed', 'glassdoor', 'ziprecruiter', 'aggregator')
+          -- Company career pages (canonical_source='original') — high-scoring jobs only
+          OR (j.canonical_source = 'original' AND j.match_score >= 65)
         )
         AND (j.match_score >= 55 OR j.match_score IS NULL)
         ${scopeClause}
       ORDER BY j.match_score DESC NULLS LAST
-      LIMIT 15
+      LIMIT 20
     `, params);
 
     if (!geminiJobs.length) {
