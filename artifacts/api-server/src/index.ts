@@ -409,6 +409,7 @@ async function initDb(): Promise<void> {
   await safeAddColumn('jobs', 'created_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()');
   await safeAddColumn('jobs', 'status', "TEXT NOT NULL DEFAULT 'new'");
   await safeAddColumn('jobs', 'ai_risk', "TEXT NOT NULL DEFAULT 'unknown'");
+  await safeAddColumn('jobs', 'ai_risk_score', 'INT');
   await safeAddColumn('jobs', 'ai_risk_reason', 'TEXT');
   await safeAddColumn('jobs', 'opportunity_tier', "TEXT NOT NULL DEFAULT 'unscored'");
   await safeAddColumn('jobs', 'sub_scores', 'JSONB');
@@ -2113,15 +2114,15 @@ app.post('/api/jobs/targeted-scan', async (req: Request, res: Response) => {
         const finalTier = !locationOk
           ? 'Probably Skip'
           : (m.subScores && m.matchScore)
-            ? computeTier(m.matchScore, m.aiRisk ?? 'unknown', m.subScores, m.title, m.company, loc, tierSettings)
+            ? computeTier(m.matchScore, m.aiRisk, m.subScores, m.title, m.company, loc, tierSettings)
             : (m.opportunityTier ?? 'unscored');
 
         try {
           await pool.query(
-            `INSERT INTO jobs (title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            `INSERT INTO jobs (title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_score, ai_risk_reason, opportunity_tier, sub_scores)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
              ON CONFLICT (apply_url) DO NOTHING`,
-            [m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, scanSource, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null)]
+            [m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, scanSource, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskScore ?? null, m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null)]
           );
           saved++;
         } catch (_e) { /* ignore individual insert errors */ }
@@ -2237,8 +2238,8 @@ app.post('/api/jobs/rescore-all', async (_req, res: Response) => {
             );
             if (result) {
               await pool.query(
-                `UPDATE jobs SET opportunity_tier=$1, sub_scores=$2, ai_risk=$3, ai_risk_reason=$4, why_good_fit=$5, match_score=$6 WHERE id=$7`,
-                [result.opportunityTier, JSON.stringify(result.subScores), result.aiRisk, result.aiRiskReason, result.whyGoodFit, result.matchScore, j.id]
+                `UPDATE jobs SET opportunity_tier=$1, sub_scores=$2, ai_risk=$3, ai_risk_score=$4, ai_risk_reason=$5, why_good_fit=$6, match_score=$7 WHERE id=$8`,
+                [result.opportunityTier, JSON.stringify(result.subScores), result.aiRisk, result.aiRiskScore ?? null, result.aiRiskReason, result.whyGoodFit, result.matchScore, j.id]
               );
             } else {
               await pool.query(`UPDATE jobs SET opportunity_tier='Probably Skip' WHERE id=$1`, [j.id]);
@@ -2282,7 +2283,7 @@ async function reclassifyJobsLocally(): Promise<number> {
 
   // Fetch all jobs (scored or not)
   const { rows } = await pool.query(`
-    SELECT id, title, company, location, salary, match_score, ai_risk, sub_scores, opportunity_tier
+    SELECT id, title, company, location, salary, match_score, ai_risk, ai_risk_score, sub_scores, opportunity_tier
     FROM jobs
   `);
 
@@ -2350,7 +2351,10 @@ async function reclassifyJobsLocally(): Promise<number> {
         tier = 'Probably Skip';
       } else if (j.sub_scores && j.match_score !== null) {
         const s: SubScores = typeof j.sub_scores === 'string' ? JSON.parse(j.sub_scores) : j.sub_scores;
-        tier = computeTier(j.match_score, j.ai_risk ?? 'unknown', s, j.title, j.company, loc, tierSettings);
+        const _aiRiskForTier = j.ai_risk_score != null
+          ? (Number(j.ai_risk_score) >= 7 ? 'HIGH' : Number(j.ai_risk_score) >= 4 ? 'MEDIUM' : 'LOW')
+          : (j.ai_risk ?? 'unknown');
+        tier = computeTier(j.match_score, _aiRiskForTier, s, j.title, j.company, loc, tierSettings);
       } else {
         tier = j.opportunity_tier as OpportunityTier;
       }
@@ -3834,7 +3838,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
       if (!locationOk) {
         finalTier = 'Probably Skip';
       } else if (m.subScores && m.matchScore) {
-        finalTier = computeTier(m.matchScore, m.aiRisk ?? 'unknown', m.subScores, m.title, m.company, loc, tierSettings);
+        finalTier = computeTier(m.matchScore, m.aiRisk, m.subScores, m.title, m.company, loc, tierSettings);
       } else {
         finalTier = m.opportunityTier ?? 'unscored';
       }
@@ -3844,10 +3848,10 @@ async function runScoutInBackground(runId: number): Promise<void> {
       // Look up momentum warning for this company (if checked)
       const momWarning = momentumMap.get(m.company.toLowerCase().trim())?.warning ?? null;
       await pool.query(
-        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, original_url, original_title, original_description, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, original_url, original_title, original_description, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_score, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
          ON CONFLICT (apply_url) DO NOTHING`,
-        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.applyUrl, m.title, m.description ?? null, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), geminiMeta?.groundingMetadata ? JSON.stringify(geminiMeta.groundingMetadata) : null, geminiMeta?.confidence ?? null, momWarning, datePosted]
+        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.applyUrl, m.title, m.description ?? null, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskScore ?? null, m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), geminiMeta?.groundingMetadata ? JSON.stringify(geminiMeta.groundingMetadata) : null, geminiMeta?.confidence ?? null, momWarning, datePosted]
       );
     }
 
@@ -6178,7 +6182,8 @@ function computeScorecard(j) {
   if (j.momentum_warning)        risks.push(j.momentum_warning);
   if (vs === 'suspicious' || vs === 'failed') risks.push('Link validation issue — may be expired');
   if (isNewFmt && s && s.compensationFit < 5 && hasSalary) risks.push('Listed salary may be below your minimum');
-  if (j.ai_risk === 'HIGH')      risks.push('High AI displacement risk in this role type');
+  var _scAiScore = j.ai_risk_score != null ? Number(j.ai_risk_score) : (j.ai_risk === 'HIGH' ? 8 : j.ai_risk === 'MEDIUM' ? 5 : 2);
+  if (_scAiScore >= 7) risks.push('AI displacement risk ' + _scAiScore + '/10 — this product may be replaced by Claude/GPT');
   if (j.is_hardware === false && compFitPct < 30 && !hasSalary) risks.push('Comp unknown — research before applying');
 
   return {
@@ -6353,12 +6358,18 @@ function renderJobCard(j, opts) {
     salaryHtml = formatSalaryEstimate(typeof j.salary_estimate === 'string' ? JSON.parse(j.salary_estimate) : j.salary_estimate);
   }
 
-  // AI risk badge
+  // AI risk badge — numeric score (0-10) takes priority; fall back to text label
   var aiRiskBadge = '';
-  if (j.ai_risk && j.ai_risk !== 'unknown') {
-    var riskLabel = j.ai_risk === 'LOW' ? '\u2705 AI Safe' : j.ai_risk === 'MEDIUM' ? '\u26A0\uFE0F AI Med' : '\u26D4 AI Risk';
-    var riskTitle = j.ai_risk_reason ? esc(j.ai_risk_reason) : '';
-    aiRiskBadge = '<span class="ai-risk-badge ai-risk-' + esc(j.ai_risk) + '" title="' + riskTitle + '">' + riskLabel + '</span>';
+  var _aiScore = j.ai_risk_score != null ? Number(j.ai_risk_score) : null;
+  var _aiLabel = j.ai_risk && j.ai_risk !== 'unknown' ? j.ai_risk : null;
+  if (_aiScore !== null || _aiLabel) {
+    var _eff = _aiScore !== null ? _aiScore : (_aiLabel === 'HIGH' ? 8 : _aiLabel === 'MEDIUM' ? 5 : 2);
+    var _riskClass = _eff >= 7 ? 'HIGH' : _eff >= 4 ? 'MEDIUM' : 'LOW';
+    var _emoji = _eff >= 7 ? '\u26D4' : _eff >= 4 ? '\u26A0\uFE0F' : '\u2705';
+    var _scoreStr = _aiScore !== null ? ' ' + _aiScore + '/10' : '';
+    var _riskText = _eff >= 7 ? 'AI Risk' + _scoreStr : _eff >= 4 ? 'AI Med' + _scoreStr : 'AI Safe' + _scoreStr;
+    var _riskTitle = j.ai_risk_reason ? esc(j.ai_risk_reason) : '';
+    aiRiskBadge = '<span class="ai-risk-badge ai-risk-' + _riskClass + '" title="' + _riskTitle + '">' + _emoji + ' ' + _riskText + '</span>';
   }
 
   // Territory badge

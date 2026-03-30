@@ -64,6 +64,7 @@ export interface JobMatch {
   matchScore: number;
   isHardware: boolean;
   aiRisk: 'LOW' | 'MEDIUM' | 'HIGH' | 'unknown';
+  aiRiskScore: number;
   aiRiskReason: string;
   opportunityTier: OpportunityTier;
   subScores: SubScores;
@@ -312,7 +313,23 @@ COMPONENT 5 — territoryFit (0-10 points):
 ADDITIONAL FIELDS:
   realVsFake (0-10): Confidence this is a genuine open role. 10=specific unique JD, 0=generic evergreen template. This is a hard-skip gate and NOT added to matchScore.
   isHardware: true if company sells physical hardware, semiconductors, networking equipment, or industrial machinery.
-  aiRisk: LOW=physical supply chain/hardware; MEDIUM=complex vertical SaaS with moats; HIGH=generic horizontal SaaS easily replaced.
+  aiRiskScore: Rate AI displacement risk to this COMPANY'S PRODUCT on a 0-10 scale.
+  This is about whether a large language model (Claude, ChatGPT, Gemini) can replicate the company's core product function for a fraction of the cost — making the company obsolete.
+  0-2: Physical hardware, semiconductors, supply chain infrastructure, field sales tools — AI cannot replace the product itself
+  3-4: Deep vertical SaaS with proprietary data, regulatory moats, or compliance requirements (EHR, ERP, CAD software, construction management)
+  5-6: Established SaaS with meaningful switching costs and integrations, but AI is gradually eroding the value proposition
+  7-8: Generic software where AI substantially replicates the function (rules-based automation, basic analytics dashboards, simple content tools)
+  9-10: The product's core function can be reproduced by calling Claude/GPT API for ~$10/month. No defensible moat.
+  AUTOMATIC 9-10 — these product categories ALWAYS score 9-10:
+  - AI security awareness training / phishing simulation / "train employees to spot AI" platforms
+  - Document analysis, review, summarization, or Q&A platforms (lawyers, finance, etc.)
+  - Workflow automation with if-then-else logic + Slack/email integration
+  - Content generation, rewriting, or moderation tools
+  - Customer support or sales chatbot/copilot platforms
+  - Data extraction from unstructured documents (invoices, contracts, emails)
+  - "AI copilot for X" where X is a simple task (writing, scheduling, note-taking)
+  - Generic lead scoring, intent data, or email personalization tools
+  - Any company whose pitch is literally "we use AI to do [simple task]"
 
 LOCATION NOTE: "Remote" alone = anywhere. "Remote, [City]" = must live near that city.
 
@@ -328,8 +345,8 @@ REQUIRED OUTPUT — JSON ONLY, NO MARKDOWN
   "realVsFake": <0-10>,
   "whyGoodFit": "<2-3 sentences referencing the candidate's background specifically — past titles, industries, experience — and why this role does or does not fit. Not generic.>",
   "isHardware": <true | false>,
-  "aiRisk": <"LOW" | "MEDIUM" | "HIGH">,
-  "aiRiskReason": "<one sentence on AI displacement risk>"
+  "aiRiskScore": <0-10 integer>,
+  "aiRiskReason": "<one sentence on what specifically makes this company's product replaceable or defensible by AI>"
 }`;
 
     const message = await anthropic.messages.create({
@@ -351,7 +368,7 @@ REQUIRED OUTPUT — JSON ONLY, NO MARKDOWN
       realVsFake?: number;
       whyGoodFit?: string;
       isHardware?: boolean;
-      aiRisk?: 'LOW' | 'MEDIUM' | 'HIGH';
+      aiRiskScore?: number;
       aiRiskReason?: string;
     };
 
@@ -375,24 +392,28 @@ REQUIRED OUTPUT — JSON ONLY, NO MARKDOWN
       realVsFake,
     };
 
+    // Derive numeric aiRiskScore (clamp 0-10) and legacy text label
+    const aiRiskScore = Math.min(10, Math.max(0, Math.round(parsed.aiRiskScore ?? 5)));
+    const aiRisk: 'LOW' | 'MEDIUM' | 'HIGH' =
+      aiRiskScore >= 7 ? 'HIGH' : aiRiskScore >= 4 ? 'MEDIUM' : 'LOW';
+
     // Hard pre-filter: below stretch threshold or clearly fake
     const isMatch = matchScore >= 35 && realVsFake >= 4;
 
     if (!isMatch) {
       if (matchScore >= 25) {
-        const riskTag = parsed.aiRisk ? ` [${parsed.aiRisk} risk]` : '';
-        console.log(`  ✗ Rejected (${matchScore})${riskTag}: ${job.company} — "${job.title}" — ${parsed.whyGoodFit?.slice(0, 80)}`);
+        console.log(`  ✗ Rejected (${matchScore}) [AI:${aiRiskScore}/10]: ${job.company} — "${job.title}" — ${parsed.whyGoodFit?.slice(0, 80)}`);
       }
       return null;
     }
 
     // Tier is ALWAYS computed deterministically — Claude does not assign tier.
     const tier: OpportunityTier = computeTier(
-      matchScore, parsed.aiRisk ?? 'unknown', subScores,
+      matchScore, aiRisk, subScores,
       job.title, job.company, job.location, tierSettings
     );
 
-    console.log(`  ✓ Match (${matchScore}) [${tier}] [AI:${parsed.aiRisk ?? '?'}]: ${job.company} — "${job.title}"`);
+    console.log(`  ✓ Match (${matchScore}) [${tier}] [AI risk:${aiRiskScore}/10]: ${job.company} — "${job.title}"`);
 
     return {
       title: job.title,
@@ -403,7 +424,8 @@ REQUIRED OUTPUT — JSON ONLY, NO MARKDOWN
       whyGoodFit: parsed.whyGoodFit ?? '',
       matchScore,
       isHardware: parsed.isHardware ?? false,
-      aiRisk: parsed.aiRisk ?? 'unknown',
+      aiRisk,
+      aiRiskScore,
       aiRiskReason: parsed.aiRiskReason ?? '',
       opportunityTier: tier,
       subScores,
@@ -601,7 +623,7 @@ export async function rescoreJobOpportunity(
   minSalary?: number | null,
   candidateResume?: string,
   minOte?: number | null,
-): Promise<{ opportunityTier: OpportunityTier; subScores: SubScores; aiRisk: string; aiRiskReason: string; whyGoodFit: string; matchScore: number } | null> {
+): Promise<{ opportunityTier: OpportunityTier; subScores: SubScores; aiRisk: string; aiRiskScore: number; aiRiskReason: string; whyGoodFit: string; matchScore: number } | null> {
   try {
     const result = await scoreOne(
       { title: job.title, company: job.company, location: job.location, salary: job.salary, applyUrl: job.applyUrl, description: job.description },
@@ -612,6 +634,7 @@ export async function rescoreJobOpportunity(
       opportunityTier: result.opportunityTier,
       subScores: result.subScores,
       aiRisk: result.aiRisk,
+      aiRiskScore: result.aiRiskScore,
       aiRiskReason: result.aiRiskReason,
       whyGoodFit: result.whyGoodFit,
       matchScore: result.matchScore,
