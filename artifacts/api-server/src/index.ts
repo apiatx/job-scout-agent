@@ -6193,7 +6193,7 @@ function renderPreferenceProfile(data) {
     var col = colors[e[0]] || '#888';
     return '<span style="background:' + col + '22;color:' + col + ';border:1px solid ' + col + '44;border-radius:4px;padding:3px 10px;font-size:12px">' + e[0].charAt(0).toUpperCase() + e[0].slice(1) + ': <strong>' + e[1] + '</strong></span>';
   }).join('');
-  var profileHtml = esc(data.profile).replace(/\*\*([^*]+)\*\*/g, '<strong style="color:var(--gold)">$1</strong>').replace(/\\n/g, '<br>');
+  var profileHtml = esc(data.profile).replace(/\\*\\*([^*]+)\\*\\*/g, '<strong style="color:var(--gold)">$1</strong>').replace(/\n/g, '<br>');
   return '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">' + statPills + '</div>' +
     '<div style="background:#0d0d0d;border:1px solid #252525;border-radius:8px;padding:16px;font-size:13px;line-height:1.75;color:var(--text)">' + profileHtml + '</div>' +
     '<div style="font-size:11px;color:var(--muted);margin-top:8px">Based on ' + esc(data.action_count) + ' tracked actions</div>';
