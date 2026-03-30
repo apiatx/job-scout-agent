@@ -15,6 +15,10 @@ import { generatePreIpo, initPreIpoDB, getLatestPreIpo, savePreIpo } from './pre
 import type { PreIpoCriteria } from './preipo.js';
 import { generateIndustryLeaders, initIndustryLeadersDB, getLatestIndustryLeaders, saveIndustryLeaders } from './industry_leaders.js';
 import {
+  generateDeepValue, initDeepValueDB, getLatestDeepValue, saveDeepValue,
+  scanWatchlistCompanyJobs, upsertCompanyJobScan, getCompanyJobScanResults
+} from './deep_value.js';
+import {
   initPositioningDB, getProfile, saveProfile, getStories, saveStory, deleteStory,
   getOutputs, generateOutputs, getObjections, generateObjections,
   getNarrative, saveNarrative, draftNarrative
@@ -334,6 +338,7 @@ async function initDb(): Promise<void> {
   await initPositioningDB(pool);
   await initPreIpoDB(pool);
   await initIndustryLeadersDB(pool);
+  await initDeepValueDB(pool);
 
   // Add columns if they don't exist (for existing installs)
   const safeAddColumn = async (table: string, col: string, type: string) => {
@@ -1426,6 +1431,80 @@ app.post('/api/industry-leaders/refresh', async (_req, res: Response) => {
     console.error('[IndustryLeaders] Refresh failed:', e);
     res.status(500).json({ error: String(e) });
   }
+});
+
+// ── Deep Value Intelligence ────────────────────────────────────────────────────
+app.get('/api/deep-value', async (_req, res: Response) => {
+  try {
+    const cached = await getLatestDeepValue(pool);
+    if (!cached) { res.json({ data: null, stale: false }); return; }
+    res.json({ data: cached.data, generated_at: cached.data.generated_at, stale: cached.stale });
+  } catch (e) {
+    console.error('[DeepValue] GET failed:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+app.post('/api/deep-value/refresh', async (_req, res: Response) => {
+  try {
+    console.log('[DeepValue] Refresh triggered');
+    const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
+    const c = cRows[0] ?? {};
+    const result = await generateDeepValue({
+      target_roles: c.target_roles ?? [],
+      locations:    c.locations    ?? ['Remote'],
+      min_salary:   c.min_salary   ?? null,
+    });
+    await saveDeepValue(pool, result);
+    res.json({ data: result, generated_at: result.generated_at, stale: false });
+  } catch (e) {
+    console.error('[DeepValue] Refresh failed:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// ── Company Watchlist job scan ─────────────────────────────────────────────────
+// GET  /api/companies/job-status   — return cached scan results for all watchlist companies
+// POST /api/companies/scan-jobs    — run Gemini job scan for all companies in watchlist
+
+app.get('/api/companies/job-status', async (_req, res: Response) => {
+  try {
+    const results = await getCompanyJobScanResults(pool);
+    res.json(results);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+let watchlistScanRunning = false;
+
+app.post('/api/companies/scan-jobs', async (_req, res: Response) => {
+  if (watchlistScanRunning) { res.json({ started: false, message: 'Scan already running' }); return; }
+  try {
+    const { rows: companies } = await pool.query('SELECT name FROM companies ORDER BY name');
+    if (companies.length === 0) { res.json({ started: false, message: 'No companies in watchlist' }); return; }
+    const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
+    const c = cRows[0] ?? {};
+    res.json({ started: true, count: companies.length });
+    watchlistScanRunning = true;
+    (async () => {
+      try {
+        console.log(`[WatchlistScan] Scanning ${companies.length} companies for open roles…`);
+        for (const co of companies) {
+          try {
+            const jobs = await scanWatchlistCompanyJobs(pool, co.name, {
+              target_roles: c.target_roles ?? [],
+              locations:    c.locations    ?? ['Remote'],
+            });
+            await upsertCompanyJobScan(pool, co.name, jobs);
+            console.log(`[WatchlistScan] ${co.name}: ${jobs.length} roles found`);
+          } catch (e) {
+            console.error(`[WatchlistScan] Error for ${co.name}:`, e);
+            await upsertCompanyJobScan(pool, co.name, []);
+          }
+        }
+        console.log('[WatchlistScan] Complete');
+      } finally { watchlistScanRunning = false; }
+    })();
+  } catch (e) { watchlistScanRunning = false; res.status(500).json({ error: String(e) }); }
 });
 
 // ── Positioning Engine Routes ──────────────────────────────────────────────────
@@ -4129,6 +4208,43 @@ app.use((_req: Request, res: Response) => {
 
 // ── Start server ──────────────────────────────────────────────────────────
 
+// ── Watchlist daily job scan ───────────────────────────────────────────────
+async function checkWatchlistScan(): Promise<void> {
+  if (watchlistScanRunning) return;
+  try {
+    const { rows: cos } = await pool.query('SELECT name FROM companies LIMIT 1');
+    if (cos.length === 0) return;
+    const { rows: recent } = await pool.query(
+      `SELECT MAX(scanned_at) AS last FROM company_job_scan_results`
+    );
+    const last = recent[0]?.last;
+    if (last) {
+      const hoursSince = (Date.now() - new Date(last).getTime()) / 3_600_000;
+      if (hoursSince < 22) return;
+    }
+    console.log('[WatchlistScan] Daily auto-scan triggered…');
+    const { rows: companies } = await pool.query('SELECT name FROM companies ORDER BY name');
+    const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
+    const c = cRows[0] ?? {};
+    watchlistScanRunning = true;
+    (async () => {
+      try {
+        for (const co of companies) {
+          try {
+            const jobs = await scanWatchlistCompanyJobs(pool, co.name, {
+              target_roles: c.target_roles ?? [],
+              locations:    c.locations    ?? ['Remote'],
+            });
+            await upsertCompanyJobScan(pool, co.name, jobs);
+            console.log(`[WatchlistScan] ${co.name}: ${jobs.length} roles`);
+          } catch (e) { console.error(`[WatchlistScan] Error for ${co.name}:`, e); }
+        }
+        console.log('[WatchlistScan] Daily scan complete');
+      } finally { watchlistScanRunning = false; }
+    })();
+  } catch (e) { console.error('[WatchlistScan] Scheduler error:', e); }
+}
+
 // ── Auto-run scheduler ─────────────────────────────────────────────────────
 async function checkAutoRun(): Promise<void> {
   if (scoutRunning) return;
@@ -4171,6 +4287,10 @@ initDb()
     // Start auto-scheduler: check immediately after 2 min, then every 15 min
     setTimeout(checkAutoRun, 2 * 60 * 1000);
     setInterval(checkAutoRun, AUTO_RUN_CHECK_MS);
+
+    // Watchlist daily scan: check after 5 min startup delay, then every hour
+    setTimeout(checkWatchlistScan, 5 * 60 * 1000);
+    setInterval(checkWatchlistScan, 60 * 60 * 1000);
 
     const server = app.listen(PORT, () => {
       console.log(`Job Scout Agent listening on port ${PORT}`);
@@ -4721,6 +4841,62 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .leaders-empty{padding:64px 0;text-align:center;color:var(--muted);font-size:13px;line-height:1.7}
 .leaders-footer{font-size:11px;color:var(--muted);margin-top:20px;padding-top:14px;border-top:1px solid var(--border)}
 @media(max-width:700px){.leaders-grid{grid-template-columns:1fr}}
+/* ── Deep Value ────────────────────────────────────────────────────────────── */
+.dv-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px;flex-wrap:wrap}
+.dv-meta{font-size:11px;color:var(--muted);margin-top:2px}
+.dv-summary{background:linear-gradient(135deg,#100e00 0%,#0e0e0e 100%);border:1px solid #f5c84233;border-radius:10px;padding:16px 18px;margin-bottom:20px;font-size:13px;color:var(--text);line-height:1.65}
+.dv-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}
+.dv-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px;transition:border-color .15s}
+.dv-card:hover{border-color:var(--gold)}
+.dv-card.has-roles{border-left:3px solid #00c86e}
+.dv-card.no-roles{border-left:3px solid #333}
+.dv-card-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.dv-name-block{flex:1}
+.dv-name{font-size:14px;font-weight:700;color:var(--text)}
+.dv-url{font-size:11px;color:var(--muted);text-decoration:none;display:block;margin-top:1px}
+.dv-url:hover{color:var(--gold)}
+.dv-badges{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0}
+.dv-category-badge{padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600;background:#f5c84215;color:#f5c842;border:1px solid #f5c84233}
+.dv-public-badge{padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;background:#3b82f615;color:#60a5fa;border:1px solid #3b82f633}
+.dv-private-badge{padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600;background:#ffffff0f;color:var(--muted);border:1px solid var(--border)}
+.dv-tagline{font-size:12.5px;color:var(--text);line-height:1.5;font-style:italic}
+.dv-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:2px}
+.dv-val{font-size:12px;color:var(--text);line-height:1.55}
+.dv-why{font-size:12px;color:#e2c46a;line-height:1.6;padding:10px 12px;background:#f5c84208;border:1px solid #f5c84220;border-radius:6px}
+.dv-signal{font-size:11px;color:#00c86e;padding-left:13px;position:relative;line-height:1.5}
+.dv-signal::before{content:'↑';position:absolute;left:0;font-size:10px}
+.dv-customers{display:flex;flex-wrap:wrap;gap:5px;margin-top:3px}
+.dv-customer-chip{font-size:11px;background:#ffffff0d;border:1px solid var(--border);border-radius:4px;padding:2px 8px;color:var(--muted)}
+.dv-divider{height:1px;background:var(--border)}
+.dv-roles-section{display:flex;flex-direction:column;gap:6px}
+.dv-roles-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#00c86e}
+.dv-role-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;background:#00c86e0a;border:1px solid #00c86e22;border-radius:6px}
+.dv-role-title{font-size:12px;color:var(--text);flex:1}
+.dv-role-loc{font-size:11px;color:var(--muted)}
+.dv-role-apply{padding:3px 10px;border-radius:5px;font-size:11px;font-weight:700;background:#00c86e22;color:#00c86e;border:1px solid #00c86e44;text-decoration:none;white-space:nowrap}
+.dv-role-apply:hover{background:#00c86e33}
+.dv-no-roles{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;background:#ffffff05;border:1px solid var(--border);border-radius:6px}
+.dv-no-roles-text{font-size:11px;color:var(--muted)}
+.dv-watchlist-btn{padding:3px 10px;border-radius:5px;font-size:11px;font-weight:700;background:#f5c84218;color:var(--gold);border:1px solid #f5c84233;cursor:pointer;white-space:nowrap}
+.dv-watchlist-btn:hover{background:#f5c84228}
+.dv-watchlist-btn.added{background:#00c86e15;color:#00c86e;border-color:#00c86e33;cursor:default}
+.dv-cites{display:flex;flex-direction:column;gap:3px}
+.dv-cite{font-size:11px;color:var(--muted);text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+.dv-cite:hover{color:var(--gold)}
+.dv-loading-wrap{display:flex;align-items:center;gap:16px;padding:64px 0;justify-content:center}
+.dv-spinner{width:22px;height:22px;border:2px solid var(--border);border-top-color:var(--gold);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0}
+.dv-loading-msg{font-size:13px;color:var(--muted);line-height:1.6}
+.dv-error-box{background:#ff6b6b18;border:1px solid #ff6b6b44;border-radius:8px;padding:14px 16px;font-size:13px;color:#ff6b6b;margin-bottom:16px}
+.dv-empty{padding:64px 0;text-align:center;color:var(--muted);font-size:13px;line-height:1.7}
+.dv-footer{font-size:11px;color:var(--muted);margin-top:20px;padding-top:14px;border-top:1px solid var(--border)}
+/* ── Company Watchlist enhancements ──────────────────────────────────────── */
+.cw-job-status{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:4px}
+.cw-role-badge{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;background:#00c86e15;color:#00c86e;border:1px solid #00c86e33;text-decoration:none}
+.cw-role-badge:hover{background:#00c86e22}
+.cw-no-roles-badge{font-size:11px;color:var(--muted)}
+.cw-scan-status{font-size:11px;color:var(--muted);margin-top:2px}
+.cw-scan-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px;padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px}
+@media(max-width:700px){.dv-grid{grid-template-columns:1fr}}
 /* ── Positioning Engine ────────────────────────────────────────────────────── */
 .pos-layout{display:flex;flex-direction:column;height:100%;padding:24px;gap:20px;max-width:1100px}
 .pos-steps{display:flex;gap:6px;flex-wrap:wrap}
@@ -4981,6 +5157,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="tab" id="tab-saved" onclick="showTab('saved')" data-tooltip="Jobs you've starred. Generate tailored resumes and cover letters from each one.">Saved Jobs</div>
     <div class="tab" id="tab-intel" onclick="showTab('intel')" data-tooltip="Gemini scans the web daily for companies actively hiring in your space. Market trends, emerging themes, hot companies to target now.">Career Intel</div>
     <div class="tab" id="tab-leaders" onclick="showTab('leaders')" data-tooltip="Claude-ranked top 5-10 sales-led companies per sector — SaaS, Cybersecurity, AI Infrastructure, Networking and more. The gold standard companies to target for your next move.">Industry Leaders</div>
+    <div class="tab" id="tab-deepvalue" onclick="showTab('deepvalue')" data-tooltip="Gemini finds the cutting-edge infrastructure companies with the clearest 'why you need this' value prop — AI Infra, HPC, Semiconductors, Photonics, Networking, Data Center and more.">Deep Value</div>
     <div class="tab" id="tab-preipo" onclick="showTab('preipo')" data-tooltip="Explosive pre-IPO companies worth joining NOW. Series B is the sweet spot — proven PMF, scaling sales motion, meaningful equity. Ranked by momentum score using real funding data.">Pre-IPO</div>
     <div class="tab" id="tab-clawd" onclick="showTab('clawd')" data-tooltip="Embedded interview and career coaching tool.">DeathByClawd</div>
     <div class="tab" id="tab-email" onclick="showTab('email')" data-tooltip="Daily email digest of your top matches sent to your inbox. Configure send time, preview the content, and manage your Gmail connection here.">Daily Report</div>
@@ -4995,7 +5172,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="nav-group">
     <div class="nav-group-label">Settings</div>
     <div class="tab" id="tab-settings" onclick="showTab('settings')" data-tooltip="Controls what the scout actually searches for: target roles, industries, locations, must-have skills, things to avoid, and salary floor. The scout won't run without this configured.">User Search Settings</div>
-    <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Does two things: (1) tells the scraper which ATS pages to hit, and (2) boosts every listed company's score. Keep to your genuine top 10–15 or the boost is meaningless.">Priority Companies</div>
+    <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Your Company Watchlist — tracks open roles at each company daily using Gemini search. Also tells the scraper which ATS pages to hit and boosts their score.">Company Watchlist</div>
     <div class="tab" id="tab-runs" onclick="showTab('runs')" data-tooltip="Full log of every scout run — jobs found, matches scored, errors, and timing. Use this to debug why a run found too many or too few results.">Run History</div>
   </div>
 </nav>
@@ -5299,6 +5476,35 @@ textarea:focus,input:focus{border-color:var(--gold)}
   </div>
 </div>
 
+<div class="panel" id="panel-deepvalue">
+  <div class="dv-header">
+    <div>
+      <div class="sec-title" style="margin-bottom:4px">Deep Value</div>
+      <div class="dv-meta" id="dv-meta">Gemini finds cutting-edge infrastructure companies with the clearest customer value prop &mdash; plus open roles</div>
+    </div>
+    <button class="btn btn-gold btn-sm" id="dv-refresh-btn" onclick="refreshDeepValue()">Refresh Intel</button>
+  </div>
+
+  <div id="dv-loading" style="display:none">
+    <div class="dv-loading-wrap">
+      <div class="dv-spinner"></div>
+      <div class="dv-loading-msg">Gemini is searching for the most compelling infrastructure companies with undeniable value props&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;60 seconds</span></div>
+    </div>
+  </div>
+
+  <div id="dv-empty" style="display:none">
+    <div class="dv-empty">No Deep Value data yet.<br>Click &ldquo;Refresh Intel&rdquo; to have Gemini search for cutting-edge infrastructure companies with the clearest &ldquo;why you need this&rdquo; value props &mdash; plus any open roles at each.</div>
+  </div>
+
+  <div id="dv-error" style="display:none" class="dv-error-box"></div>
+
+  <div id="dv-content" style="display:none">
+    <div class="dv-summary" id="dv-summary"></div>
+    <div class="dv-grid" id="dv-grid"></div>
+    <div class="dv-footer" id="dv-footer"></div>
+  </div>
+</div>
+
 <div class="panel" id="panel-preipo">
   <div class="preipo-header">
     <div>
@@ -5420,9 +5626,23 @@ textarea:focus,input:focus{border-color:var(--gold)}
 </div>
 
 <div class="panel" id="panel-companies">
+  <div style="margin-bottom:20px">
+    <div class="sec-title" style="margin-bottom:4px">Company Watchlist</div>
+    <div style="font-size:12px;color:var(--muted)">Gemini searches for open sales roles at each company daily. Green = matching roles found. Also boosts each company&rsquo;s score in your job board.</div>
+  </div>
+
+  <!-- Watchlist scan controls -->
+  <div class="cw-scan-header">
+    <div>
+      <div style="font-size:13px;font-weight:700;color:var(--text)">Daily Job Scan</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:2px" id="cw-scan-status">Gemini checks for open roles at each company daily &mdash; automatically</div>
+    </div>
+    <button class="btn btn-ghost btn-sm" id="cw-scan-btn" onclick="runWatchlistScan()">&#x1F50D; Scan Now</button>
+  </div>
+
   <div class="company-list" id="company-list"></div>
-  <div class="sec-title" style="margin-bottom:12px">Add Company</div>
-  <div style="font-size:12px;color:var(--muted);margin-bottom:14px">Type a company name — AI will automatically detect the job board and verify it's working.</div>
+  <div class="sec-title" style="margin-bottom:12px;margin-top:8px">Add Company</div>
+  <div style="font-size:12px;color:var(--muted);margin-bottom:14px">Type a company name — AI will automatically detect the job board and verify it&rsquo;s working.</div>
   <div class="add-form" style="align-items:flex-end">
     <div class="fg" style="flex:2">
       <label>Company Name</label>
@@ -6059,7 +6279,7 @@ function sizeClawd() {
 window.addEventListener('resize', sizeClawd);
 
 // ── tabs ─────────────────────────────────────────────────────────────────
-var TABS = ['jobs','saved','pipeline','research','intel','leaders','preipo','companies','resume','email','runs','positioning','settings','clawd'];
+var TABS = ['jobs','saved','pipeline','research','intel','leaders','deepvalue','preipo','companies','resume','email','runs','positioning','settings','clawd'];
 function showTab(name) {
   TABS.forEach(function(t) {
     var tabEl = document.getElementById('tab-' + t);
@@ -6079,6 +6299,7 @@ function showTab(name) {
   if (name === 'settings')  loadCriteria();
   if (name === 'intel')     loadCareerIntel();
   if (name === 'leaders')   loadIndustryLeaders();
+  if (name === 'deepvalue') loadDeepValue();
   if (name === 'preipo')    loadPreIpo();
   if (name === 'positioning') loadPositioning();
 }
@@ -7721,6 +7942,7 @@ async function saveDigestTime() {
 
 // ── companies ─────────────────────────────────────────────────────────────
 async function loadCompanies() {
+  await loadCwJobStatus();
   var res = await fetch('/api/companies');
   var cos = await res.json();
   var list = document.getElementById('company-list');
@@ -7748,6 +7970,24 @@ async function loadCompanies() {
     var jobCountBadge = jobCount > 0
       ? '<button class="btn btn-sm" style="background:rgba(245,200,66,.1);color:var(--gold);border:1px solid rgba(245,200,66,.25);font-size:11px;margin-left:4px" onclick="filterToCompany(' + JSON.stringify(c.name) + ')">' + jobCount + ' open role' + (jobCount !== 1 ? 's' : '') + ' \u2192</button>'
       : '<span style="font-size:11px;color:var(--muted);margin-left:4px">0 roles found</span>';
+    // Watchlist job scan results
+    var scanEntry = _cwJobStatus[c.name.toLowerCase()];
+    var scanHtml = '';
+    if (scanEntry) {
+      var scannedAt = scanEntry.scanned_at ? new Date(scanEntry.scanned_at).toLocaleDateString('en-US', { month:'short', day:'numeric' }) : '';
+      if (scanEntry.jobs && scanEntry.jobs.length > 0) {
+        var roleLinks = scanEntry.jobs.slice(0, 3).map(function(j) {
+          var href = j.apply_url || '#';
+          return '<a class="cw-role-badge" href="' + esc(href) + '" target="_blank" rel="noopener">\u2713 ' + esc(j.title) + (j.location ? ' \u2014 ' + esc(j.location) : '') + '</a>';
+        }).join('');
+        var moreCount = scanEntry.jobs.length - 3;
+        scanHtml = '<div class="cw-job-status">' + roleLinks + (moreCount > 0 ? '<span style="font-size:11px;color:var(--muted)">+' + moreCount + ' more</span>' : '') + '</div>' +
+          '<div class="cw-scan-status">Last scanned: ' + scannedAt + '</div>';
+      } else {
+        scanHtml = '<div class="cw-job-status"><span class="cw-no-roles-badge">\u26A0\uFE0F No jobs currently that fit your criteria</span></div>' +
+          '<div class="cw-scan-status">Last scanned: ' + scannedAt + '</div>';
+      }
+    }
     html +=
       '<div class="company-row" style="flex-wrap:wrap;gap:4px">' +
         '<span class="company-name" style="flex:1;min-width:120px">' + esc(c.name) + '</span>' +
@@ -7758,6 +7998,7 @@ async function loadCompanies() {
         '<button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="retryDetect(' + c.id + ',' + JSON.stringify(c.name) + ')" title="Re-run auto-detection">\u21BB</button>' +
         '<button class="btn btn-ghost btn-sm" onclick="deleteCompany(' + c.id + ')">Remove</button>' +
         (errorHtml ? '<div style="width:100%;padding-left:4px">' + errorHtml + '</div>' : '') +
+        (scanHtml ? '<div style="width:100%;margin-top:6px;padding-top:8px;border-top:1px solid var(--border)">' + scanHtml + '</div>' : '') +
       '</div>';
   });
   list.innerHTML = html;
@@ -9350,6 +9591,203 @@ function toggleLeadersScanResults() {
   var toggleEl = document.getElementById('leaders-scan-toggle');
   if (jobsEl) jobsEl.style.display = _leadersScanCollapsed ? 'none' : '';
   if (toggleEl) toggleEl.textContent = _leadersScanCollapsed ? '\u25BC Expand' : '\u25B2 Collapse';
+}
+
+// ── Deep Value ──────────────────────────────────────────────────────────────
+var _dvWatchlistAdded = {};
+
+function dvEl(id) { return document.getElementById(id); }
+
+function renderDvRolesSection(c) {
+  var roles = c.open_roles || [];
+  if (roles.length > 0) {
+    return '<div class="dv-divider"></div>' +
+      '<div class="dv-roles-section">' +
+        '<div class="dv-roles-label">\u2705 ' + roles.length + ' Open Role' + (roles.length > 1 ? 's' : '') + ' Found</div>' +
+        roles.map(function(r) {
+          var applyHref = r.apply_url || (c.website ? ('https://' + c.website.replace(/^https?:\\/\\//, '') + '/careers') : '#');
+          return '<div class="dv-role-row">' +
+            '<span class="dv-role-title">' + esc(r.title) + '</span>' +
+            (r.location ? '<span class="dv-role-loc">' + esc(r.location) + '</span>' : '') +
+            '<a class="dv-role-apply" href="' + esc(applyHref) + '" target="_blank" rel="noopener">Apply \u2192</a>' +
+          '</div>';
+        }).join('') +
+      '</div>';
+  }
+  var added = _dvWatchlistAdded[c.name];
+  var btnLabel = added ? '\u2713 On Watchlist' : '\u2605 Add to Watchlist';
+  var btnClass = 'dv-watchlist-btn' + (added ? ' added' : '');
+  var btnAttr = added ? 'disabled' : ('onclick="addDvCompanyToWatchlist(' + JSON.stringify(c.name) + ',' + JSON.stringify(c.website || '') + ',this)"');
+  return '<div class="dv-divider"></div>' +
+    '<div class="dv-no-roles">' +
+      '<span class="dv-no-roles-text">\u26A0\uFE0F No open matching roles found right now</span>' +
+      '<button class="' + btnClass + '" ' + btnAttr + '>' + btnLabel + '</button>' +
+    '</div>';
+}
+
+function renderDvCard(c) {
+  var hasRoles = c.has_open_roles && (c.open_roles || []).length > 0;
+  var websiteUrl = c.website ? (c.website.startsWith('http') ? c.website : 'https://' + c.website) : null;
+  return '<div class="dv-card ' + (hasRoles ? 'has-roles' : 'no-roles') + '">' +
+    '<div class="dv-card-top">' +
+      '<div class="dv-name-block">' +
+        '<div class="dv-name">' + esc(c.name) + '</div>' +
+        (websiteUrl ? '<a class="dv-url" href="' + esc(websiteUrl) + '" target="_blank" rel="noopener">' + esc(c.website) + '</a>' : '') +
+      '</div>' +
+      '<div class="dv-badges">' +
+        '<span class="dv-category-badge">' + esc(c.category) + '</span>' +
+        (c.is_public && c.ticker ? '<span class="dv-public-badge">' + esc(c.ticker) + '</span>' : '') +
+        (!c.is_public && c.stage ? '<span class="dv-private-badge">' + esc(c.stage) + '</span>' : '') +
+      '</div>' +
+    '</div>' +
+    '<div class="dv-tagline">' + esc(c.tagline) + '</div>' +
+    '<div class="dv-why">\u201C' + esc(c.why_you_need_this) + '\u201D</div>' +
+    '<div><div class="dv-lbl">Customer Pain Solved</div><div class="dv-val">' + esc(c.customer_pain) + '</div></div>' +
+    '<div class="dv-signal">' + esc(c.growth_signal) + '</div>' +
+    (c.notable_customers && c.notable_customers.length ?
+      '<div><div class="dv-lbl">Notable Customers</div><div class="dv-customers">' +
+        c.notable_customers.map(function(cu) { return '<span class="dv-customer-chip">' + esc(cu) + '</span>'; }).join('') +
+      '</div></div>' : '') +
+    renderDvRolesSection(c) +
+    ((c.source_citations || []).length ?
+      '<div class="dv-cites">' + c.source_citations.slice(0, 2).map(function(s) {
+        return '<a class="dv-cite" href="' + esc(s.url) + '" target="_blank" rel="noopener">\uD83D\uDD17 ' + esc(s.title) + '</a>';
+      }).join('') + '</div>' : '') +
+  '</div>';
+}
+
+function renderDvData(data, stale) {
+  dvEl('dv-summary').textContent = data.market_summary || '';
+  dvEl('dv-grid').innerHTML = (data.companies || []).map(renderDvCard).join('');
+
+  var genAt = data.generated_at ? new Date(data.generated_at) : null;
+  var metaParts = [];
+  if (genAt) metaParts.push('Last updated ' + genAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }));
+  if (stale) metaParts.push('\u26A0\uFE0F Stale \u2014 click Refresh Intel');
+  metaParts.push('Powered by Gemini + Google Search');
+  dvEl('dv-meta').textContent = metaParts.join(' \u2014 ');
+
+  var cos = data.companies || [];
+  dvEl('dv-footer').textContent =
+    cos.length + ' companies \u2014 ' + cos.filter(function(c) { return c.has_open_roles; }).length + ' with open roles \u2014 ' + (data.model_used || 'Gemini');
+
+  dvEl('dv-loading').style.display = 'none';
+  dvEl('dv-empty').style.display = 'none';
+  dvEl('dv-error').style.display = 'none';
+  dvEl('dv-content').style.display = '';
+  var btn = dvEl('dv-refresh-btn');
+  if (btn) { btn.disabled = false; btn.textContent = 'Refresh Intel'; }
+}
+
+async function loadDeepValue() {
+  try {
+    var res = await fetch('/api/deep-value');
+    var json = await res.json();
+    if (!res.ok) throw new Error(json.error || 'Failed');
+    if (!json.data) {
+      dvEl('dv-empty').style.display = '';
+      dvEl('dv-content').style.display = 'none';
+      dvEl('dv-loading').style.display = 'none';
+      dvEl('dv-error').style.display = 'none';
+      return;
+    }
+    renderDvData(json.data, json.stale);
+  } catch(e) {
+    dvEl('dv-error').textContent = 'Error loading Deep Value: ' + e.message;
+    dvEl('dv-error').style.display = '';
+    dvEl('dv-loading').style.display = 'none';
+    dvEl('dv-empty').style.display = 'none';
+    dvEl('dv-content').style.display = 'none';
+  }
+}
+
+async function refreshDeepValue() {
+  var btn = dvEl('dv-refresh-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing\u2026'; }
+  dvEl('dv-loading').style.display = '';
+  dvEl('dv-content').style.display = 'none';
+  dvEl('dv-empty').style.display = 'none';
+  dvEl('dv-error').style.display = 'none';
+  try {
+    var res = await fetch('/api/deep-value/refresh', { method: 'POST' });
+    var json = await res.json();
+    if (!res.ok) throw new Error(json.error || 'Refresh failed');
+    renderDvData(json.data, false);
+  } catch(e) {
+    dvEl('dv-error').textContent = 'Refresh failed: ' + e.message;
+    dvEl('dv-error').style.display = '';
+    dvEl('dv-loading').style.display = 'none';
+    if (btn) { btn.disabled = false; btn.textContent = 'Refresh Intel'; }
+  }
+}
+
+async function addDvCompanyToWatchlist(name, website, btn) {
+  if (!name) return;
+  try {
+    btn.disabled = true;
+    btn.textContent = 'Adding\u2026';
+    var res = await fetch('/api/companies/detect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, website: website || undefined })
+    });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed');
+    _dvWatchlistAdded[name] = true;
+    btn.textContent = '\u2713 On Watchlist';
+    btn.classList.add('added');
+    btn.disabled = true;
+  } catch(e) {
+    btn.textContent = 'Error \u2014 retry?';
+    btn.disabled = false;
+    console.error('Add to watchlist failed:', e);
+  }
+}
+
+// ── Company Watchlist scan ──────────────────────────────────────────────────
+var _cwJobStatus = {};
+
+async function loadCwJobStatus() {
+  try {
+    var res = await fetch('/api/companies/job-status');
+    var data = await res.json();
+    _cwJobStatus = {};
+    (data || []).forEach(function(entry) {
+      _cwJobStatus[entry.company_name.toLowerCase()] = entry;
+    });
+  } catch(e) {}
+}
+
+async function runWatchlistScan() {
+  var btn = document.getElementById('cw-scan-btn');
+  var statusEl = document.getElementById('cw-scan-status');
+  if (btn) { btn.disabled = true; btn.textContent = 'Scanning\u2026'; }
+  if (statusEl) statusEl.textContent = 'Gemini is searching for open roles at each company\u2026 (30-90s per company)';
+  try {
+    var res = await fetch('/api/companies/scan-jobs', { method: 'POST' });
+    var data = await res.json();
+    if (data.started) {
+      if (statusEl) statusEl.textContent = 'Scan started for ' + data.count + ' companies \u2014 results will appear as they come in';
+      // Poll for completion
+      var pollCount = 0;
+      var poll = setInterval(async function() {
+        pollCount++;
+        await loadCwJobStatus();
+        loadCompanies();
+        if (pollCount > 120) {
+          clearInterval(poll);
+          if (btn) { btn.disabled = false; btn.textContent = '\uD83D\uDD0D Scan Now'; }
+          if (statusEl) statusEl.textContent = 'Scan complete \u2014 results updated';
+        }
+      }, 5000);
+    } else {
+      if (statusEl) statusEl.textContent = data.message || 'Could not start scan';
+      if (btn) { btn.disabled = false; btn.textContent = '\uD83D\uDD0D Scan Now'; }
+    }
+  } catch(e) {
+    if (statusEl) statusEl.textContent = 'Scan error: ' + e.message;
+    if (btn) { btn.disabled = false; btn.textContent = '\uD83D\uDD0D Scan Now'; }
+  }
 }
 
 // ── Positioning Engine ────────────────────────────────────────────────────

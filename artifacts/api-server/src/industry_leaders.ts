@@ -147,7 +147,7 @@ Return ONLY valid JSON in this exact structure (no markdown, no prose):
 
   const response = await ac.messages.create({
     model: 'claude-opus-4-5',
-    max_tokens: 8000,
+    max_tokens: 16000,
     messages: [{ role: 'user', content: prompt }],
   });
 
