@@ -81,7 +81,8 @@ app.get('/api/proxy-status', async (_req, res: Response) => {
 // ── Gmail OAuth config ───────────────────────────────────────────────────
 const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID || '1007930505834-cpp1veqs8alu56k810qd2mru61keej3j.apps.googleusercontent.com';
 const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET || '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';
-const GMAIL_REDIRECT_URI = process.env.GMAIL_REDIRECT_URI || 'https://c12ad21f-8216-45ab-b03f-5e735925225d-00-34c2t5oabpvff.riker.replit.dev/api/gmail/callback';
+const GMAIL_REDIRECT_URI = process.env.GMAIL_REDIRECT_URI ||
+  (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}/api/gmail/callback` : 'http://localhost:8080/api/gmail/callback');
 
 // ── Location utilities (module-level, shared by scout run + reclassify) ──────
 const STATE_ABBREV: Record<string, string> = {
@@ -259,10 +260,13 @@ async function initDb(): Promise<void> {
 
     CREATE TABLE IF NOT EXISTS gmail_tokens (
       id            SERIAL PRIMARY KEY,
+      email         TEXT NOT NULL DEFAULT '',
       access_token  TEXT NOT NULL,
       refresh_token TEXT,
-      expiry        TIMESTAMPTZ,
-      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      token_type    TEXT NOT NULL DEFAULT 'Bearer',
+      expiry_date   TIMESTAMPTZ,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS research_briefs (
@@ -3082,7 +3086,7 @@ app.get('/api/gmail/callback', async (req: Request, res: Response) => {
     await pool.query('DELETE FROM gmail_tokens');
     const expiry = tokenData.expires_in ? new Date(Date.now() + tokenData.expires_in * 1000) : null;
     await pool.query(
-      'INSERT INTO gmail_tokens (access_token, refresh_token, expiry) VALUES ($1, $2, $3)',
+      'INSERT INTO gmail_tokens (access_token, refresh_token, expiry_date) VALUES ($1, $2, $3)',
       [tokenData.access_token, tokenData.refresh_token ?? null, expiry]
     );
     res.send('<html><body style="background:#0f0f0f;color:#c8a96e;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;font-size:20px"><div>Gmail connected! You can close this tab.</div></body></html>');
@@ -3098,40 +3102,68 @@ app.post('/api/gmail/disconnect', async (_req, res: Response) => {
 
 async function getGmailAccessToken(): Promise<string | null> {
   const { rows } = await pool.query('SELECT * FROM gmail_tokens ORDER BY id DESC LIMIT 1');
-  if (rows.length === 0) return null;
-  const token = rows[0];
-  // Check if expired and refresh
-  if (token.expiry && new Date(token.expiry) < new Date() && token.refresh_token) {
-    try {
-      const refreshRes = await fetch('https://oauth2.googleapis.com/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          refresh_token: token.refresh_token,
-          client_id: GMAIL_CLIENT_ID,
-          client_secret: GMAIL_CLIENT_SECRET,
-          grant_type: 'refresh_token',
-        }),
-      });
-      const data = await refreshRes.json() as { access_token?: string; expires_in?: number };
-      if (data.access_token) {
-        const expiry = data.expires_in ? new Date(Date.now() + data.expires_in * 1000) : null;
-        await pool.query(
-          'UPDATE gmail_tokens SET access_token=$1, expiry=$2 WHERE id=$3',
-          [data.access_token, expiry, token.id]
-        );
-        return data.access_token;
-      }
-    } catch { /* fall through */ }
+  if (rows.length === 0) {
+    console.log('[Gmail] No tokens stored — Gmail not connected');
+    return null;
   }
-  return token.access_token;
+  const token = rows[0];
+
+  // Only skip refresh if expiry is explicitly set and still in the future
+  const tokenStillValid = token.expiry_date && new Date(token.expiry_date) > new Date(Date.now() + 60_000); // 1-min buffer
+  if (tokenStillValid) return token.access_token as string;
+
+  // Token is expired, has unknown expiry, or expires very soon — refresh now
+  if (!token.refresh_token) {
+    console.warn('[Gmail] Token expired and no refresh_token stored — user needs to reconnect Gmail');
+    return null;
+  }
+
+  try {
+    console.log('[Gmail] Access token expired — attempting refresh…');
+    const refreshRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        refresh_token: token.refresh_token as string,
+        client_id: GMAIL_CLIENT_ID,
+        client_secret: GMAIL_CLIENT_SECRET,
+        grant_type: 'refresh_token',
+      }),
+    });
+    const data = await refreshRes.json() as { access_token?: string; expires_in?: number; error?: string; error_description?: string };
+    if (data.error) {
+      console.error(`[Gmail] Token refresh failed: ${data.error} — ${data.error_description || ''}`);
+      if (data.error === 'invalid_grant') {
+        // Token is permanently revoked — clear it so the UI shows disconnected
+        await pool.query('DELETE FROM gmail_tokens WHERE id=$1', [token.id]);
+        console.warn('[Gmail] Cleared invalid refresh token — user must reconnect Gmail');
+      }
+      return null;
+    }
+    if (data.access_token) {
+      const expiry = data.expires_in ? new Date(Date.now() + data.expires_in * 1000) : null;
+      await pool.query(
+        'UPDATE gmail_tokens SET access_token=$1, expiry_date=$2, updated_at=NOW() WHERE id=$3',
+        [data.access_token, expiry, token.id]
+      );
+      console.log('[Gmail] Access token refreshed successfully');
+      return data.access_token;
+    }
+    console.warn('[Gmail] Refresh returned no access_token (unknown error)');
+    return null;
+  } catch (e) {
+    console.error('[Gmail] Token refresh network error:', e instanceof Error ? e.message : e);
+    return null;
+  }
 }
 
-async function sendGmailEmail(to: string, subject: string, htmlBody: string): Promise<boolean> {
+async function sendGmailEmail(to: string, subject: string, htmlBody: string): Promise<{ ok: boolean; status: number }> {
   const accessToken = await getGmailAccessToken();
-  if (!accessToken) return false;
+  if (!accessToken) {
+    console.warn(`[Gmail] Cannot send email to ${to} — no valid access token`);
+    return { ok: false, status: 0 };
+  }
 
-  const boundary = 'boundary_' + Date.now();
   const rawEmail = [
     `To: ${to}`,
     `Subject: ${subject}`,
@@ -3143,75 +3175,104 @@ async function sendGmailEmail(to: string, subject: string, htmlBody: string): Pr
 
   const encoded = Buffer.from(rawEmail).toString('base64url');
 
-  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ raw: encoded }),
-  });
-  return res.ok;
+  try {
+    const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ raw: encoded }),
+    });
+
+    if (sendRes.ok) {
+      console.log(`[Gmail] ✓ Email sent successfully to ${to} — subject: "${subject}"`);
+      return { ok: true, status: sendRes.status };
+    } else {
+      const errBody = await sendRes.text().catch(() => '');
+      console.error(`[Gmail] ✗ Send failed (HTTP ${sendRes.status}) to ${to}: ${errBody.slice(0, 300)}`);
+      return { ok: false, status: sendRes.status };
+    }
+  } catch (e) {
+    console.error(`[Gmail] ✗ Network error sending to ${to}:`, e instanceof Error ? e.message : e);
+    return { ok: false, status: 0 };
+  }
 }
 
 app.post('/api/gmail/send-test', async (_req, res: Response) => {
   try {
-    // Get user email from criteria
     const { rows: cRows } = await pool.query('SELECT your_email FROM criteria LIMIT 1');
     const email = cRows[0]?.your_email;
-    if (!email) { res.status(400).json({ error: 'Set your email in the Criteria tab first' }); return; }
+    if (!email) { res.status(400).json({ error: 'Set your email in User Search Settings first' }); return; }
 
-    // Get recent jobs
+    // Weekly digest: top 10 from past 7 days
     const { rows: jobs } = await pool.query(
-      'SELECT * FROM jobs WHERE match_score >= 50 ORDER BY match_score DESC LIMIT 10'
+      `SELECT * FROM jobs WHERE match_score >= 50 AND created_at >= NOW() - INTERVAL '7 days' ORDER BY match_score DESC LIMIT 10`
     );
 
     const narrative = await generateDigestNarrative(jobs);
     const html = buildDigestHtml(jobs, narrative);
-    const sent = await sendGmailEmail(email, 'JSOS.ai — Test Digest', html);
-    if (sent) {
-      res.json({ ok: true, message: 'Test digest sent to ' + email });
+    const result = await sendGmailEmail(email, 'JSOS.ai \u2014 Weekly Scout Report (Test)', html);
+    if (result.ok) {
+      res.json({ ok: true, message: 'Weekly report sent to ' + email });
+    } else if (result.status === 403) {
+      res.status(403).json({ error: 'Gmail permissions are outdated. Please Disconnect Gmail and reconnect to grant the Send Email permission.' });
+    } else if (result.status === 401) {
+      res.status(401).json({ error: 'Gmail token is invalid. Please Disconnect Gmail and reconnect.' });
     } else {
-      res.status(500).json({ error: 'Failed to send email. Make sure Gmail is connected.' });
+      res.status(500).json({ error: 'Failed to send email (HTTP ' + result.status + '). Check server logs.' });
     }
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 app.get('/api/gmail/preview', async (_req, res: Response) => {
   try {
+    // Weekly digest: top 10 from past 7 days
     const { rows: jobs } = await pool.query(
-      'SELECT * FROM jobs WHERE match_score >= 50 ORDER BY match_score DESC LIMIT 10'
+      `SELECT * FROM jobs WHERE match_score >= 50 AND created_at >= NOW() - INTERVAL '7 days' ORDER BY match_score DESC LIMIT 10`
     );
     const narrative = await generateDigestNarrative(jobs);
     res.json({ html: buildDigestHtml(jobs, narrative) });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-// ── Narrative digest generator ────────────────────────────────────────────
+app.get('/api/gmail/weekly-status', async (_req, res: Response) => {
+  try {
+    const { rows } = await pool.query("SELECT value FROM settings WHERE key='last_weekly_email_sent' LIMIT 1");
+    const lastSent = rows[0]?.value || null;
+    const { rows: timeRows } = await pool.query("SELECT value FROM settings WHERE key='digest_time' LIMIT 1");
+    const sendTime = timeRows[0]?.value || '07:00';
+    // Next Monday at sendTime
+    const now = new Date();
+    const dayOfWeek = now.getDay(); // 0=Sun, 1=Mon...
+    const daysUntilMonday = dayOfWeek === 1 ? 7 : (8 - dayOfWeek) % 7 || 7;
+    const nextMonday = new Date(now);
+    nextMonday.setDate(now.getDate() + daysUntilMonday);
+    const [h, m] = sendTime.split(':').map(Number);
+    nextMonday.setHours(h, m, 0, 0);
+    res.json({ lastSent, nextSend: nextMonday.toISOString(), sendTime });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Narrative digest generator (weekly) ──────────────────────────────────
 async function generateDigestNarrative(jobs: any[]): Promise<string> {
   try {
     const topTargets = jobs.filter(j => (j.opportunity_tier || '').toLowerCase().includes('top'));
     const fastWins   = jobs.filter(j => (j.opportunity_tier || '').toLowerCase().includes('fast'));
-    const freshJobs  = jobs.filter(j => {
-      if (!j.found_at) return false;
-      const hrs = (Date.now() - new Date(j.found_at as string).getTime()) / 3600000;
-      return hrs < 24;
-    });
 
-    const prompt = `You are an executive assistant briefing a senior sales professional on their daily job scout results.
+    const prompt = `You are an executive assistant briefing a senior sales professional on their weekly job scout results.
 
-Today's scout found ${jobs.length} total matches: ${topTargets.length} Top Targets, ${fastWins.length} Fast Wins.${freshJobs.length > 0 ? ` ${freshJobs.length} posted in the last 24 hours.` : ''}
+This week's scout found ${jobs.length} total matches: ${topTargets.length} Top Targets, ${fastWins.length} Fast Wins.
 
-Top matches:
+Top matches this week:
 ${topTargets.slice(0, 5).map(j => {
-  const hrs = j.found_at ? Math.round((Date.now() - new Date(j.found_at as string).getTime()) / 3600000) : null;
-  return `- ${j.title} @ ${j.company} | Score: ${j.match_score} | ${j.salary || 'salary not listed'} | ${hrs !== null ? hrs + 'h ago' : 'unknown age'}`;
+  return `- ${j.title} @ ${j.company} | Score: ${j.match_score} | ${j.salary || 'salary not listed'}`;
 }).join('\n')}${fastWins.length > 0 ? `\nFast Wins:\n${fastWins.slice(0,2).map(j => `- ${j.title} @ ${j.company} | Score: ${j.match_score}`).join('\n')}` : ''}
 
 Write EXACTLY 2-3 sentences in second person. Be specific and action-oriented:
-1. Lead with the most notable opportunity and urgency if any are fresh
-2. Note any compensation or market pattern
-3. End with one concrete action recommendation
+1. Lead with the strongest opportunity of the week
+2. Note any compensation or market pattern you see across the matches
+3. End with one concrete action recommendation for this week
 
 No bullet points. Maximum 3 sentences. Write like a sharp analyst briefing an executive.`;
 
@@ -3331,22 +3392,20 @@ function autotailorTopMatches(runId: number): void {
 
 function buildDigestHtml(jobs: any[], narrative = ''): string {
   const topTargets = jobs.filter(j => (j.opportunity_tier || '').toLowerCase().includes('top'));
-  const freshJobs  = jobs.filter(j => {
-    if (!j.found_at) return false;
-    return (Date.now() - new Date(j.found_at as string).getTime()) / 3600000 < 24;
-  });
+  const fastWins   = jobs.filter(j => (j.opportunity_tier || '').toLowerCase().includes('fast'));
 
-  const jobCards = jobs.map(j => {
-    const freshHrs = j.found_at ? (Date.now() - new Date(j.found_at as string).getTime()) / 3600000 : null;
+  // Show top 10 ranked by score
+  const displayJobs = jobs.slice(0, 10);
+
+  const jobCards = displayJobs.map((j, idx) => {
     const tierBg = (j.opportunity_tier || '').toLowerCase().includes('top') ? '#c8a96e' : (j.opportunity_tier || '').toLowerCase().includes('fast') ? '#4ade80' : '#888';
-    const freshTag = freshHrs !== null && freshHrs < 24 ? `<span style="background:#00c86e22;color:#00c86e;border:1px solid #00c86e44;padding:1px 6px;border-radius:3px;font-size:11px;font-weight:700;margin-left:6px">🔥 NEW</span>` : '';
-    const staleTag = freshHrs !== null && freshHrs > 14 * 24 ? `<span style="background:#e5535322;color:#e55353;border:1px solid #e5535344;padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px">⏱ ${Math.round(freshHrs/24)}d old</span>` : '';
     const jobData = JSON.stringify({ title: j.title, company: j.company, location: j.location, salary: j.salary || '', score: j.match_score, why: j.why_good_fit || '', url: j.apply_url }).replace(/"/g, '&quot;');
     return `
     <div class="digest-job" data-job="${jobData}" style="background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:16px;margin-bottom:12px;position:relative">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
         <div>
-          <span style="color:#c8a96e;font-weight:bold;font-size:16px">${esc(j.title)}</span>${freshTag}${staleTag}
+          <span style="color:#555;font-size:11px;font-weight:700;margin-right:6px">#${idx + 1}</span>
+          <span style="color:#c8a96e;font-weight:bold;font-size:16px">${esc(j.title)}</span>
           ${j.opportunity_tier ? `<div style="margin-top:4px"><span style="background:${tierBg}22;color:${tierBg};border:1px solid ${tierBg}44;padding:1px 8px;border-radius:3px;font-size:11px;font-weight:700">${esc(j.opportunity_tier)}</span></div>` : ''}
         </div>
         <span style="background:#c8a96e;color:#0f0f0f;padding:2px 10px;border-radius:12px;font-weight:bold;font-size:13px;white-space:nowrap">${esc(j.match_score)}/100</span>
@@ -3359,35 +3418,41 @@ function buildDigestHtml(jobs: any[], narrative = ''): string {
 
   const narrativeBlock = narrative ? `
     <div style="background:#1a1a1a;border:1px solid #c8a96e44;border-left:3px solid #c8a96e;border-radius:6px;padding:16px 18px;margin-bottom:24px">
-      <div style="color:#c8a96e;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px">Scout Briefing</div>
+      <div style="color:#c8a96e;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px">Weekly Scout Briefing</div>
       <div style="color:#e8e6e0;font-size:14px;line-height:1.6">${esc(narrative)}</div>
     </div>` : '';
+
+  // Date range for "this week"
+  const now = new Date();
+  const weekStart = new Date(now); weekStart.setDate(now.getDate() - 7);
+  const weekRange = `${weekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
 
   const statsBlock = `
     <div style="display:flex;gap:16px;margin-bottom:20px;flex-wrap:wrap">
       <div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:10px 16px;flex:1;min-width:80px;text-align:center">
         <div style="color:#c8a96e;font-size:20px;font-weight:700">${jobs.length}</div>
-        <div style="color:#666;font-size:11px">Total Matches</div>
+        <div style="color:#666;font-size:11px">Matches This Week</div>
       </div>
       <div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:10px 16px;flex:1;min-width:80px;text-align:center">
         <div style="color:#c8a96e;font-size:20px;font-weight:700">${topTargets.length}</div>
         <div style="color:#666;font-size:11px">Top Targets</div>
       </div>
       <div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:10px 16px;flex:1;min-width:80px;text-align:center">
-        <div style="color:#00c86e;font-size:20px;font-weight:700">${freshJobs.length}</div>
-        <div style="color:#666;font-size:11px">Fresh Today</div>
+        <div style="color:#4ade80;font-size:20px;font-weight:700">${fastWins.length}</div>
+        <div style="color:#666;font-size:11px">Fast Wins</div>
       </div>
     </div>`;
 
   return `
     <div style="background:#0f0f0f;color:#e8e6e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:32px;max-width:640px;margin:0 auto">
       <div style="text-align:center;margin-bottom:24px">
-        <h1 style="color:#c8a96e;font-size:22px;margin:0">⬡ JSOS.ai — Daily Scout Digest</h1>
-        <p style="color:#666;font-size:13px;margin-top:6px">${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</p>
+        <h1 style="color:#c8a96e;font-size:22px;margin:0">&#x2B21; JSOS.ai — Weekly Scout Report</h1>
+        <p style="color:#666;font-size:13px;margin-top:6px">Top 10 matches &mdash; ${weekRange}</p>
       </div>
       ${narrativeBlock}
       ${statsBlock}
-      ${jobs.length > 0 ? jobCards : '<div style="color:#666;text-align:center;padding:32px">No matches yet. Run the scout first!</div>'}
+      ${displayJobs.length > 0 ? jobCards : '<div style="color:#666;text-align:center;padding:32px">No matches found this week. The scout is still running — check back next Monday!</div>'}
+      ${jobs.length > 10 ? `<div style="text-align:center;color:#555;font-size:12px;margin-top:16px">Showing top 10 of ${jobs.length} total matches. Log in to JSOS.ai to see all.</div>` : ''}
     </div>
   `;
 }
@@ -4122,24 +4187,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
       [companiesScanned, allJobs.length, matches.length, runId]
     );
 
-    // Send digest email if Gmail is connected
-    try {
-      const { rows: crit } = await pool.query('SELECT your_email FROM criteria LIMIT 1');
-      if (crit[0]?.your_email && matches.length > 0) {
-        const { rows: recentJobs } = await pool.query(
-          'SELECT * FROM jobs WHERE scout_run_id=$1 ORDER BY match_score DESC', [runId]
-        );
-        // Generate AI narrative briefing (non-fatal if fails)
-        const narrative = await generateDigestNarrative(recentJobs);
-        await sendGmailEmail(
-          crit[0].your_email,
-          `Job Scout Agent — ${matches.length} new match${matches.length !== 1 ? 'es' : ''} found`,
-          buildDigestHtml(recentJobs, narrative)
-        );
-      }
-    } catch (emailErr) {
-      console.error('Email sending failed (non-fatal):', emailErr);
-    }
+    // Weekly email is handled by checkWeeklyEmail() scheduler — no per-run email
 
     // Background auto-tailoring: pre-tailor top 3 Top Targets (fire-and-forget)
     autotailorTopMatches(runId);
@@ -4245,6 +4293,62 @@ async function checkWatchlistScan(): Promise<void> {
   } catch (e) { console.error('[WatchlistScan] Scheduler error:', e); }
 }
 
+// ── Weekly email scheduler ─────────────────────────────────────────────────
+async function checkWeeklyEmail(): Promise<void> {
+  try {
+    const now = new Date();
+    // Only send on Mondays (getDay() === 1)
+    if (now.getDay() !== 1) return;
+
+    // Check configured send time (default 07:00)
+    const { rows: timeRows } = await pool.query("SELECT value FROM settings WHERE key='digest_time' LIMIT 1");
+    const sendTime: string = timeRows[0]?.value || '07:00';
+    const [sendH, sendM] = sendTime.split(':').map(Number);
+    const nowH = now.getHours();
+    const nowM = now.getMinutes();
+    if (nowH < sendH || (nowH === sendH && nowM < sendM)) return; // too early
+
+    // Check if we already sent this week (within last 6 days)
+    const { rows: sentRows } = await pool.query("SELECT value FROM settings WHERE key='last_weekly_email_sent' LIMIT 1");
+    if (sentRows[0]?.value) {
+      const lastSent = new Date(sentRows[0].value as string);
+      const daysSince = (now.getTime() - lastSent.getTime()) / (1000 * 60 * 60 * 24);
+      if (daysSince < 6) return; // already sent this week
+    }
+
+    // Check Gmail connected and user email set
+    const { rows: cRows } = await pool.query('SELECT your_email FROM criteria LIMIT 1');
+    const email = cRows[0]?.your_email;
+    if (!email) return;
+
+    console.log('[WeeklyEmail] Monday triggered — sending weekly scout report…');
+
+    // Pull top 10 matches from the past 7 days
+    const { rows: jobs } = await pool.query(
+      `SELECT * FROM jobs WHERE match_score >= 50 AND created_at >= NOW() - INTERVAL '7 days' ORDER BY match_score DESC LIMIT 10`
+    );
+
+    const narrative = await generateDigestNarrative(jobs);
+    const html = buildDigestHtml(jobs, narrative);
+    const subject = `JSOS.ai \u2014 Your Weekly Scout Report`;
+    const emailResult = await sendGmailEmail(email, subject, html);
+
+    if (emailResult.ok) {
+      // Record send time so we don't double-send
+      await pool.query(
+        `INSERT INTO settings (key, value) VALUES ('last_weekly_email_sent', $1)
+         ON CONFLICT (key) DO UPDATE SET value=$1`,
+        [now.toISOString()]
+      );
+      console.log('[WeeklyEmail] ✓ Weekly report sent successfully');
+    } else {
+      console.warn('[WeeklyEmail] Failed to send weekly report — will retry next scheduler tick if still Monday');
+    }
+  } catch (e) {
+    console.error('[WeeklyEmail] Error:', e instanceof Error ? e.message : e);
+  }
+}
+
 // ── Auto-run scheduler ─────────────────────────────────────────────────────
 async function checkAutoRun(): Promise<void> {
   if (scoutRunning) return;
@@ -4287,6 +4391,9 @@ initDb()
     // Start auto-scheduler: check immediately after 2 min, then every 15 min
     setTimeout(checkAutoRun, 2 * 60 * 1000);
     setInterval(checkAutoRun, AUTO_RUN_CHECK_MS);
+
+    // Weekly email: check every 15 min (Monday at send-time is the actual gate)
+    setInterval(checkWeeklyEmail, 15 * 60 * 1000);
 
     // Watchlist daily scan: check after 5 min startup delay, then every hour
     setTimeout(checkWatchlistScan, 5 * 60 * 1000);
@@ -5160,7 +5267,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="tab" id="tab-deepvalue" onclick="showTab('deepvalue')" data-tooltip="Gemini finds the cutting-edge infrastructure companies with the clearest 'why you need this' value prop — AI Infra, HPC, Semiconductors, Photonics, Networking, Data Center and more.">Deep Value</div>
     <div class="tab" id="tab-preipo" onclick="showTab('preipo')" data-tooltip="Explosive pre-IPO companies worth joining NOW. Series B is the sweet spot — proven PMF, scaling sales motion, meaningful equity. Ranked by momentum score using real funding data.">Pre-IPO</div>
     <div class="tab" id="tab-clawd" onclick="showTab('clawd')" data-tooltip="Embedded interview and career coaching tool.">DeathByClawd</div>
-    <div class="tab" id="tab-email" onclick="showTab('email')" data-tooltip="Daily email digest of your top matches sent to your inbox. Configure send time, preview the content, and manage your Gmail connection here.">Daily Report</div>
+    <div class="tab" id="tab-email" onclick="showTab('email')" data-tooltip="Weekly Scout Report — sent every Monday morning. Top 10 ranked matches from the past week with a Claude-written briefing. Preview, test send, and manage your Gmail connection here.">Weekly Report</div>
   </div>
   <div class="nav-group">
     <div class="nav-group-label">Execute</div>
@@ -5368,20 +5475,49 @@ textarea:focus,input:focus{border-color:var(--gold)}
 
 <div class="panel" id="panel-email">
   <div class="email-section">
-    <div class="email-toolbar">
-      <button class="btn btn-gold btn-sm" id="gmail-connect-btn" onclick="connectGmail()">Connect Gmail</button>
-      <button class="btn btn-red btn-sm" id="gmail-disconnect-btn" onclick="disconnectGmail()" style="display:none">Disconnect</button>
-      <span id="gmail-status-text" style="font-size:11px;color:var(--muted)"></span>
-      <span class="toolbar-sep"></span>
-      <input type="time" id="digest-time" value="08:00" style="width:110px;padding:4px 8px;font-size:12px">
-      <button class="btn btn-ghost btn-sm" onclick="saveDigestTime()">Save Time</button>
-      <span class="ok-msg" id="digest-time-msg" style="display:none">Saved!</span>
-      <span class="toolbar-sep"></span>
-      <button class="btn btn-gold btn-sm" onclick="sendTestDigest()">Send Test Email</button>
-      <span id="test-email-msg" style="font-size:11px;color:var(--muted)"></span>
+    <!-- Header -->
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:16px;margin-bottom:20px">
+      <div>
+        <div class="sec-title" style="margin-bottom:4px">Weekly Scout Report</div>
+        <div style="font-size:12px;color:var(--muted)">Sent every Monday morning &mdash; top 10 matches ranked by score with a Claude-written briefing</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-gold btn-sm" id="gmail-connect-btn" onclick="connectGmail()">Connect Gmail</button>
+        <button class="btn btn-red btn-sm" id="gmail-disconnect-btn" onclick="disconnectGmail()" style="display:none">Disconnect Gmail</button>
+      </div>
     </div>
-    <div class="sec-title" style="margin-bottom:8px">Daily Jobs Report</div>
-    <div class="email-preview" id="email-preview">Loading preview...</div>
+
+    <!-- Status bar -->
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:20px;display:flex;flex-wrap:wrap;gap:16px;align-items:center">
+      <div>
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:2px">Gmail Status</div>
+        <span id="gmail-status-text" style="font-size:13px;font-weight:600;color:var(--muted)">Checking&hellip;</span>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:2px">Send Time (Mondays)</div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <input type="time" id="digest-time" value="07:00" style="width:110px;padding:4px 8px;font-size:12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:5px">
+          <button class="btn btn-ghost btn-sm" onclick="saveDigestTime()">Save</button>
+          <span class="ok-msg" id="digest-time-msg" style="display:none">Saved!</span>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:2px">Next Send</div>
+        <div id="email-next-send" style="font-size:13px;color:var(--text)">Loading&hellip;</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:2px">Last Sent</div>
+        <div id="email-last-sent" style="font-size:13px;color:var(--text)">&mdash;</div>
+      </div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+        <button class="btn btn-gold btn-sm" onclick="sendTestDigest()">Send Test Now</button>
+        <span id="test-email-msg" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+    </div>
+
+    <!-- Preview -->
+    <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:8px">Email Preview <span style="font-size:11px;font-weight:400;color:var(--muted)">&mdash; top 10 matches from the past 7 days</span></div>
+    <div class="email-preview" id="email-preview">Loading preview&hellip;</div>
   </div>
 </div>
 
@@ -7865,19 +8001,31 @@ async function loadGmailStatus() {
     var disconnectBtn = document.getElementById('gmail-disconnect-btn');
     var statusText = document.getElementById('gmail-status-text');
     if (data.connected) {
-      badge.textContent = 'Gmail: Connected';
-      badge.className = 'gmail-badge on';
-      connectBtn.style.display = 'none';
-      disconnectBtn.style.display = '';
-      statusText.textContent = 'Connected ' + (data.connectedAt ? new Date(data.connectedAt).toLocaleDateString() : '');
+      if (badge) { badge.textContent = 'Gmail: Connected'; badge.className = 'gmail-badge on'; }
+      if (connectBtn) connectBtn.style.display = 'none';
+      if (disconnectBtn) disconnectBtn.style.display = '';
+      if (statusText) { statusText.textContent = 'Connected'; statusText.style.color = 'var(--green)'; }
     } else {
-      badge.textContent = 'Gmail: Not Connected';
-      badge.className = 'gmail-badge off';
-      connectBtn.style.display = '';
-      disconnectBtn.style.display = 'none';
-      statusText.textContent = '';
+      if (badge) { badge.textContent = 'Gmail: Not Connected'; badge.className = 'gmail-badge off'; }
+      if (connectBtn) connectBtn.style.display = '';
+      if (disconnectBtn) disconnectBtn.style.display = 'none';
+      if (statusText) { statusText.textContent = 'Not connected \u2014 click Connect Gmail to authorize'; statusText.style.color = 'var(--red)'; }
     }
   } catch(e) {}
+  // Load weekly send schedule
+  try {
+    var ws = await fetch('/api/gmail/weekly-status');
+    var wd = await ws.json();
+    var nextEl = document.getElementById('email-next-send');
+    var lastEl = document.getElementById('email-last-sent');
+    if (nextEl && wd.nextSend) {
+      var nextD = new Date(wd.nextSend);
+      nextEl.textContent = nextD.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' }) + ' at ' + (wd.sendTime || '07:00');
+    }
+    if (lastEl) {
+      lastEl.textContent = wd.lastSent ? new Date(wd.lastSent).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' }) : 'Never sent yet';
+    }
+  } catch(e2) {}
 }
 async function connectGmail() {
   var res = await fetch('/api/gmail/auth-url');
