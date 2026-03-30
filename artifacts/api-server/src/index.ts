@@ -1411,11 +1411,9 @@ app.post('/api/job-market-pulse/refresh', async (_req, res: Response) => {
     const { rows: jobRows } = await pool.query(`
       SELECT
         company,
-        COUNT(*)::int               AS job_count,
-        ARRAY_AGG(DISTINCT title)   AS roles,
-        AVG(min_salary)             AS avg_salary,
-        MAX(min_salary)             AS max_salary,
-        MAX(created_at)::text       AS newest_posting,
+        COUNT(*)::int                AS job_count,
+        ARRAY_AGG(DISTINCT title)    AS roles,
+        MAX(created_at)::text        AS newest_posting,
         ARRAY_AGG(DISTINCT location) FILTER (WHERE location IS NOT NULL AND location <> '') AS locations
       FROM jobs
       WHERE created_at >= NOW() - INTERVAL '30 days'
@@ -1429,8 +1427,8 @@ app.post('/api/job-market-pulse/refresh', async (_req, res: Response) => {
       company_name:   r.company,
       job_count:      r.job_count,
       roles:          (r.roles ?? []).filter(Boolean).slice(0, 6),
-      avg_salary:     r.avg_salary ? Math.round(Number(r.avg_salary)) : null,
-      max_salary:     r.max_salary ? Math.round(Number(r.max_salary)) : null,
+      avg_salary:     null,
+      max_salary:     null,
       newest_posting: r.newest_posting ?? new Date().toISOString(),
       locations:      (r.locations ?? []).filter(Boolean).slice(0, 4),
     }));
@@ -3302,7 +3300,7 @@ app.post('/api/gmail/send-test', async (_req, res: Response) => {
 
     const narrative = await generateDigestNarrative(jobs);
     const html = buildDigestHtml(jobs, narrative);
-    const result = await sendGmailEmail(email, 'JSOS.ai \u2014 Weekly Scout Report (Test)', html);
+    const result = await sendGmailEmail(email, 'JobScout.ai \u2014 Weekly Scout Report (Test)', html);
     if (result.ok) {
       res.json({ ok: true, message: 'Weekly report sent to ' + email });
     } else if (result.status === 403) {
@@ -3536,7 +3534,7 @@ function buildDigestHtml(jobs: any[], narrative = ''): string {
   return `
     <div style="background:#0f0f0f;color:#e8e6e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:32px;max-width:640px;margin:0 auto">
       <div style="text-align:center;margin-bottom:24px">
-        <h1 style="color:#c8a96e;font-size:22px;margin:0">&#x2B21; JSOS.ai — Weekly Scout Report</h1>
+        <h1 style="color:#c8a96e;font-size:22px;margin:0">&#x2B21; JobScout.ai — Weekly Scout Report</h1>
         <p style="color:#666;font-size:13px;margin-top:6px">Top 10 matches &mdash; ${weekRange}</p>
       </div>
       ${narrativeBlock}
@@ -4420,7 +4418,7 @@ async function checkWeeklyEmail(): Promise<void> {
 
     const narrative = await generateDigestNarrative(jobs);
     const html = buildDigestHtml(jobs, narrative);
-    const subject = `JSOS.ai \u2014 Your Weekly Scout Report`;
+    const subject = `JobScout.ai \u2014 Your Weekly Scout Report`;
     const emailResult = await sendGmailEmail(email, subject, html);
 
     if (emailResult.ok) {
@@ -5289,7 +5287,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
 <body>
 
 <header>
-  <span class="logo">&#x2B21; JSOS.ai</span>
+  <span class="logo">&#x2B21; JobScout.ai</span>
   <div class="hdr-right">
     <span class="hdr-status" id="hdr-status"></span>
     <span class="gmail-badge off" id="gmail-badge">Gmail: ---</span>
@@ -5401,7 +5399,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
 <nav class="sidebar">
   <div class="nav-group">
     <div class="nav-group-label">Search</div>
-    <div class="tab active" id="tab-jobs" onclick="showTab('jobs')" data-tooltip="Your scored job board. Claude rates every listing Top Target / Fast Win / Stretch / Probably Skip against your resume and settings.">Jobs</div>
+    <div class="tab active" id="tab-jobs" onclick="showTab('jobs')" data-tooltip="Your scored job board. Claude rates every listing Top Target / Fast Win / Stretch / Probably Skip against your resume and settings.">Scout</div>
     <div class="tab" id="tab-saved" onclick="showTab('saved')" data-tooltip="Jobs you've starred. Generate tailored resumes and cover letters from each one.">Saved Jobs</div>
     <div class="tab" id="tab-intel" onclick="showTab('intel')" data-tooltip="Gemini scans the web daily for companies actively hiring in your space. Market trends, emerging themes, hot companies to target now.">Career Intel</div>
     <div class="tab" id="tab-pulse" onclick="showTab('pulse')" data-tooltip="Job Market Pulse — which companies are hiring most aggressively, what roles are trending, salary patterns from your scout data, and Gemini's verdict: true growth or hype?">Job Market Pulse</div>
