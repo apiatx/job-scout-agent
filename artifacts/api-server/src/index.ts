@@ -13,6 +13,7 @@ import { generateCareerIntel } from './career_intel.js';
 import type { CareerIntelCriteria } from './career_intel.js';
 import { generatePreIpo, initPreIpoDB, getLatestPreIpo, savePreIpo } from './preipo.js';
 import type { PreIpoCriteria } from './preipo.js';
+import { generateIndustryLeaders, initIndustryLeadersDB, getLatestIndustryLeaders, saveIndustryLeaders } from './industry_leaders.js';
 import {
   initPositioningDB, getProfile, saveProfile, getStories, saveStory, deleteStory,
   getOutputs, generateOutputs, getObjections, generateObjections,
@@ -332,6 +333,7 @@ async function initDb(): Promise<void> {
 
   await initPositioningDB(pool);
   await initPreIpoDB(pool);
+  await initIndustryLeadersDB(pool);
 
   // Add columns if they don't exist (for existing installs)
   const safeAddColumn = async (table: string, col: string, type: string) => {
@@ -1395,6 +1397,33 @@ app.post('/api/preipo/refresh', async (_req, res: Response) => {
     res.json({ data: result, generated_at: result.generated_at, stale: false });
   } catch (e) {
     console.error('[PreIPO] Refresh failed:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// ── Industry Leaders ───────────────────────────────────────────────────────────
+// GET  /api/industry-leaders        — return cached result (stale flag if >7d)
+// POST /api/industry-leaders/refresh — regenerate with Claude and persist
+
+app.get('/api/industry-leaders', async (_req, res: Response) => {
+  try {
+    const cached = await getLatestIndustryLeaders(pool);
+    if (!cached) { res.json({ data: null, stale: false }); return; }
+    res.json({ data: cached.data, generated_at: cached.data.generated_at, stale: cached.stale });
+  } catch (e) {
+    console.error('[IndustryLeaders] GET failed:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+app.post('/api/industry-leaders/refresh', async (_req, res: Response) => {
+  try {
+    console.log('[IndustryLeaders] Refresh triggered');
+    const result = await generateIndustryLeaders();
+    await saveIndustryLeaders(pool, result);
+    res.json({ data: result, generated_at: result.generated_at, stale: false });
+  } catch (e) {
+    console.error('[IndustryLeaders] Refresh failed:', e);
     res.status(500).json({ error: String(e) });
   }
 });
@@ -4648,6 +4677,50 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .preipo-error-box{background:#ff6b6b18;border:1px solid #ff6b6b44;border-radius:8px;padding:14px 16px;font-size:13px;color:#ff6b6b;margin-bottom:16px}
 .preipo-seriesb-label{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--gold);position:absolute;top:12px;right:12px;opacity:.7}
 @media(max-width:700px){.preipo-grid{grid-template-columns:1fr}}
+/* ── Industry Leaders ──────────────────────────────────────────────────────── */
+.leaders-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px;flex-wrap:wrap}
+.leaders-meta{font-size:11px;color:var(--muted);margin-top:2px}
+.leaders-overview{background:linear-gradient(135deg,#0e1a2e 0%,#0e0e0e 100%);border:1px solid #3b82f644;border-radius:10px;padding:16px 18px;margin-bottom:20px;font-size:13px;color:var(--text);line-height:1.65}
+.leaders-sector-block{margin-bottom:28px}
+.leaders-sector-header{display:flex;align-items:center;gap:10px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.leaders-sector-emoji{font-size:22px;line-height:1}
+.leaders-sector-name{font-size:15px;font-weight:700;color:var(--text)}
+.leaders-sector-ctx{font-size:12px;color:var(--muted);margin-top:2px;line-height:1.5}
+.leaders-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+.leaders-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:8px;transition:border-color .15s;position:relative}
+.leaders-card:hover{border-color:var(--gold)}
+.leaders-card.action-apply{border-left:3px solid #00c86e}
+.leaders-card.action-network{border-left:3px solid #7c8dff}
+.leaders-card.action-watch{border-left:3px solid #f5c842}
+.leaders-card.action-monitor{border-left:3px solid #555}
+.leaders-card-top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.leaders-rank{font-size:11px;font-weight:700;color:var(--muted);min-width:20px}
+.leaders-name-block{flex:1}
+.leaders-name{font-size:14px;font-weight:700;color:var(--text)}
+.leaders-url{font-size:11px;color:var(--muted);text-decoration:none;display:block;margin-top:1px}
+.leaders-url:hover{color:var(--gold)}
+.leaders-badges{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0}
+.leaders-action-badge{padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+.leaders-action-apply{background:#00c86e22;color:#00c86e;border:1px solid #00c86e44}
+.leaders-action-network{background:#7c8dff22;color:#7c8dff;border:1px solid #7c8dff44}
+.leaders-action-watch{background:#f5c84222;color:#f5c842;border:1px solid #f5c84244}
+.leaders-action-monitor{background:#88888822;color:#888;border:1px solid #88888844}
+.leaders-stage-badge{padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600;background:#ffffff0f;color:var(--muted);border:1px solid var(--border)}
+.leaders-ticker{padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;background:#3b82f615;color:#60a5fa;border:1px solid #3b82f633}
+.leaders-tagline{font-size:12px;color:var(--text);line-height:1.5}
+.leaders-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:2px}
+.leaders-val{font-size:12px;color:var(--text);line-height:1.55}
+.leaders-signal{font-size:11px;color:#00c86e;padding-left:13px;position:relative;line-height:1.5}
+.leaders-signal::before{content:'↑';position:absolute;left:0;font-size:10px}
+.leaders-ote{font-size:12px;font-weight:700;color:var(--gold)}
+.leaders-divider{height:1px;background:var(--border)}
+.leaders-loading-wrap{display:flex;align-items:center;gap:16px;padding:64px 0;justify-content:center}
+.leaders-spinner{width:22px;height:22px;border:2px solid var(--border);border-top-color:var(--gold);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0}
+.leaders-loading-msg{font-size:13px;color:var(--muted);line-height:1.6}
+.leaders-error-box{background:#ff6b6b18;border:1px solid #ff6b6b44;border-radius:8px;padding:14px 16px;font-size:13px;color:#ff6b6b;margin-bottom:16px}
+.leaders-empty{padding:64px 0;text-align:center;color:var(--muted);font-size:13px;line-height:1.7}
+.leaders-footer{font-size:11px;color:var(--muted);margin-top:20px;padding-top:14px;border-top:1px solid var(--border)}
+@media(max-width:700px){.leaders-grid{grid-template-columns:1fr}}
 /* ── Positioning Engine ────────────────────────────────────────────────────── */
 .pos-layout{display:flex;flex-direction:column;height:100%;padding:24px;gap:20px;max-width:1100px}
 .pos-steps{display:flex;gap:6px;flex-wrap:wrap}
@@ -4907,6 +4980,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="tab active" id="tab-jobs" onclick="showTab('jobs')" data-tooltip="Your scored job board. Claude rates every listing Top Target / Fast Win / Stretch / Probably Skip against your resume and settings.">Jobs</div>
     <div class="tab" id="tab-saved" onclick="showTab('saved')" data-tooltip="Jobs you've starred. Generate tailored resumes and cover letters from each one.">Saved Jobs</div>
     <div class="tab" id="tab-intel" onclick="showTab('intel')" data-tooltip="Gemini scans the web daily for companies actively hiring in your space. Market trends, emerging themes, hot companies to target now.">Career Intel</div>
+    <div class="tab" id="tab-leaders" onclick="showTab('leaders')" data-tooltip="Claude-ranked top 5-10 sales-led companies per sector — SaaS, Cybersecurity, AI Infrastructure, Networking and more. The gold standard companies to target for your next move.">Industry Leaders</div>
     <div class="tab" id="tab-preipo" onclick="showTab('preipo')" data-tooltip="Explosive pre-IPO companies worth joining NOW. Series B is the sweet spot — proven PMF, scaling sales motion, meaningful equity. Ranked by momentum score using real funding data.">Pre-IPO</div>
     <div class="tab" id="tab-clawd" onclick="showTab('clawd')" data-tooltip="Embedded interview and career coaching tool.">DeathByClawd</div>
     <div class="tab" id="tab-email" onclick="showTab('email')" data-tooltip="Daily email digest of your top matches sent to your inbox. Configure send time, preview the content, and manage your Gmail connection here.">Daily Report</div>
@@ -5289,6 +5363,57 @@ textarea:focus,input:focus{border-color:var(--gold)}
           <span id="preipo-scan-toggle" style="font-size:12px;color:var(--muted)">&#x25B2; Collapse</span>
         </div>
         <div id="preipo-scan-jobs" style="margin-top:12px"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="panel" id="panel-leaders">
+  <div class="leaders-header">
+    <div>
+      <div class="sec-title" style="margin-bottom:4px">Industry Leaders</div>
+      <div class="leaders-meta" id="leaders-meta">Claude-ranked top sales-led companies per sector &mdash; refreshes weekly</div>
+    </div>
+    <button class="btn btn-gold btn-sm" id="leaders-refresh-btn" onclick="refreshIndustryLeaders()">Refresh Leaders</button>
+  </div>
+
+  <div id="leaders-loading" style="display:none">
+    <div class="leaders-loading-wrap">
+      <div class="leaders-spinner"></div>
+      <div class="leaders-loading-msg">Claude is analysing market signals and ranking the top sales-led companies&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 20&ndash;40 seconds</span></div>
+    </div>
+  </div>
+
+  <div id="leaders-empty" style="display:none">
+    <div class="leaders-empty">No Industry Leaders data yet.<br>Click &ldquo;Refresh Leaders&rdquo; to generate Claude&rsquo;s ranked list of the top sales-led companies in every major sector.</div>
+  </div>
+
+  <div id="leaders-error" style="display:none" class="leaders-error-box"></div>
+
+  <div id="leaders-content" style="display:none">
+    <div class="leaders-overview" id="leaders-overview"></div>
+    <div id="leaders-sectors"></div>
+    <div class="leaders-footer" id="leaders-footer"></div>
+
+    <div id="leaders-scan-section" style="margin-top:24px;border-top:1px solid var(--border);padding-top:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:8px">
+        <div>
+          <div style="font-size:14px;font-weight:700;color:var(--text)">Open Roles at These Companies</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px">Search for matching jobs at every company in this radar</div>
+        </div>
+        <button class="btn btn-gold" id="leaders-scan-btn" onclick="scanForRoles('leaders')">&#x1F50D; Find Open Roles</button>
+      </div>
+      <div id="leaders-scan-spinner" style="display:none;text-align:center;padding:20px 0">
+        <div class="intel-spinner" style="margin:0 auto 10px"></div>
+        <div style="font-size:12px;color:var(--muted)">Asking Gemini to search for open roles at each company&hellip; (30-90s)</div>
+      </div>
+      <div id="leaders-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
+      <div id="leaders-scan-results" style="display:none;margin-top:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none" onclick="toggleLeadersScanResults()">
+          <div id="leaders-scan-count" style="font-size:13px;font-weight:700;color:var(--gold)"></div>
+          <span id="leaders-scan-toggle" style="font-size:12px;color:var(--muted)">&#x25B2; Collapse</span>
+        </div>
+        <div id="leaders-scan-jobs" style="margin-top:12px"></div>
       </div>
     </div>
   </div>
@@ -5934,7 +6059,7 @@ function sizeClawd() {
 window.addEventListener('resize', sizeClawd);
 
 // ── tabs ─────────────────────────────────────────────────────────────────
-var TABS = ['jobs','saved','pipeline','research','intel','preipo','companies','resume','email','runs','positioning','settings','clawd'];
+var TABS = ['jobs','saved','pipeline','research','intel','leaders','preipo','companies','resume','email','runs','positioning','settings','clawd'];
 function showTab(name) {
   TABS.forEach(function(t) {
     var tabEl = document.getElementById('tab-' + t);
@@ -5953,6 +6078,7 @@ function showTab(name) {
   if (name === 'email')     { loadGmailStatus(); loadEmailPreview(); loadDigestTime(); }
   if (name === 'settings')  loadCriteria();
   if (name === 'intel')     loadCareerIntel();
+  if (name === 'leaders')   loadIndustryLeaders();
   if (name === 'preipo')    loadPreIpo();
   if (name === 'positioning') loadPositioning();
 }
@@ -9021,8 +9147,16 @@ function renderTargetedJobCard(j) {
 
 async function scanForRoles(source) {
   var isIntel = source === 'intel';
-  var prefix = isIntel ? 'intel' : 'preipo';
-  var companies = isIntel ? _intelCompanies : preIpoAllCompanies.map(function(c) { return c.company_name; }).filter(Boolean);
+  var isLeaders = source === 'leaders';
+  var prefix = isIntel ? 'intel' : (isLeaders ? 'leaders' : 'preipo');
+  var companies;
+  if (isIntel) {
+    companies = _intelCompanies;
+  } else if (isLeaders) {
+    companies = _leadersAllCompanies;
+  } else {
+    companies = preIpoAllCompanies.map(function(c) { return c.company_name; }).filter(Boolean);
+  }
 
   if (!companies || companies.length === 0) {
     var errEl = document.getElementById(prefix + '-scan-error');
@@ -9089,6 +9223,133 @@ function togglePreIpoScanResults() {
   var toggleEl = document.getElementById('preipo-scan-toggle');
   if (jobsEl) jobsEl.style.display = _preipoScanCollapsed ? 'none' : '';
   if (toggleEl) toggleEl.textContent = _preipoScanCollapsed ? '\u25BC Expand' : '\u25B2 Collapse';
+}
+
+// ── Industry Leaders ──────────────────────────────────────────────────────
+var _leadersAllCompanies = [];
+
+function ldEl(id) { return document.getElementById(id); }
+
+function renderLeaderCard(c) {
+  var actionClass = c.action === 'apply_now' ? 'action-apply' : c.action === 'network_in' ? 'action-network' : c.action === 'watch' ? 'action-watch' : 'action-monitor';
+  var actionLabel = c.action === 'apply_now' ? 'Apply Now' : c.action === 'network_in' ? 'Network In' : c.action === 'watch' ? 'Watch' : 'Monitor';
+  var actionBadgeClass = c.action === 'apply_now' ? 'leaders-action-apply' : c.action === 'network_in' ? 'leaders-action-network' : c.action === 'watch' ? 'leaders-action-watch' : 'leaders-action-monitor';
+  var websiteUrl = c.website ? (c.website.startsWith('http') ? c.website : 'https://' + c.website) : null;
+  return '<div class="leaders-card ' + actionClass + '">' +
+    '<div class="leaders-card-top">' +
+      '<div class="leaders-rank">' + c.rank + '.</div>' +
+      '<div class="leaders-name-block">' +
+        '<div class="leaders-name">' + esc(c.name) + '</div>' +
+        (websiteUrl ? '<a class="leaders-url" href="' + esc(websiteUrl) + '" target="_blank" rel="noopener">' + esc(c.website) + '</a>' : '') +
+      '</div>' +
+      '<div class="leaders-badges">' +
+        '<span class="leaders-action-badge ' + actionBadgeClass + '">' + actionLabel + '</span>' +
+        (c.is_public && c.ticker ? '<span class="leaders-ticker">' + esc(c.ticker) + '</span>' : '') +
+        (!c.is_public && c.stage ? '<span class="leaders-stage-badge">' + esc(c.stage) + '</span>' : '') +
+      '</div>' +
+    '</div>' +
+    '<div class="leaders-tagline">' + esc(c.tagline) + '</div>' +
+    '<div class="leaders-divider"></div>' +
+    '<div><div class="leaders-lbl">Why Sales-Led</div><div class="leaders-val">' + esc(c.why_sales_led) + '</div></div>' +
+    '<div><div class="leaders-lbl">Growth Signal</div><div class="leaders-signal">' + esc(c.growth_signal) + '</div></div>' +
+    (c.ote_range ? '<div><div class="leaders-lbl">Rep OTE Range</div><div class="leaders-ote">' + esc(c.ote_range) + '</div></div>' : '') +
+    '<div><div class="leaders-lbl">Rep Profile</div><div class="leaders-val">' + esc(c.rep_quality) + '</div></div>' +
+  '</div>';
+}
+
+function renderLeadersSectors(sectors) {
+  return sectors.map(function(s) {
+    return '<div class="leaders-sector-block">' +
+      '<div class="leaders-sector-header">' +
+        '<span class="leaders-sector-emoji">' + s.emoji + '</span>' +
+        '<div>' +
+          '<div class="leaders-sector-name">' + esc(s.sector) + '</div>' +
+          '<div class="leaders-sector-ctx">' + esc(s.market_context) + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="leaders-grid">' + (s.companies || []).map(renderLeaderCard).join('') + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+async function loadIndustryLeaders() {
+  try {
+    var res = await fetch('/api/industry-leaders');
+    if (!res.ok) { var j = await res.json(); throw new Error(j.error || 'Failed'); }
+    var json = await res.json();
+    if (!json.data) {
+      ldEl('leaders-empty').style.display = '';
+      ldEl('leaders-content').style.display = 'none';
+      ldEl('leaders-loading').style.display = 'none';
+      ldEl('leaders-error').style.display = 'none';
+      return;
+    }
+    renderIndustryLeadersData(json.data, json.stale);
+  } catch(e) {
+    ldEl('leaders-error').textContent = 'Error loading Industry Leaders: ' + e.message;
+    ldEl('leaders-error').style.display = '';
+    ldEl('leaders-loading').style.display = 'none';
+    ldEl('leaders-empty').style.display = 'none';
+    ldEl('leaders-content').style.display = 'none';
+  }
+}
+
+function renderIndustryLeadersData(data, stale) {
+  var sectors = data.sectors || [];
+  _leadersAllCompanies = [];
+  sectors.forEach(function(s) {
+    (s.companies || []).forEach(function(c) { if (c.name) _leadersAllCompanies.push(c.name); });
+  });
+
+  ldEl('leaders-overview').textContent = data.market_overview || '';
+  ldEl('leaders-sectors').innerHTML = renderLeadersSectors(sectors);
+
+  var genAt = data.generated_at ? new Date(data.generated_at) : null;
+  var metaParts = [];
+  if (genAt) metaParts.push('Last updated ' + genAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }));
+  if (stale) metaParts.push('\u26A0\uFE0F Data may be stale — click Refresh');
+  ldEl('leaders-meta').textContent = metaParts.length ? metaParts.join(' \u2014 ') : 'Claude-ranked top sales-led companies per sector';
+
+  var sectorCount = sectors.length;
+  var coCount = _leadersAllCompanies.length;
+  ldEl('leaders-footer').textContent = sectorCount + ' sectors \u2014 ' + coCount + ' companies \u2014 Powered by Claude \u2014 ' + (data.model_used || 'claude');
+
+  ldEl('leaders-loading').style.display = 'none';
+  ldEl('leaders-empty').style.display = 'none';
+  ldEl('leaders-error').style.display = 'none';
+  ldEl('leaders-content').style.display = '';
+
+  var btn = ldEl('leaders-refresh-btn');
+  if (btn) { btn.disabled = false; btn.textContent = 'Refresh Leaders'; }
+}
+
+async function refreshIndustryLeaders() {
+  var btn = ldEl('leaders-refresh-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing\u2026'; }
+  ldEl('leaders-loading').style.display = '';
+  ldEl('leaders-content').style.display = 'none';
+  ldEl('leaders-empty').style.display = 'none';
+  ldEl('leaders-error').style.display = 'none';
+  try {
+    var res = await fetch('/api/industry-leaders/refresh', { method: 'POST' });
+    var json = await res.json();
+    if (!res.ok) throw new Error(json.error || 'Refresh failed');
+    renderIndustryLeadersData(json.data, false);
+  } catch(e) {
+    ldEl('leaders-error').textContent = 'Refresh failed: ' + e.message;
+    ldEl('leaders-error').style.display = '';
+    ldEl('leaders-loading').style.display = 'none';
+    if (btn) { btn.disabled = false; btn.textContent = 'Refresh Leaders'; }
+  }
+}
+
+var _leadersScanCollapsed = false;
+function toggleLeadersScanResults() {
+  _leadersScanCollapsed = !_leadersScanCollapsed;
+  var jobsEl = document.getElementById('leaders-scan-jobs');
+  var toggleEl = document.getElementById('leaders-scan-toggle');
+  if (jobsEl) jobsEl.style.display = _leadersScanCollapsed ? 'none' : '';
+  if (toggleEl) toggleEl.textContent = _leadersScanCollapsed ? '\u25BC Expand' : '\u25B2 Collapse';
 }
 
 // ── Positioning Engine ────────────────────────────────────────────────────

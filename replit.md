@@ -203,6 +203,8 @@ Logic:
 - `GET/POST /api/companies`, `DELETE /api/companies/{id}`, `PUT /api/companies/{id}`
 - `GET /api/jobs` — Returns all jobs with tier/score/status
 - `PATCH /api/jobs/{id}/status`, `POST /api/jobs/{id}/generate-docs`
+- `GET /api/industry-leaders` — Return cached Industry Leaders result (stale flag if >7 days)
+- `POST /api/industry-leaders/refresh` — Regenerate with Claude (12 sectors, top 5-10 companies each, sales-led filter)
 - `POST /api/jobs/rescore-all` — Re-score all unscored jobs with Claude (batches of 6)
 - `POST /api/jobs/rescore-all?force=true` — Re-score ALL jobs that have descriptions (≥50 chars), even if already scored. Use after description enrichment or criteria changes. Returns `{started, count}`. UI button: "↺ Force Rescore" with confirm dialog.
 - `POST /api/jobs/reclassify-local` — Re-classify all scored jobs using stored sub_scores (no AI calls)
