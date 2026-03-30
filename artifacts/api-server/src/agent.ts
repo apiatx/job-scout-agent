@@ -245,7 +245,7 @@ Use this to inform companyQuality. Pre-approved + high momentum → 22-25. Warni
 
     // ── Pre-approved note ────────────────────────────────────────────────────
     const preApprovedNote = isPreApproved
-      ? `\nCOMPANY NOTE: ${job.company} is on the user's pre-approved companies list. The user has already decided this is a target employer.`
+      ? `\nCOMPANY NOTE: ${job.company} is on the user's watchlist. The company quality is confirmed — but STILL score the role segment, territory, and comp fit rigorously. A Commercial or Mid-Market title at a good company is not automatically a Top Target.`
       : '';
 
     const prompt = `You are a world-class career strategist evaluating job-candidate fit with surgical precision.
@@ -275,11 +275,12 @@ SCORING — 5 COMPONENTS (they sum to matchScore 0-100)
 ═══════════════════════════════════════════════════
 
 COMPONENT 1 — roleFit (0-30 points):
-  30: Exact target-role title match at correct seniority level
+  30: Exact target-role title match at correct seniority level (Enterprise AE when candidate is Enterprise-level)
   20: Close match — same level, slightly different title
-  12: Related role that makes sense given resume
+  12: Related role, OR correct title but WRONG SEGMENT (e.g., "Commercial AE" / "Mid-Market AE" / "SMB AE" when candidate's history is Enterprise). Segment mismatch always caps roleFit at 12.
   5:  Wrong level (too junior or senior for candidate)
   0:  Wrong role type entirely (engineering, HR, marketing, etc.)
+  IMPORTANT: If the title explicitly says "Commercial", "Mid-Market", "Mid Market", "MM", or "SMB" and the candidate's resume shows $500K+ Enterprise deals, this is a segment mismatch — cap roleFit at 12 maximum.
 
 COMPONENT 2 — companyQuality (0-25 points):
   Use momentum context above if provided.
@@ -304,11 +305,12 @@ COMPONENT 4 — locationFit (0-15 points):
   0:  On-site only far from preferences
 
 COMPONENT 5 — territoryFit (0-10 points):
-  If no territory indicator in title or description: score 7 (neutral default).
-  10: Territory matches AND candidate has relevant regional experience
-  7:  No territory requirement (fully remote/flexible)
-  4:  Territory mentioned but candidate could transition
-  0:  Hard geographic territory requirement outside candidate's area
+  Read the job TITLE carefully for territory names — they often appear in parentheses or after a dash.
+  7:  No territory requirement stated (fully remote/flexible, no region in title or JD)
+  10: Territory explicitly matches candidate's preferred region (Southeast, FL, SC, NC, GA, or equivalent)
+  3:  Territory mentioned but is adjacent/transferable — candidate could likely cover it
+  0:  Hard geographic territory clearly OUTSIDE candidate's preferred region (e.g., title says "Northeast", "Midwest", "Pacific Northwest", "TOLA", "West Coast" and candidate is Southeast-based)
+  CRITICAL: If the title contains a specific region name like "(Northeast)", "(Midwest)", "(TOLA)", "(Pacific NW)", "(Southwest)", "(Northwest)" — and the candidate's preferred locations are Southeast US — score territoryFit = 0. Do NOT default to 7 just because the job listing says "Remote".
 
 ADDITIONAL FIELDS:
   realVsFake (0-10): Confidence this is a genuine open role. 10=specific unique JD, 0=generic evergreen template. This is a hard-skip gate and NOT added to matchScore.

@@ -2287,6 +2287,29 @@ async function reclassifyJobsLocally(): Promise<number> {
   const minSalary: number | null = criteria.min_salary ?? null;
   const minOte: number | null    = criteria.min_ote    ?? null;
 
+  // Segment filter — same logic used in the scout pipeline pre-filter
+  const _userRolesLower = targetRoles.map((r: string) => r.toLowerCase());
+  const _wantsCommercial = _userRolesLower.some((r: string) => /commercial|mid.?market|smb|small.?biz/i.test(r));
+  const _SEGMENT_EXCLUDE = /\b(commercial|mid[\s-]market|smb|small\s+business|small\s+&\s+medium)\b/i;
+  const _SEGMENT_ROLE_CTX = /(account|sales|ae\b|rep\b)/i;
+  function _isExcludedSegment(title: string): boolean {
+    if (_wantsCommercial) return false;
+    if (!_SEGMENT_EXCLUDE.test(title)) return false;
+    return _SEGMENT_ROLE_CTX.test(title);
+  }
+
+  // Territory filter — same logic used in the scout pipeline pre-filter
+  const _userLocLower = (userLocations).map((l: string) => l.toLowerCase());
+  const _isSEUser = _userLocLower.some((l: string) => /south.?carolina|north.?carolina|georgia|florida|southeast|se\b/.test(l));
+  const _TERRITORY_EXCLUDE = /\b(northeast|new\s+england|mid[\s-]atlantic|midwest|great\s+lakes|north\s+central|northwest|pacific\s+northwest|pnw|west\s+coast|southwest|tola|mountain\s+west|rocky\s+mountain|plains|upper\s+midwest)\b/i;
+  const _TERRITORY_SE_OK   = /\b(southeast|southern|carolinas?|florida|georgia|sc\b|nc\b|fl\b|ga\b)\b/i;
+  function _isExcludedTerritory(title: string): boolean {
+    if (!_isSEUser) return false;
+    if (!_TERRITORY_EXCLUDE.test(title)) return false;
+    if (_TERRITORY_SE_OK.test(title)) return false;
+    return true;
+  }
+
   // Fetch all jobs (scored or not)
   const { rows } = await pool.query(`
     SELECT id, title, company, location, salary, match_score, ai_risk, ai_risk_score, sub_scores, opportunity_tier
@@ -2353,7 +2376,11 @@ async function reclassifyJobsLocally(): Promise<number> {
       // Hard filter 4: salary (only when salary is EXPLICITLY listed AND known below min)
       const belowSalary = salaryKnownBelow(j.salary);
 
-      if (!titleMatches || hasAvoid || !locationOk || belowSalary) {
+      // Hard filter 5: segment (Commercial/MM/SMB) and territory mismatch
+      const badSegment   = _isExcludedSegment(j.title ?? '');
+      const badTerritory = _isExcludedTerritory(j.title ?? '');
+
+      if (!titleMatches || hasAvoid || !locationOk || belowSalary || badSegment || badTerritory) {
         tier = 'Probably Skip';
       } else if (j.sub_scores && j.match_score !== null) {
         const s: SubScores = typeof j.sub_scores === 'string' ? JSON.parse(j.sub_scores) : j.sub_scores;
@@ -3666,11 +3693,45 @@ async function runScoutInBackground(runId: number): Promise<void> {
       return highest < criteria.min_salary;
     }
 
+    // 4. Segment filter — block explicitly lower-ACV segment titles (Commercial/MM/SMB)
+    //    when the user's target roles don't explicitly include those segments.
+    //    These roles pay significantly less and represent a different sales motion.
+    const userRolesLower = (criteria.target_roles ?? []).map((r: string) => r.toLowerCase());
+    const wantsCommercial = userRolesLower.some(r => /commercial|mid.?market|smb|small.?biz/i.test(r));
+    const SEGMENT_EXCLUDE = /\b(commercial|mid[\s-]market|mid-market\s+ae|smb|small\s+business|small\s+&\s+medium)\b/i;
+    // Segment keyword in the title signals the segment, not the industry vertical
+    // e.g., "Account Executive, Commercial" vs "Commercial Real Estate AE" — distinguish
+    const SEGMENT_ROLE_CTX = /(account|sales|ae\b|rep\b)/i;
+
+    function isExcludedSegment(title: string): boolean {
+      if (wantsCommercial) return false; // user explicitly wants these
+      if (!SEGMENT_EXCLUDE.test(title)) return false;
+      return SEGMENT_ROLE_CTX.test(title); // only block when it's clearly the sales segment
+    }
+
+    // 5. Territory filter — block job titles with an explicit regional territory
+    //    that is clearly OUTSIDE the user's preferred locations.
+    //    e.g., user is SE/Remote → "(Northeast)" in title = hard mismatch.
+    const userLocLower = (criteria.locations ?? []).map((l: string) => l.toLowerCase());
+    const isSEUser = userLocLower.some(l => /south.?carolina|north.?carolina|georgia|florida|southeast|se\b/.test(l));
+    const TERRITORY_EXCLUDE = /\b(northeast|new\s+england|mid[\s-]atlantic|midwest|great\s+lakes|north\s+central|northwest|pacific\s+northwest|pnw|west\s+coast|southwest|tola|mountain\s+west|rocky\s+mountain|plains|upper\s+midwest)\b/i;
+    const TERRITORY_SE_OK   = /\b(southeast|southern|carolinas?|florida|georgia|sc\b|nc\b|fl\b|ga\b)\b/i;
+
+    function isExcludedTerritory(title: string): boolean {
+      if (!isSEUser) return false; // only apply if user is clearly SE-based
+      if (!TERRITORY_EXCLUDE.test(title)) return false;
+      // If it also mentions SE territory, let it through (e.g., "SE + Northeast" hybrid)
+      if (TERRITORY_SE_OK.test(title)) return false;
+      return true;
+    }
+
     // Apply all hard pre-filters
     let preFiltered = toScore;
     let droppedByLocation = 0;
     let droppedByAvoid = 0;
     let droppedBySalary = 0;
+    let droppedBySegment = 0;
+    let droppedByTerritory = 0;
 
     if (hasLocationPrefs) {
       const before = preFiltered.length;
@@ -3688,11 +3749,25 @@ async function runScoutInBackground(runId: number): Promise<void> {
       droppedBySalary = before - preFiltered.length;
     }
 
+    // Apply segment and territory filters
+    {
+      const before = preFiltered.length;
+      preFiltered = preFiltered.filter(j => !isExcludedSegment(j.title));
+      droppedBySegment = before - preFiltered.length;
+    }
+    {
+      const before = preFiltered.length;
+      preFiltered = preFiltered.filter(j => !isExcludedTerritory(j.title));
+      droppedByTerritory = before - preFiltered.length;
+    }
+
     console.log(`\n──── PRE-FILTERS (before Claude scoring) ───────────────────`);
     console.log(`  After title filter: ${toScore.length}`);
     console.log(`  Dropped by location: ${droppedByLocation}`);
     console.log(`  Dropped by avoid keywords: ${droppedByAvoid}`);
     console.log(`  Dropped by salary below $${criteria.min_salary?.toLocaleString() ?? 'n/a'}: ${droppedBySalary}`);
+    console.log(`  Dropped by segment (Commercial/MM/SMB): ${droppedBySegment}`);
+    console.log(`  Dropped by territory mismatch: ${droppedByTerritory}`);
     console.log(`  Remaining for Claude scoring: ${preFiltered.length}`);
     console.log(`───────────────────────────────────────────────────────────`);
 
