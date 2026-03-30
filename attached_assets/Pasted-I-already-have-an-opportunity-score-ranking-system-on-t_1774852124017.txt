@@ -1,0 +1,258 @@
+I already have an opportunity score / ranking system on the Jobs page, but it is still too shallow. I want to upgrade it into a richer multi-factor Opportunity Scorecard that becomes the main ranking brain of the product.
+
+Important:
+Do NOT replace the current system from scratch unless necessary.
+First inspect the existing scoring, ranking, badges, fit explanation, and research data flow.
+Then enhance it by adding richer sub-scores, better ranking logic, better backend storage, and better UI explanation.
+
+Goal:
+For every job, compute a richer opportunity scorecard with clear sub-scores and reasoning across the most important dimensions of job quality, candidate fit, and execution likelihood.
+
+The upgraded scorecard should include these dimensions:
+
+1. fit_to_user_settings
+
+* title alignment
+* location / remote match
+* salary / OTE match if known
+* company filters / preferred industries / target companies
+* target seniority alignment
+
+2. fit_to_resume_background
+
+* experience alignment
+* industry/domain alignment
+* skill alignment
+* deal size / customer type alignment if relevant
+* proof-point overlap from the user’s background
+
+3. source_confidence
+
+* source trust
+* direct ATS / company page vs aggregator
+* metadata quality
+* freshness / live link confidence
+* recovered canonical job quality
+
+4. canonical_link_confidence
+
+* how confident we are the displayed URL is the real best posting
+* whether recovered via direct ATS/company source
+* whether description was fetched from authoritative source
+* whether record still relies on fallback data
+
+5. company_attractiveness
+
+* business momentum
+* growth signals
+* category strength
+* product/company quality
+* financial strength if available
+* reputation / strategic interest
+
+6. likely_hiring_urgency
+
+* freshness of posting
+* multiple similar roles open
+* active hiring signals
+* company growth / expansion signals
+* strong evidence role is real and actively staffed
+
+7. ease_of_outreach_path
+
+* whether likely recruiter / hiring manager / leadership path exists
+* whether company appears reachable
+* whether research / hiring map data exists
+* whether direct company page and likely contact path are available
+
+8. comp_quality
+
+* salary / OTE attractiveness relative to user preferences
+* comp confidence
+* upside vs role quality
+* whether comp is missing / inferred / explicit
+
+9. career_upside
+
+* strategic value of company
+* role stretch vs user goals
+* category trajectory
+* future resume value / exit opportunities
+* long-term relevance to the user’s career direction
+
+I want these dimensions to roll up into:
+
+* overall_opportunity_score
+* opportunity_tier
+
+Tiers should be something like:
+
+* Top Target
+* Fast Win
+* Stretch
+* Low Confidence / Low Priority
+
+Important:
+A job should not be ranked only by one generic score anymore.
+I want sub-scores plus weighted roll-up logic.
+
+Implementation requirements:
+
+PART 1: AUDIT CURRENT SYSTEM
+Before coding, inspect and summarize:
+
+* existing score field(s)
+* existing tier logic / labels
+* current “why this fits you” explanation logic
+* current job card data structure
+* current research drawer/page data
+* current backend ranking / sort logic
+* any current stored score subfields
+
+PART 2: ADD A REAL MULTI-FACTOR SCORECARD
+Create a structured opportunity_scorecard object for each job, with fields like:
+{
+"overall_score": number,
+"tier": "top_target | fast_win | stretch | low_priority",
+"fit_to_user_settings": number,
+"fit_to_resume_background": number,
+"source_confidence": number,
+"canonical_link_confidence": number,
+"company_attractiveness": number,
+"likely_hiring_urgency": number,
+"ease_of_outreach_path": number,
+"comp_quality": number | null,
+"career_upside": number,
+"strengths": string[],
+"risks": string[],
+"recommended_actions": string[]
+}
+
+PART 3: WEIGHTED RANKING LOGIC
+Implement weighted roll-up logic instead of one flat score.
+
+Use sensible weighting, for example:
+
+* fit_to_user_settings: high
+* fit_to_resume_background: high
+* source_confidence: high
+* canonical_link_confidence: medium-high
+* company_attractiveness: medium
+* likely_hiring_urgency: medium
+* ease_of_outreach_path: medium
+* comp_quality: medium
+* career_upside: medium-high
+
+I do not need the exact weights hardcoded from this prompt if a slightly different weighting is better based on current architecture, but the final system should clearly reflect all of these dimensions.
+
+PART 4: EXPLAINABILITY
+For each job, generate structured explanation fields such as:
+
+* why_this_is_a_top_target
+* key_strengths
+* key_risks
+* what_makes_this_a_fast_win_or_stretch
+* what_action_to_take_next
+
+Examples of recommended actions:
+
+* apply now
+* tailor resume first
+* research company before applying
+* reach out to recruiter
+* find referral path
+* low priority unless role changes
+
+PART 5: JOB CARD UI ENHANCEMENT
+Upgrade the Jobs card UI to surface the richer scorecard without making the card cluttered.
+
+I want:
+
+* current overall score preserved or improved visually
+* tier badge
+* 2–4 mini sub-score indicators or badges on-card
+* clearer “why this fits” summary
+* clearer risk / caution indicator if relevant
+* stronger next action CTA suggestion
+
+Possible compact on-card fields:
+
+* source confidence
+* outreach path
+* hiring urgency
+* career upside
+* comp quality if available
+
+PART 6: RESEARCH VIEW ENHANCEMENT
+The Research view/drawer/page already exists and has tabs like:
+
+* Interview Prep
+* Overview
+* Market Position
+* Sales Intel
+* Recent News
+
+Enhance this existing research experience so it includes an Opportunity Scorecard tab or section that clearly shows:
+
+* overall score
+* all sub-scores
+* strengths
+* risks
+* recommended actions
+* why this job is ranked where it is
+
+Do not remove the current research tabs unless necessary.
+Add the scorecard cleanly into the existing research UI.
+
+PART 7: BACKEND / STORAGE
+If useful, persist the richer scorecard so it does not need to be recomputed every render.
+If a current jobs table or score JSON field exists, extend it safely rather than adding unnecessary duplicate storage.
+
+Include score freshness / generated timestamp if appropriate.
+
+PART 8: SORTING / FILTERING
+Allow the jobs page to sort or filter by richer dimensions such as:
+
+* overall opportunity score
+* Top Targets only
+* Fast Wins only
+* highest career upside
+* easiest outreach path
+* highest source confidence
+* highest comp quality
+
+Do not break the current jobs page behavior.
+Make this additive.
+
+PART 9: RECOMMENDED ACTION SYSTEM
+For each job, generate a concrete next-step recommendation.
+Examples:
+
+* Apply now
+* Tailor resume first
+* Reach out before applying
+* Research more first
+* Save and monitor
+* Low priority
+
+This should be driven by the scorecard, not random text.
+
+PART 10: IMPORTANT PRODUCT GOAL
+This feature should make the user feel:
+“Not only do I know what jobs fit me — I know which ones are actually worth spending my time on, why, and what to do next.”
+
+That is the key outcome.
+
+PART 11: OUTPUT EXPECTATIONS
+When finished, provide:
+
+1. summary of what you changed
+2. existing scoring pieces you reused
+3. new score dimensions added
+4. final roll-up logic / weighting approach
+5. UI changes on the job card
+6. UI changes in the research view
+7. any new sort/filter controls
+8. any schema/storage changes
+
+Before changing code, first inspect and summarize the current scoring/ranking architecture and how it maps to the current jobs card + research experience, then implement against the actual codebase safely.

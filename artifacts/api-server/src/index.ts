@@ -4245,6 +4245,39 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .sub-score-val{min-width:18px;text-align:right;color:var(--text);font-size:10px;font-weight:600}
 .sub-score-toggle{cursor:pointer;font-size:10px;color:var(--muted);padding:2px 8px;border-radius:4px;border:1px solid #2a2a2a;background:transparent;transition:border-color .15s}
 .sub-score-toggle:hover{border-color:#444;color:var(--text)}
+/* ── Opportunity Scorecard mini indicators (on-card) ─── */
+.sc-mini{padding:0 14px 8px;display:grid;grid-template-columns:1fr 1fr;gap:4px 14px}
+.sc-mini-item{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--muted)}
+.sc-mini-lbl{width:72px;white-space:nowrap;flex-shrink:0;font-weight:600;color:#666}
+.sc-mini-bar{flex:1;height:3px;background:#1e1e1e;border-radius:2px;overflow:hidden}
+.sc-mini-fill{height:100%;border-radius:2px;transition:width .3s}
+.sc-mini-val{width:26px;text-align:right;font-weight:700;font-size:10px}
+/* Recommended next step chip */
+.rec-step{display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:4px;font-size:10px;font-weight:700;white-space:nowrap;border:1px solid}
+/* Scorecard research tab */
+.sc-tab-header{margin:0 0 16px}
+.sc-overall{display:flex;align-items:center;gap:16px;padding:14px 16px;background:#111;border-radius:8px;margin-bottom:16px}
+.sc-overall-score{font-size:36px;font-weight:900;line-height:1}
+.sc-overall-right{flex:1}
+.sc-overall-tier{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
+.sc-overall-rec{font-size:12px;color:var(--muted)}
+.sc-rec-chip{display:inline-block;padding:4px 14px;border-radius:6px;font-size:12px;font-weight:700;margin:2px 0}
+.sc-section-label{font-size:10px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.1em;margin:16px 0 8px}
+.sc-dim-grid{display:flex;flex-direction:column;gap:6px}
+.sc-dim-row{background:#0f0f0f;border:1px solid #1a1a1a;border-radius:6px;padding:9px 12px}
+.sc-dim-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.sc-dim-label{font-size:11px;font-weight:700;color:#aaa}
+.sc-dim-score-val{font-size:12px;font-weight:800}
+.sc-dim-bar-bg{height:3px;background:#1e1e1e;border-radius:2px}
+.sc-dim-bar-fill{height:100%;border-radius:2px;transition:width .4s}
+.sc-dim-desc{font-size:10px;color:#555;margin-top:4px}
+.sc-list-item{font-size:12px;margin:4px 0;padding-left:18px;position:relative;line-height:1.4}
+.sc-list-item.strength{color:var(--green)}.sc-list-item.strength:before{content:"✓";position:absolute;left:0;color:var(--green)}
+.sc-list-item.risk{color:#ff9f43}.sc-list-item.risk:before{content:"⚠";position:absolute;left:0;color:#ff9f43}
+/* Sort selector */
+.jobs-sort-bar{display:flex;align-items:center;gap:8px;padding:6px 20px;border-bottom:1px solid var(--border);background:var(--bg)}
+.sort-sel{background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:11px;cursor:pointer;outline:none;appearance:none;-webkit-appearance:none}
+.sort-sel:hover{border-color:var(--gold);color:var(--text)}
 .rescore-banner{margin:0 0 16px;padding:12px 16px;background:rgba(245,200,66,.08);border:1px solid rgba(245,200,66,.25);border-radius:8px;display:flex;align-items:center;justify-content:space-between;gap:12px}
 .rescore-banner.hidden{display:none}
 .rescore-msg{font-size:13px;color:#ccc}
@@ -4814,6 +4847,18 @@ textarea:focus,input:focus{border-color:var(--gold)}
     </div>
     <button class="btn btn-gold btn-sm" id="rescore-btn" onclick="startRescore()">Score All Jobs</button>
     <button class="btn btn-ghost btn-sm" id="conf-filter-btn" onclick="toggleConfidenceFilter()" title="Hide jobs with broken or unresolved links" style="font-size:11px">\uD83D\uDD17 Show broken links</button>
+  </div>
+  <div class="jobs-sort-bar">
+    <span style="color:#666;font-size:11px;letter-spacing:.03em">Sort:</span>
+    <select class="sort-sel" id="sort-mode-select" onchange="setSortMode(this.value)" title="Sort jobs by dimension">
+      <option value="score">Overall Score</option>
+      <option value="role_fit">Role Fit</option>
+      <option value="company">Company Quality</option>
+      <option value="source">Source Quality</option>
+      <option value="freshness">Freshness</option>
+      <option value="urgency">Hiring Urgency</option>
+      <option value="upside">Career Upside</option>
+    </select>
   </div>
   <div class="inner-tabs">
     <div class="inner-tab tier-target active" id="jtab-target" onclick="showJobsTab('target')">&#x1F3AF; Top Targets <span id="jtab-count-target" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
@@ -5767,6 +5812,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
         <div class="research-tab" onclick="showResearchTab('market')">Market Position</div>
         <div class="research-tab" onclick="showResearchTab('sales')">Sales Intel</div>
         <div class="research-tab" onclick="showResearchTab('news')">Recent News</div>
+        <div class="research-tab" onclick="showResearchTab('scorecard')" style="color:#c8a96e">&#127919; Scorecard</div>
       </div>
       <div class="research-body" id="research-body"></div>
       <div class="research-footer">
@@ -5993,6 +6039,236 @@ function toggleSubScores(id) {
   if (el) el.classList.toggle('open');
 }
 
+// ── Opportunity Scorecard — derives 9 richer dimensions from stored data ────
+function computeScorecard(j) {
+  var s = j.sub_scores ? (typeof j.sub_scores === 'string' ? JSON.parse(j.sub_scores) : j.sub_scores) : null;
+  var isNewFmt = s && s.compensationFit !== undefined;
+
+  var roleFitPct, compQualPct, compFitPct, locFitPct, terrFitPct, realPct;
+  if (isNewFmt) {
+    // v2 format: roleFit/30, companyQuality/25, compensationFit/20, locationFit/15, territoryFit/10
+    roleFitPct  = Math.round(((Number(s.roleFit) || 0)         / 30) * 100);
+    compQualPct = Math.round(((Number(s.companyQuality) || 0)  / 25) * 100);
+    compFitPct  = Math.round(((Number(s.compensationFit) || 0) / 20) * 100);
+    locFitPct   = Math.round(((Number(s.locationFit) || 0)     / 15) * 100);
+    terrFitPct  = Math.round(((s.territoryFit != null ? Number(s.territoryFit) : 7) / 10) * 100);
+    realPct     = Math.round(((Number(s.realVsFake) || 5)      / 10) * 100);
+  } else {
+    // v1 legacy format: all fields on 0-10 scale
+    roleFitPct  = Math.round(((Number(s.roleFit) || 0)         / 10) * 100);
+    compQualPct = Math.round(((Number(s.companyQuality) || 0)  / 10) * 100);
+    compFitPct  = s && s.qualificationFit != null ? Math.round((Number(s.qualificationFit) / 10) * 100) : 50;
+    locFitPct   = Math.round(((Number(s.locationFit) || 0)     / 10) * 100);
+    terrFitPct  = 70; // no territory field in v1
+    realPct     = Math.round(((Number(s.realVsFake) || 5)      / 10) * 100);
+  }
+  // Recompute raw values used later (normalized to same effective scale as pct)
+  var compFitRaw   = isNewFmt ? (Number(s.compensationFit) || 0) : 10;
+  var realRaw      = s ? (isNewFmt ? (Number(s.realVsFake) || 5) : (Number(s.realVsFake) || 5)) : 5;
+
+  var momScore = (j.momentum_score !== null && j.momentum_score !== undefined) ? Number(j.momentum_score) : null;
+  var momPct   = momScore !== null ? Math.round((momScore / 25) * 100) : compQualPct;
+
+  var tier     = j.opportunity_tier || '';
+  var vs       = j.validation_status || 'pending';
+  var csrc     = j.canonical_source || '';
+  var applyUrl = (j.apply_url || '') + (j.canonical_url || '');
+  var matchConf = j.recovery_match_confidence ? Number(j.recovery_match_confidence) : null;
+
+  // 1. fit_to_user_settings — role + location + comp + territory
+  var fitSettings = Math.round(roleFitPct * 0.38 + locFitPct * 0.30 + compFitPct * 0.22 + terrFitPct * 0.10);
+
+  // 2. fit_to_resume_background — role title/level + JD quality gate
+  var fitResume = Math.round(roleFitPct * 0.72 + realPct * 0.28);
+
+  // 3. source_confidence — trust in where the link came from
+  var srcConf = 48;
+  if (vs === 'validated')       srcConf = 95;
+  else if (vs === 'recovered')  srcConf = matchConf ? Math.round(55 + matchConf * 35) : 74;
+  else if (/greenhouse\.io|lever\.co|ashbyhq\.com|workday\.com|myworkdayjobs|jobvite\.com|icims\.com|smartrecruiters\.com/i.test(applyUrl)) srcConf = 82;
+  else if (csrc === 'ats_direct') srcConf = 80;
+  else if (/linkedin\.com/i.test(applyUrl))    srcConf = 52;
+  else if (/indeed\.com/i.test(applyUrl))      srcConf = 46;
+
+  // 4. canonical_link_confidence — how good is the specific URL we have
+  var linkConf;
+  if      (vs === 'validated')                           linkConf = 95;
+  else if (vs === 'recovered' && matchConf)              linkConf = Math.round(52 + matchConf * 44);
+  else if (vs === 'recovered')                           linkConf = 72;
+  else if (vs === 'suspicious' || vs === 'failed')       linkConf = 28;
+  else                                                    linkConf = srcConf;
+
+  // 5. company_attractiveness — quality + momentum
+  var compAttr = momScore !== null
+    ? Math.round(compQualPct * 0.52 + momPct * 0.48)
+    : compQualPct;
+
+  // 6. likely_hiring_urgency — posting age + JD authenticity
+  var urgency = 50;
+  var dateStr = j.date_posted || j.found_at;
+  if (dateStr) {
+    var daysOld = (Date.now() - new Date(dateStr).getTime()) / 86400000;
+    if (daysOld < 2)       urgency = 92;
+    else if (daysOld < 5)  urgency = 82;
+    else if (daysOld < 10) urgency = 70;
+    else if (daysOld < 20) urgency = 58;
+    else if (daysOld < 40) urgency = 42;
+    else if (daysOld < 70) urgency = 28;
+    else                   urgency = 15;
+  }
+  if (realRaw >= 8)  urgency = Math.min(100, urgency + 8);
+  else if (realRaw < 5) urgency = Math.max(0, urgency - 15);
+
+  // 7. ease_of_outreach_path — source openness + company profile
+  var outreach = Math.round(srcConf * 0.55 + compAttr * 0.45);
+  if (/greenhouse|lever|ashby/i.test(applyUrl)) outreach = Math.min(100, outreach + 8);
+
+  // 8. comp_quality — compensation fit vs stated salary
+  var hasSalary    = !!(j.salary && j.salary !== 'Unknown' && j.salary !== 'N/A' && j.salary.trim() !== '');
+  var hasEstimate  = !!j.salary_estimate;
+  var compQual;
+  if (!isNewFmt) {
+    compQual = null;
+  } else if (hasSalary) {
+    compQual = Math.max(30, compFitPct);
+  } else if (hasEstimate) {
+    compQual = Math.max(20, Math.round(compFitPct * 0.85));
+  } else {
+    compQual = s && s.compensationFit === 10 ? 50 : compFitPct;
+  }
+
+  // 9. career_upside — company strength + role stretch + tier value
+  var tierUpside = tier === 'Top Target' ? 88 : tier === 'Fast Win' ? 72 : tier === 'Stretch Role' ? 78 : 38;
+  var careerUpside = Math.round(compAttr * 0.42 + roleFitPct * 0.30 + tierUpside * 0.28);
+
+  // Recommended action
+  var recAction;
+  if (!s || !j.match_score)                             recAction = 'Score this job first';
+  else if (tier === 'Probably Skip')                     recAction = 'Low Priority';
+  else if (tier === 'Top Target' && srcConf >= 75)       recAction = 'Apply Now';
+  else if (tier === 'Top Target' && srcConf < 75)        recAction = 'Verify Link First';
+  else if (tier === 'Fast Win' && urgency >= 65)         recAction = 'Apply Now';
+  else if (tier === 'Fast Win' && roleFitPct >= 70)      recAction = 'Tailor Resume First';
+  else if (tier === 'Fast Win')                          recAction = 'Research Company';
+  else if (tier === 'Stretch Role' && compAttr >= 70)    recAction = 'Network In First';
+  else if (tier === 'Stretch Role')                      recAction = 'Research + Monitor';
+  else if (!hasSalary && !hasEstimate)                   recAction = 'Research Comp First';
+  else                                                   recAction = 'Review Before Applying';
+
+  // Key strengths
+  var strengths = [];
+  if (roleFitPct >= 80)          strengths.push('Strong title and seniority match');
+  if (compQualPct >= 72)         strengths.push('Quality company with proven track record');
+  if (locFitPct >= 85)           strengths.push('Location and remote preferences align');
+  if (urgency >= 78)             strengths.push('Fresh posting — lower competition window');
+  if (srcConf >= 80)             strengths.push('Direct ATS source — link reliability high');
+  if (momScore !== null && momScore >= 20) strengths.push('Company showing strong growth signals');
+  if (hasSalary)                 strengths.push('Salary listed — no comp ambiguity');
+  if (careerUpside >= 78)        strengths.push('High career upside and resume value');
+  if (vs === 'recovered' || vs === 'validated') strengths.push('Verified canonical job posting');
+
+  // Key risks
+  var risks = [];
+  if (roleFitPct < 55)           risks.push('Role title or level may not be a close match');
+  if (srcConf < 52)              risks.push('Sourced from aggregator — verify posting is live');
+  if (dateStr) {
+    var dOld = Math.round((Date.now() - new Date(dateStr).getTime()) / 86400000);
+    if (dOld > 40)               risks.push('Posting is ' + dOld + ' days old — may already be filled');
+  }
+  if (j.momentum_warning)        risks.push(j.momentum_warning);
+  if (vs === 'suspicious' || vs === 'failed') risks.push('Link validation issue — may be expired');
+  if (isNewFmt && s && s.compensationFit < 5 && hasSalary) risks.push('Listed salary may be below your minimum');
+  if (j.ai_risk === 'HIGH')      risks.push('High AI displacement risk in this role type');
+  if (j.is_hardware === false && compFitPct < 30 && !hasSalary) risks.push('Comp unknown — research before applying');
+
+  return {
+    overall_score:            j.match_score || 0,
+    tier:                     tier,
+    fit_to_user_settings:     fitSettings,
+    fit_to_resume_background: fitResume,
+    source_confidence:        srcConf,
+    canonical_link_confidence:linkConf,
+    company_attractiveness:   compAttr,
+    likely_hiring_urgency:    urgency,
+    ease_of_outreach_path:    outreach,
+    comp_quality:             compQual,
+    career_upside:            careerUpside,
+    recommended_action:       recAction,
+    strengths:                strengths,
+    risks:                    risks,
+  };
+}
+
+function scColor(pct) {
+  if (pct >= 78) return '#00c86e';
+  if (pct >= 58) return '#f5c842';
+  if (pct >= 38) return '#ff9f43';
+  return '#e55353';
+}
+
+function scorecardMiniHtml(j) {
+  if (!j.sub_scores && !j.match_score) return '';
+  var sc = computeScorecard(j);
+  var html = '<div class="sc-mini">';
+  var items = [
+    ['Role Fit',  sc.fit_to_user_settings],
+    ['Company',   sc.company_attractiveness],
+    ['Source',    sc.source_confidence],
+    ['Urgency',   sc.likely_hiring_urgency],
+  ];
+  for (var i = 0; i < items.length; i++) {
+    var lbl = items[i][0];
+    var pct = items[i][1];
+    var col = scColor(pct);
+    html += '<div class="sc-mini-item"><span class="sc-mini-lbl">' + lbl + '</span><div class="sc-mini-bar"><div class="sc-mini-fill" style="width:' + pct + '%;background:' + col + '"></div></div><span class="sc-mini-val" style="color:' + col + '">' + pct + '</span></div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function recActionHtml(j) {
+  if (!j.sub_scores && !j.match_score) return '';
+  var sc = computeScorecard(j);
+  var ra = sc.recommended_action;
+  var col = ra === 'Apply Now' ? '#00c86e' : ra === 'Tailor Resume First' ? '#f5c842' : ra === 'Low Priority' ? '#555' : '#7c8dff';
+  return '<span class="rec-step" style="background:' + col + '22;color:' + col + ';border-color:' + col + '44" title="Recommended next step">&#x2192; ' + esc(ra) + '</span>';
+}
+
+var _currentSortMode = 'score';
+function setSortMode(mode) {
+  _currentSortMode = mode;
+  renderJobs();
+}
+function sortJobs(jobs) {
+  var sc = computeScorecard;
+  return jobs.slice().sort(function(a, b) {
+    if (_currentSortMode === 'role_fit') {
+      var as = a.sub_scores ? (typeof a.sub_scores === 'string' ? JSON.parse(a.sub_scores) : a.sub_scores) : null;
+      var bs = b.sub_scores ? (typeof b.sub_scores === 'string' ? JSON.parse(b.sub_scores) : b.sub_scores) : null;
+      return (bs ? (Number(bs.roleFit) || 0) : 0) - (as ? (Number(as.roleFit) || 0) : 0);
+    }
+    if (_currentSortMode === 'company') {
+      return sc(b).company_attractiveness - sc(a).company_attractiveness;
+    }
+    if (_currentSortMode === 'source') {
+      return sc(b).source_confidence - sc(a).source_confidence;
+    }
+    if (_currentSortMode === 'freshness') {
+      var ad = a.date_posted || a.found_at || '2000-01-01';
+      var bd = b.date_posted || b.found_at || '2000-01-01';
+      return new Date(bd).getTime() - new Date(ad).getTime();
+    }
+    if (_currentSortMode === 'upside') {
+      return sc(b).career_upside - sc(a).career_upside;
+    }
+    if (_currentSortMode === 'urgency') {
+      return sc(b).likely_hiring_urgency - sc(a).likely_hiring_urgency;
+    }
+    // default: match_score
+    return (b.match_score || 0) - (a.match_score || 0);
+  });
+}
+
 function showJobsTab(tab) {
   _currentJobsTab = tab;
   ['target','win','stretch','skip','all'].forEach(function(t) {
@@ -6173,6 +6449,8 @@ function renderJobCard(j, opts) {
     '</div>' +
     // ── Signal: Why this fits you
     (j.why_good_fit ? '<div class="card-signal"><div class="signal-label">\uD83C\uDFAF Why this fits you</div><div class="signal-text">' + esc(j.why_good_fit) + '</div></div>' : '') +
+    // ── Scorecard mini indicators (4 key dimensions, compact)
+    scorecardMiniHtml(j) +
     // ── Meta strip: salary, risk, momentum, territory, source, freshness, action
     '<div class="card-meta-strip">' +
       salaryHtml +
@@ -6191,6 +6469,7 @@ function renderJobCard(j, opts) {
     ssHtml +
     // ── Actions
     '<div class="card-foot">' +
+      recActionHtml(j) +
       '<a href="' + esc(j.display_url || j.canonical_url || j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-apply btn-sm' + (linkBroken ? ' btn-link-warn' : '') + '" title="' + (linkBroken ? '\u26a0 Link may be broken or expired \u2014 try searching the company careers page' : (validationStatus === 'recovered' || validationStatus === 'validated') ? '\u2714 Verified direct source link' : 'Apply to this job') + '">Apply Now \u2192' + (linkBroken ? ' \u26a0' : '') + '</a>' +
       reachBtn +
       '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ')">Tailor Resume</button>' +
@@ -6233,12 +6512,12 @@ function renderJobs() {
   updateTabCounts();
 
   if (_currentJobsTab === 'all') {
-    jobs = _allJobs.slice().sort(function(a, b) { return b.match_score - a.match_score; });
+    jobs = sortJobs(_allJobs);
     cnt.textContent = jobs.length + ' job' + (jobs.length !== 1 ? 's' : '') + ' total';
   } else {
     var tierMap = { target:'Top Target', win:'Fast Win', stretch:'Stretch Role', skip:'Probably Skip' };
     var tierLabel = tierMap[_currentJobsTab];
-    jobs = _allJobs.filter(function(j) { return tierKey(j) === _currentJobsTab; }).sort(function(a,b) { return b.match_score - a.match_score; });
+    jobs = sortJobs(_allJobs.filter(function(j) { return tierKey(j) === _currentJobsTab; }));
     var emptyMsg = {
       target: 'No Top Target roles yet \\u2014 run the scout or score your library',
       win: 'No Fast Wins identified yet',
@@ -7835,7 +8114,7 @@ function closeResearchModal() {
 
 function showResearchTab(tab) {
   var tabs = document.getElementById('research-tabs').children;
-  var tabNames = ['interview','overview','market','sales','news'];
+  var tabNames = ['interview','overview','market','sales','news','scorecard'];
   for (var i = 0; i < tabs.length; i++) {
     tabs[i].classList.toggle('active', tabNames[i] === tab);
   }
@@ -7884,6 +8163,78 @@ function renderResearchTab(tab) {
     html += '<ul>';
     (b.recentNews || []).forEach(function(n) { html += '<li>' + esc(n) + '</li>'; });
     html += '</ul>';
+  } else if (tab === 'scorecard') {
+    var j = _jobsById[_researchJobId] || {};
+    var sc = computeScorecard(j);
+    var overallColor = sc.overall_score >= 80 ? '#00c86e' : sc.overall_score >= 65 ? '#f5c842' : sc.overall_score >= 45 ? '#ff9f43' : '#e55353';
+    var tierIcon = sc.tier === 'Top Target' ? '\uD83C\uDFAF' : sc.tier === 'Fast Win' ? '\u26A1' : sc.tier === 'Stretch Role' ? '\uD83D\uDE80' : '\uD83D\uDEAB';
+    var recCol = sc.recommended_action === 'Apply Now' ? '#00c86e' : sc.recommended_action === 'Tailor Resume First' ? '#f5c842' : sc.recommended_action === 'Low Priority' ? '#555' : '#7c8dff';
+
+    // Overall header
+    html += '<div class="sc-overall">';
+    html +=   '<div class="sc-overall-score" style="color:' + overallColor + '">' + sc.overall_score + '</div>';
+    html +=   '<div class="sc-overall-right">';
+    html +=     '<div class="sc-overall-tier" style="color:' + overallColor + '">' + tierIcon + ' ' + esc(sc.tier || 'Unscored') + '</div>';
+    html +=     '<div class="sc-overall-rec">Recommended: <span class="sc-rec-chip" style="background:' + recCol + '22;color:' + recCol + '">\u2192 ' + esc(sc.recommended_action) + '</span></div>';
+    html +=   '</div>';
+    html += '</div>';
+
+    // 9 dimension bars
+    var dimData = [
+      ['Fit to Settings',    sc.fit_to_user_settings,     'Role title, location, comp, territory match to your preferences'],
+      ['Resume Fit',         sc.fit_to_resume_background, 'How well this role aligns with your background and experience level'],
+      ['Source Quality',     sc.source_confidence,        'Trust level of where this job was sourced from (ATS direct vs aggregator)'],
+      ['Link Confidence',    sc.canonical_link_confidence,'Confidence the displayed URL leads to the real active posting'],
+      ['Company Quality',    sc.company_attractiveness,   'Company momentum, funding signals, growth trajectory'],
+      ['Hiring Urgency',     sc.likely_hiring_urgency,    'How fresh and time-sensitive this posting appears to be'],
+      ['Outreach Path',      sc.ease_of_outreach_path,    'How reachable the hiring team or manager is likely to be'],
+      ['Career Upside',      sc.career_upside,            'Strategic value for your career growth and resume trajectory'],
+    ];
+    if (sc.comp_quality !== null) {
+      dimData.splice(4, 0, ['Comp Quality', sc.comp_quality, 'How attractive and explicit the compensation is relative to your targets']);
+    }
+
+    html += '<div class="sc-section-label">Score Breakdown</div>';
+    html += '<div class="sc-dim-grid">';
+    for (var di = 0; di < dimData.length; di++) {
+      var dname = dimData[di][0];
+      var dval  = dimData[di][1];
+      var ddesc = dimData[di][2];
+      var dcol  = scColor(dval);
+      html += '<div class="sc-dim-row">';
+      html +=   '<div class="sc-dim-header"><span class="sc-dim-label">' + esc(dname) + '</span><span class="sc-dim-score-val" style="color:' + dcol + '">' + dval + '</span></div>';
+      html +=   '<div class="sc-dim-bar-bg"><div class="sc-dim-bar-fill" style="width:' + dval + '%;background:' + dcol + '"></div></div>';
+      html +=   '<div class="sc-dim-desc">' + esc(ddesc) + '</div>';
+      html += '</div>';
+    }
+    html += '</div>';
+
+    // Strengths
+    if (sc.strengths.length > 0) {
+      html += '<div class="sc-section-label">Key Strengths</div>';
+      for (var si = 0; si < sc.strengths.length; si++) {
+        html += '<div class="sc-list-item strength">' + esc(sc.strengths[si]) + '</div>';
+      }
+    }
+
+    // Risks
+    if (sc.risks.length > 0) {
+      html += '<div class="sc-section-label">Risks &amp; Cautions</div>';
+      for (var ri = 0; ri < sc.risks.length; ri++) {
+        html += '<div class="sc-list-item risk">' + esc(sc.risks[ri]) + '</div>';
+      }
+    }
+
+    // Why this ranking
+    html += '<div class="sc-section-label">Why It Ranks Here</div>';
+    html += '<p style="font-size:12px;color:#888;line-height:1.6">';
+    html += 'Ranked <strong style="color:' + overallColor + '">' + sc.overall_score + '/100</strong> based on a weighted combination of role fit, company quality, and source confidence. ';
+    if (sc.tier === 'Top Target')  html += 'Top Target status means strong role match, quality company, and accessible seniority level.';
+    else if (sc.tier === 'Fast Win') html += 'Fast Win status means a solid score with achievable profile match — a realistic near-term opportunity.';
+    else if (sc.tier === 'Stretch Role') html += 'Stretch Role means above your current level or niche — worth pursuing selectively or via networking.';
+    else html += 'Probably Skip — score does not meet threshold for active pursuit at this time.';
+    if (j.why_good_fit) { html += ' ' + esc(j.why_good_fit); }
+    html += '</p>';
   }
   body.innerHTML = html;
 }
