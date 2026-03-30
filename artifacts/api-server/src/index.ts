@@ -4169,10 +4169,13 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .app-body{display:flex;flex:1;min-height:0}
 
 /* sidebar */
-.sidebar{width:200px;min-width:200px;border-right:1px solid var(--border);display:flex;flex-direction:column;gap:2px;padding:12px 10px;background:var(--bg)}
-.sidebar .tab{padding:9px 14px;font-size:13px;color:var(--muted);cursor:pointer;border-radius:7px;user-select:none;white-space:nowrap;border-left:3px solid transparent;transition:background .12s,color .12s;position:relative}
+.sidebar{width:200px;min-width:200px;border-right:1px solid var(--border);display:flex;flex-direction:column;gap:1px;padding:12px 10px;background:var(--bg)}
+.sidebar .tab{padding:8px 14px;font-size:13px;color:var(--muted);cursor:pointer;border-radius:7px;user-select:none;white-space:nowrap;border-left:3px solid transparent;transition:background .12s,color .12s;position:relative}
 .sidebar .tab:hover{background:var(--surface);color:var(--text)}
 .sidebar .tab.active{color:var(--text);background:var(--surface);border-left-color:var(--gold)}
+.nav-group{display:flex;flex-direction:column;gap:1px;margin-bottom:4px}
+.nav-group-label{font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#555;padding:8px 14px 3px;user-select:none}
+.nav-group:first-child .nav-group-label{padding-top:0}
 /* sidebar tooltips */
 .sidebar .tab[data-tooltip]::after{content:attr(data-tooltip);position:absolute;left:calc(100% + 14px);top:50%;transform:translateY(-50%);background:#0e0e0e;border:1px solid var(--border);border-radius:9px;padding:11px 14px;font-size:12px;line-height:1.65;color:var(--text);width:270px;white-space:normal;z-index:9999;opacity:0;pointer-events:none;transition:opacity .12s ease .25s;box-shadow:0 8px 28px rgba(0,0,0,.55);font-weight:400}
 .sidebar .tab[data-tooltip]:hover::after{opacity:1}
@@ -4729,19 +4732,28 @@ textarea:focus,input:focus{border-color:var(--gold)}
 
 <div class="app-body">
 <nav class="sidebar">
-  <div class="tab active" id="tab-jobs" onclick="showTab('jobs')" data-tooltip="Your scored job board. Claude rates every listing Top Target / Fast Win / Stretch / Probably Skip against your resume and settings.">Jobs</div>
-  <div class="tab sub-tab" id="tab-saved" onclick="showTab('saved')" data-tooltip="Jobs you've starred. Generate tailored resumes and cover letters from each one.">&nbsp;&nbsp;Saved Jobs</div>
-  <div class="tab sub-tab" id="tab-pipeline" onclick="showTab('pipeline')" data-tooltip="Your active application pipeline. Track every job you've applied to, are interviewing for, or are interested in — with daily AI action recommendations.">&nbsp;&nbsp;My Pipeline</div>
-  <div class="tab" id="tab-research" onclick="showTab('research')" data-tooltip="Deep-dive company research powered by Claude. Culture, financials, hiring signals, and interview prep before you apply.">Research</div>
-  <div class="tab" id="tab-intel" onclick="showTab('intel')" data-tooltip="Gemini scans the web daily for companies actively hiring in your space. Market trends, emerging themes, hot companies to target now.">Career Intel</div>
-  <div class="tab" id="tab-preipo" onclick="showTab('preipo')" data-tooltip="Explosive pre-IPO companies worth joining NOW. Series B is the sweet spot — proven PMF, scaling sales motion, meaningful equity. Ranked by momentum score using real funding data.">Pre-IPO</div>
-  <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Does two things: (1) tells the scraper which ATS pages to hit, and (2) boosts every listed company's score. Keep to your genuine top 10–15 or the boost is meaningless.">Companies</div>
-  <div class="tab" id="tab-resume" onclick="showTab('resume')" data-tooltip="Your uploaded resume. The first 2,500 characters go to Claude on every scoring run so it can judge whether you actually qualify — not just keyword match.">Resume</div>
-  <div class="tab" id="tab-email" onclick="showTab('email')" data-tooltip="Daily email digest of your top matches sent to your inbox. Configure send time, preview the content, and manage your Gmail connection here.">Daily Jobs Report</div>
-  <div class="tab" id="tab-runs" onclick="showTab('runs')" data-tooltip="Full log of every scout run — jobs found, matches scored, errors, and timing. Use this to debug why a run found too many or too few results.">Run History</div>
-  <div class="tab" id="tab-positioning" onclick="showTab('positioning')" data-tooltip="Content studio — separate from the job search. Generates your LinkedIn headline, pitches, bios, and objection prep from your intake form. Never affects scoring or discovery.">Positioning</div>
-  <div class="tab" id="tab-settings" onclick="showTab('settings')" data-tooltip="Controls what the scout actually searches for: target roles, industries, locations, must-have skills, things to avoid, and salary floor. The scout won't run without this configured.">Settings</div>
-  <div class="tab" id="tab-clawd" onclick="showTab('clawd')" data-tooltip="Embedded interview and career coaching tool.">DeathByClawd</div>
+  <div class="nav-group">
+    <div class="nav-group-label">Search</div>
+    <div class="tab active" id="tab-jobs" onclick="showTab('jobs')" data-tooltip="Your scored job board. Claude rates every listing Top Target / Fast Win / Stretch / Probably Skip against your resume and settings.">Jobs</div>
+    <div class="tab" id="tab-saved" onclick="showTab('saved')" data-tooltip="Jobs you've starred. Generate tailored resumes and cover letters from each one.">Saved Jobs</div>
+    <div class="tab" id="tab-intel" onclick="showTab('intel')" data-tooltip="Gemini scans the web daily for companies actively hiring in your space. Market trends, emerging themes, hot companies to target now.">Career Intel</div>
+    <div class="tab" id="tab-preipo" onclick="showTab('preipo')" data-tooltip="Explosive pre-IPO companies worth joining NOW. Series B is the sweet spot — proven PMF, scaling sales motion, meaningful equity. Ranked by momentum score using real funding data.">Pre-IPO</div>
+    <div class="tab" id="tab-clawd" onclick="showTab('clawd')" data-tooltip="Embedded interview and career coaching tool.">DeathByClawd</div>
+    <div class="tab" id="tab-email" onclick="showTab('email')" data-tooltip="Daily email digest of your top matches sent to your inbox. Configure send time, preview the content, and manage your Gmail connection here.">Daily Report</div>
+  </div>
+  <div class="nav-group">
+    <div class="nav-group-label">Execute</div>
+    <div class="tab" id="tab-pipeline" onclick="showTab('pipeline')" data-tooltip="Your active application pipeline. Track every job you've applied to, are interviewing for, or are interested in — with daily AI action recommendations.">My Pipeline</div>
+    <div class="tab" id="tab-research" onclick="showTab('research')" data-tooltip="Deep-dive company research powered by Claude. Culture, financials, hiring signals, and interview prep before you apply.">Company Research</div>
+    <div class="tab" id="tab-positioning" onclick="showTab('positioning')" data-tooltip="Content studio — separate from the job search. Generates your LinkedIn headline, pitches, bios, and objection prep from your intake form. Never affects scoring or discovery.">Positioning</div>
+    <div class="tab" id="tab-resume" onclick="showTab('resume')" data-tooltip="Your uploaded resume. The first 2,500 characters go to Claude on every scoring run so it can judge whether you actually qualify — not just keyword match.">Resume</div>
+  </div>
+  <div class="nav-group">
+    <div class="nav-group-label">Settings</div>
+    <div class="tab" id="tab-settings" onclick="showTab('settings')" data-tooltip="Controls what the scout actually searches for: target roles, industries, locations, must-have skills, things to avoid, and salary floor. The scout won't run without this configured.">User Search Settings</div>
+    <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Does two things: (1) tells the scraper which ATS pages to hit, and (2) boosts every listed company's score. Keep to your genuine top 10–15 or the boost is meaningless.">Priority Companies</div>
+    <div class="tab" id="tab-runs" onclick="showTab('runs')" data-tooltip="Full log of every scout run — jobs found, matches scored, errors, and timing. Use this to debug why a run found too many or too few results.">Run History</div>
+  </div>
 </nav>
 <div class="main-content">
 <div class="panel active" id="panel-jobs">
