@@ -205,16 +205,20 @@ async function scoreOne(
     );
 
     // ── Build salary constraint text ─────────────────────────────────────────
-    const salaryParts: string[] = [];
-    if (minSalary) {
-      salaryParts.push(`Minimum BASE salary: $${minSalary.toLocaleString()}. If salary listed AND highest figure is below this, set compensationFit=0.`);
+    let salaryRule: string;
+    if (minSalary || minOte) {
+      const lines: string[] = [];
+      if (minSalary) lines.push(`  - Min BASE salary: $${minSalary.toLocaleString()}`);
+      if (minOte)    lines.push(`  - Min OTE (total on-target earnings): $${minOte.toLocaleString()}`);
+      salaryRule = `COMPENSATION MINIMUMS:\n${lines.join('\n')}\nRules (apply carefully):\n` +
+        `  1. If the JD explicitly states a BASE salary figure: compare it to min BASE. Below min → score 0.\n` +
+        `  2. If the JD explicitly states an OTE/total comp figure: compare it to min OTE. Below min → score 0.\n` +
+        `  3. A job PASSES if EITHER condition is satisfied (base ≥ min base OR OTE ≥ min OTE).\n` +
+        `  4. If NO salary info is stated at all: score 10 — never penalize for missing info.\n` +
+        `  5. If you cannot clearly tell base from OTE: treat the figure as OTE.`;
+    } else {
+      salaryRule = 'No salary minimum set. Score compensationFit=10 if no salary listed.';
     }
-    if (minOte) {
-      salaryParts.push(`Minimum OTE: $${minOte.toLocaleString()}. If OTE listed AND below this, set compensationFit=0.`);
-    }
-    const salaryRule = salaryParts.length > 0
-      ? `COMPENSATION MINIMUM:\n${salaryParts.join('\n')}\nIf no salary listed: do NOT penalize — score 10.`
-      : 'No salary minimum set. Score compensationFit=10 if no salary listed.';
 
     // ── Candidate background section ─────────────────────────────────────────
     const resumeSection = candidateResume
@@ -490,8 +494,11 @@ export function computeTier(
     const directorAbove     = maxRank < 3 ? isDirector      : false;
     const principalAbove    = isPrincipal;
 
+    // Niche keywords alone do NOT push a role above level — only seniority signals do.
+    // hasVerticalNiche is kept as a computed value for future use but excluded from isAboveLevel.
+    void hasVerticalNiche;
     const isAboveLevel = namedAbove || enterpriseAbove || srEnterpriseAbove ||
-      strategicAbove || directorAbove || principalAbove || hasVerticalNiche;
+      strategicAbove || directorAbove || principalAbove;
 
     // STRETCH: above user's level
     if (isAboveLevel && matchScore >= stretchScore) return 'Stretch Role';
@@ -550,8 +557,10 @@ export function computeTier(
   const directorAbove     = maxRank < 3 ? isDirector      : false;
   const principalAbove    = isPrincipal;
 
+  // Niche keywords alone do NOT push a role above level — only seniority signals do.
+  void hasVerticalNiche;
   const isAboveLevel = namedAbove || enterpriseAbove || srEnterpriseAbove ||
-    strategicAbove || directorAbove || principalAbove || hasVerticalNiche;
+    strategicAbove || directorAbove || principalAbove;
   const isAccessibleRole = !isAboveLevel;
 
   const hasCommercial = /\bcommercial\b/i.test(title);

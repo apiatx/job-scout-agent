@@ -2191,6 +2191,7 @@ async function reclassifyJobsLocally(): Promise<number> {
   );
 
   const minSalary: number | null = criteria.min_salary ?? null;
+  const minOte: number | null    = criteria.min_ote    ?? null;
 
   // Fetch all jobs (scored or not)
   const { rows } = await pool.query(`
@@ -2198,14 +2199,46 @@ async function reclassifyJobsLocally(): Promise<number> {
     FROM jobs
   `);
 
-  // Helper: check if a stored salary string is KNOWN to be below minimum
-  function salaryKnownBelow(salaryStr: string | null | undefined): boolean {
-    if (!minSalary || !salaryStr) return false;
+  // Helper: parse salary string into {base, ote} where each may be null if not detected
+  function parseSalaryFigures(salaryStr: string): { base: number | null; ote: number | null } {
+    if (!salaryStr) return { base: null, ote: null };
+    const lower = salaryStr.toLowerCase();
+    // Detect whether the string explicitly mentions OTE / total / on-target
+    const isOteString = /\bote\b|\btotal\b|\bon.?target\b|\btake.?home\b/i.test(lower);
     const nums = salaryStr.match(/[\d,]+/g);
-    if (!nums) return false;
-    const highest = Math.max(...nums.map((n: string) => parseInt(n.replace(/,/g, ''), 10)));
-    if (isNaN(highest) || highest === 0 || highest < 1000) return false; // skip hourly-looking
-    return highest < minSalary;
+    if (!nums) return { base: null, ote: null };
+    const parsed = nums.map((n) => parseInt(n.replace(/,/g, ''), 10)).filter(n => !isNaN(n) && n >= 1000);
+    if (!parsed.length) return { base: null, ote: null };
+    // If the string looks like a range "120,000 - 180,000 OTE", use the highest as the OTE
+    const highest = Math.max(...parsed);
+    const lowest  = Math.min(...parsed);
+    if (isOteString) return { base: lowest > 50000 ? lowest : null, ote: highest };
+    // No explicit OTE marker — treat as base salary
+    return { base: highest, ote: null };
+  }
+
+  // Helper: returns true only when the salary is DEFINITIVELY known to fail BOTH constraints
+  function salaryKnownBelow(salaryStr: string | null | undefined): boolean {
+    if (!salaryStr) return false;
+    if (!minSalary && !minOte) return false;
+    const { base, ote } = parseSalaryFigures(salaryStr);
+    // Pass if base meets minimum base requirement
+    if (minSalary && base !== null && base >= minSalary) return false;
+    // Pass if OTE meets minimum OTE requirement
+    if (minOte && ote !== null && ote >= minOte) return false;
+    // Fail ONLY if there's a definitive figure that's below the relevant minimum
+    const hasDefinitiveFigure = base !== null || ote !== null;
+    if (!hasDefinitiveFigure) return false; // no info → don't gate
+    // Check each available figure against its minimum
+    if (minSalary && base !== null && base < minSalary && !ote) return true;
+    if (minOte    && ote  !== null && ote  < minOte    && !base) return true;
+    // Both figures present: only fail if BOTH are below their respective minimums
+    if (base !== null && ote !== null) {
+      const baseFails = minSalary ? base < minSalary : false;
+      const oteFails  = minOte    ? ote  < minOte    : false;
+      return baseFails && oteFails;
+    }
+    return false;
   }
 
   let updated = 0;
@@ -5068,7 +5101,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </div>
     </div>
     <div class="fg full">
-      <label>Vertical Niche Signals <span class="hint">(title keywords that push a role above your level — Federal, SLED, Healthcare, etc.)</span></label>
+      <label>Vertical Niche Keywords <span class="hint">(industry segments in your background — used to improve scoring context, does NOT affect tier classification)</span></label>
       <input type="text" id="set-niches-input" placeholder="e.g. federal, SLED, healthcare, FSI">
       <div class="tag-list" id="set-niches-tags"></div>
     </div>
