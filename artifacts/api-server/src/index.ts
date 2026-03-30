@@ -386,6 +386,9 @@ async function initDb(): Promise<void> {
   await safeAddColumn('jobs', 'source', "TEXT NOT NULL DEFAULT ''");
   await safeAddColumn('criteria', 'proxy_url', "TEXT NOT NULL DEFAULT ''");
   await safeAddColumn('jobs', 'description', 'TEXT');
+  await safeAddColumn('jobs', 'date_posted', 'TEXT');
+  await safeAddColumn('jobs', 'url_ok', 'BOOLEAN');
+  await safeAddColumn('jobs', 'url_checked_at', 'TIMESTAMPTZ');
   await safeAddColumn('jobs', 'is_hardware', 'BOOLEAN NOT NULL DEFAULT false');
   await safeAddColumn('jobs', 'created_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()');
   await safeAddColumn('jobs', 'status', "TEXT NOT NULL DEFAULT 'new'");
@@ -1129,8 +1132,20 @@ function enrichJobRecord(job: Record<string, unknown>, criteria: CriteriaForRepo
     // Gemini grounding data (null for non-Gemini jobs)
     gemini_web_search_queries: geminiWebSearchQueries,
     gemini_sources:            geminiSources.length > 0 ? geminiSources : undefined,
-    // is_live: we don't have real-time liveness checks yet; null = unknown
-    is_live: null,
+    // Freshness: job is "new" if found within last 48 h OR posted within 3 days
+    is_new: (() => {
+      const foundAt = job.found_at ? new Date(job.found_at as string) : null;
+      const now = Date.now();
+      if (foundAt && (now - foundAt.getTime()) < 48 * 60 * 60 * 1000) return true;
+      const dp = job.date_posted as string | null;
+      if (dp) {
+        const posted = new Date(dp);
+        if (!isNaN(posted.getTime()) && (now - posted.getTime()) < 3 * 24 * 60 * 60 * 1000) return true;
+      }
+      return false;
+    })(),
+    date_posted: job.date_posted ?? null,
+    url_ok:      job.url_ok      ?? null,
   };
 }
 
@@ -3231,6 +3246,61 @@ function buildTitleFilter(targetRoles: string[]): RegExp | null {
   return new RegExp(`(${unique.join('|')})`, 'i');
 }
 
+// ── Background URL health check ─────────────────────────────────────────────
+// Checks unchecked job URLs in batches of 12, marks url_ok true/false.
+// Runs entirely in the background — does not block the scout run.
+// Safe: never removes jobs; broken links are surfaced in the UI only.
+async function checkUrlHealthInBackground(jobIds?: number[]): Promise<void> {
+  try {
+    let rows: Array<{ id: number; apply_url: string }>;
+    if (jobIds && jobIds.length > 0) {
+      const { rows: r } = await pool.query(
+        `SELECT id, apply_url FROM jobs WHERE id = ANY($1) AND url_ok IS NULL LIMIT 200`,
+        [jobIds]
+      );
+      rows = r;
+    } else {
+      const { rows: r } = await pool.query(
+        `SELECT id, apply_url FROM jobs WHERE url_ok IS NULL ORDER BY found_at DESC LIMIT 200`
+      );
+      rows = r;
+    }
+    if (!rows.length) return;
+    console.log(`URL health check: checking ${rows.length} unchecked job URLs…`);
+    let ok = 0, broken = 0, skipped = 0;
+    const BATCH = 12;
+    for (let i = 0; i < rows.length; i += BATCH) {
+      const batch = rows.slice(i, i + BATCH);
+      await Promise.allSettled(batch.map(async ({ id, apply_url }) => {
+        // Skip LinkedIn — always requires auth; mark as unknown (null) not broken
+        if (apply_url.includes('linkedin.com')) { skipped++; return; }
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 6000);
+          const res = await fetch(apply_url, {
+            method: 'HEAD',
+            redirect: 'follow',
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobScout/1.0)' },
+            signal: ctrl.signal,
+          });
+          clearTimeout(timer);
+          const isOk = res.status < 400;
+          await pool.query(`UPDATE jobs SET url_ok=$1, url_checked_at=NOW() WHERE id=$2`, [isOk, id]);
+          if (isOk) ok++; else broken++;
+        } catch {
+          // Timeout or network error — leave url_ok as null (not marked broken)
+          skipped++;
+        }
+      }));
+      // Brief pause between batches to avoid hammering servers
+      if (i + BATCH < rows.length) await new Promise(r => setTimeout(r, 800));
+    }
+    console.log(`URL health check complete: ${ok} live, ${broken} broken, ${skipped} skipped`);
+  } catch (e) {
+    console.error('URL health check error:', e);
+  }
+}
+
 async function runScoutInBackground(runId: number): Promise<void> {
   try {
     const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
@@ -3267,7 +3337,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     for (const c of companies) { byType[(c as any).ats_type] = (byType[(c as any).ats_type] || 0) + 1; }
     console.log(`  Companies by ATS type:`, byType);
 
-    type Job = { title: string; company: string; location: string; salary?: string; applyUrl: string; description?: string; source: string; _fromJobSpy?: boolean; _fromGemini?: boolean };
+    type Job = { title: string; company: string; location: string; salary?: string; applyUrl: string; description?: string; datePosted?: string; source: string; _fromJobSpy?: boolean; _fromGemini?: boolean };
     const allJobs: Job[] = [];
     // Side-map: applyUrl → per-job metadata for Gemini-sourced jobs
     const geminiMetaByUrl = new Map<string, { groundingMetadata?: object; confidence?: number }>();
@@ -3663,7 +3733,9 @@ async function runScoutInBackground(runId: number): Promise<void> {
     console.log(`───────────────────────────────────────────────────────────`);
 
     for (const m of matches) {
-      const source = newJobs.find(j => j.applyUrl === m.applyUrl)?.source ?? '';
+      const matchedJob = newJobs.find(j => j.applyUrl === m.applyUrl);
+      const source = matchedJob?.source ?? '';
+      const datePosted = matchedJob?.datePosted ?? null;
       const loc = (m.location ?? '').trim();
       let finalTier: string;
 
@@ -3682,11 +3754,24 @@ async function runScoutInBackground(runId: number): Promise<void> {
       // Look up momentum warning for this company (if checked)
       const momWarning = momentumMap.get(m.company.toLowerCase().trim())?.warning ?? null;
       await pool.query(
-        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
          ON CONFLICT (apply_url) DO NOTHING`,
-        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), geminiMeta?.groundingMetadata ? JSON.stringify(geminiMeta.groundingMetadata) : null, geminiMeta?.confidence ?? null, momWarning]
+        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), geminiMeta?.groundingMetadata ? JSON.stringify(geminiMeta.groundingMetadata) : null, geminiMeta?.confidence ?? null, momWarning, datePosted]
       );
+    }
+
+    // ── Background URL health check (non-blocking) ──────────────────────────
+    // Runs after inserts so it doesn't slow down scoring; collects IDs of newly inserted jobs.
+    {
+      const { rows: newlyInserted } = await pool.query(
+        `SELECT id FROM jobs WHERE scout_run_id = $1`,
+        [runId]
+      );
+      const newIds = newlyInserted.map((r: any) => r.id as number);
+      if (newIds.length > 0) {
+        checkUrlHealthInBackground(newIds).catch(() => {});
+      }
     }
 
     await setStage(`${matches.length} matches saved — estimating salaries…`);
@@ -3868,6 +3953,9 @@ initDb()
       const n = await reclassifyJobsLocally();
       if (n > 0) console.log(`Startup reclassify: updated ${n} job tiers to match current logic`);
     } catch (e) { console.warn('Startup reclassify skipped:', e); }
+
+    // Background URL health check for any unchecked jobs (non-blocking)
+    checkUrlHealthInBackground().catch(() => {});
 
     // Start auto-scheduler: check immediately after 2 min, then every 15 min
     setTimeout(checkAutoRun, 2 * 60 * 1000);
@@ -4091,6 +4179,7 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .btn-reach{background:rgba(124,141,255,.12);color:#7c8dff;border:1px solid rgba(124,141,255,.3)}
 .btn-reach:hover{background:rgba(124,141,255,.22)}
 .btn-apply{background:var(--gold);color:#0f0f0f;font-weight:700}
+.btn-link-warn{background:rgba(229,83,83,.15)!important;color:#e55353!important;border:1px solid rgba(229,83,83,.4)!important}
 .score-row{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px}
 .score-val{color:var(--gold);font-size:13px;font-weight:600}
 .bar-bg{height:3px;background:#222;border-radius:2px}
@@ -5776,16 +5865,20 @@ function showJobsTab(tab) {
 }
 
 function isNew(j) {
+  // Prefer the API-computed is_new flag (also considers date_posted from source)
+  if (j.is_new === true) return true;
   if (!j.found_at) return false;
   var d = new Date(j.found_at);
-  var now = new Date();
-  var diff = now.getTime() - d.getTime();
-  return diff < 2 * 24 * 60 * 60 * 1000; // 2 days
+  return (Date.now() - d.getTime()) < 2 * 24 * 60 * 60 * 1000; // 48h
 }
 
 function jobAge(j) {
-  if (!j.found_at) return '';
-  var d = new Date(j.found_at);
+  // Prefer the actual posting date from the source over our discovery timestamp
+  var dateStr = j.date_posted || j.found_at;
+  if (!dateStr) return '';
+  var d = new Date(dateStr);
+  if (isNaN(d.getTime())) d = j.found_at ? new Date(j.found_at) : null;
+  if (!d || isNaN(d.getTime())) return '';
   var now = new Date();
   var diff = now.getTime() - d.getTime();
   var mins = Math.floor(diff / 60000);
@@ -5834,7 +5927,7 @@ function renderJobCard(j, opts) {
   var coLineParts = ['<span class="card-co-name" style="cursor:pointer;text-decoration:underline;text-underline-offset:2px;text-decoration-color:rgba(245,200,66,.3)" title="Filter to ' + esc(j.company) + ' jobs" onclick="filterToCompany(' + JSON.stringify(j.company) + ')">' + esc(j.company) + '</span>'];
   if (j.location) coLineParts.push(esc(j.location));
   if (ageTxt) coLineParts.push('<span>' + esc(ageTxt) + '</span>');
-  if (opts.showNew && isNew(j)) coLineParts.push('<span class="new-pill">NEW</span>');
+  if (isNew(j)) coLineParts.push('<span class="new-pill">\u2728 NEW</span>');
   if (opts.showSavedDate && j.saved_at) coLineParts.push('<span style="font-size:10px">saved ' + new Date(j.saved_at).toLocaleDateString() + '</span>');
 
   // Salary
@@ -5942,7 +6035,7 @@ function renderJobCard(j, opts) {
     ssHtml +
     // ── Actions
     '<div class="card-foot">' +
-      '<a href="' + esc(j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-apply btn-sm">Apply Now \u2192</a>' +
+      '<a href="' + esc(j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-apply btn-sm' + (j.url_ok === false ? ' btn-link-warn' : '') + '" title="' + (j.url_ok === false ? '\u26a0 Link may be broken or expired \u2014 try searching the company careers page' : 'Apply to this job') + '">Apply Now \u2192' + (j.url_ok === false ? ' \u26a0' : '') + '</a>' +
       reachBtn +
       '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ')">Tailor Resume</button>' +
       '<button class="btn btn-ghost btn-sm" data-jid="' + j.id + '" data-jtit="' + esc(j.title) + '" data-jco="' + esc(j.company) + '" onclick="openCoverLetter(this.dataset.jid,this.dataset.jtit,this.dataset.jco)">\u270D Cover Letter</button>' +

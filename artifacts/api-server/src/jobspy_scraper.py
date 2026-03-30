@@ -329,10 +329,12 @@ def concat_and_dedup(frames: list, source_tag: str) -> pd.DataFrame:
 def global_dedup(dfs: list) -> pd.DataFrame:
     """
     Cross-source dedup. When the same title+company appears on multiple sources,
-    the LinkedIn version is preferred (preserves the LinkedIn apply URL).
-    Priority: linkedin > indeed > glassdoor > ziprecruiter
+    Indeed is preferred over LinkedIn because Indeed fetches full descriptions and
+    provides more stable direct URLs. LinkedIn-exclusive jobs (not on Indeed) are
+    still included — they just don't win the dedup contest when Indeed also has them.
+    Priority: indeed > linkedin > glassdoor > ziprecruiter
     """
-    source_priority = {"linkedin": 0, "indeed": 1, "glassdoor": 2, "ziprecruiter": 3}
+    source_priority = {"indeed": 0, "linkedin": 1, "glassdoor": 2, "ziprecruiter": 3}
     all_dfs = [df for df in dfs if df is not None and not df.empty]
     if not all_dfs:
         return pd.DataFrame()
@@ -356,8 +358,68 @@ def global_dedup(dfs: list) -> pd.DataFrame:
 
 # ── Row → output dict ─────────────────────────────────────────────────────────
 
+# Known ATS domains — if job_url_direct contains one of these, it is the canonical apply URL
+ATS_DOMAINS = (
+    "boards.greenhouse.io",
+    "job-boards.greenhouse.io",
+    "jobs.greenhouse.io",
+    "jobs.lever.co",
+    "jobs.ashbyhq.com",
+    "ashby.com/jobs",
+    "myworkdayjobs.com",
+    "jobs.jobvite.com",
+    "hire.lever.co",
+    "apply.workable.com",
+    "bamboohr.com/jobs",
+    "smartrecruiters.com",
+    "recruiting.paylocity.com",
+    "jobs.icims.com",
+    "careers.jobscore.com",
+)
+
+# Regex to extract an ATS URL embedded anywhere in a job description
+_ATS_URL_RE = re.compile(
+    r'https?://(?:'
+    + "|".join(re.escape(d).replace(r"\.", r"\.") for d in ATS_DOMAINS)
+    + r')[^\s\)"\'<>]+',
+    re.IGNORECASE,
+)
+
+
+def best_apply_url(row: pd.Series) -> str:
+    """
+    Return the best available apply URL for a job row, in priority order:
+      1. job_url_direct if it resolves to a known ATS domain (most accurate)
+      2. A direct ATS URL extracted from the job description
+      3. job_url_direct (any direct URL, better than the aggregator link)
+      4. job_url (aggregator fallback)
+    """
+    agg_url    = str(row.get("job_url",        "") or "").strip()
+    direct_url = str(row.get("job_url_direct", "") or "").strip()
+    if direct_url == "nan": direct_url = ""
+    if agg_url    == "nan": agg_url    = ""
+
+    # Priority 1: direct URL that is a known ATS domain
+    if direct_url and any(d in direct_url for d in ATS_DOMAINS):
+        return direct_url
+
+    # Priority 2: ATS URL embedded in the description
+    desc = str(row.get("description") or "")
+    if desc and desc != "nan":
+        m = _ATS_URL_RE.search(desc)
+        if m:
+            return m.group(0).rstrip(".,;)")
+
+    # Priority 3: any direct URL (even aggregator-direct, better than /viewjob redirect)
+    if direct_url and direct_url.startswith("http"):
+        return direct_url
+
+    # Priority 4: aggregator fallback
+    return agg_url
+
+
 def row_to_job(row: pd.Series) -> dict | None:
-    apply_url = str(row.get("job_url", ""))
+    apply_url = best_apply_url(row)
     if not apply_url or apply_url == "nan":
         return None
 
@@ -385,15 +447,24 @@ def row_to_job(row: pd.Series) -> dict | None:
     desc = row.get("description")
     desc_str = str(desc)[:3000] if pd.notna(desc) and desc else None
 
-    job = {
+    # Date posted — use real date from source when available
+    date_posted_val = row.get("date_posted")
+    date_posted_str: str | None = None
+    if date_posted_val is not None and pd.notna(date_posted_val):
+        date_posted_str = str(date_posted_val)
+        if date_posted_str in ("nan", "None", "NaT", ""):
+            date_posted_str = None
+
+    job: dict = {
         "title":    str(row.get("title",   "Unknown")),
         "company":  str(row.get("company", "Unknown")),
         "location": job_location,
         "applyUrl": apply_url,
         "source":   str(row.get("_source", "jobspy")),
     }
-    if salary:   job["salary"]      = salary
-    if desc_str: job["description"] = desc_str
+    if salary:          job["salary"]      = salary
+    if desc_str:        job["description"] = desc_str
+    if date_posted_str: job["datePosted"]  = date_posted_str
     return job
 
 

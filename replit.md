@@ -12,7 +12,8 @@ A full-stack automated job search agent that discovers job listings via a **hybr
 - **Database**: PostgreSQL (Replit built-in)
 - **AI**: Anthropic Claude — `claude-haiku-4-5` (scoring/research/salary), `claude-sonnet-4-5` (resume tailoring)
 - **Frontend**: Server-rendered HTML templates embedded in index.ts (single-file approach)
-- **Job scraping**: Direct API calls to Greenhouse, Lever, Workday REST APIs; JobSpy Python script for Indeed
+- **Job scraping**: Direct API calls to Greenhouse, Lever, Workday REST APIs; JobSpy Python script for Indeed/LinkedIn/Glassdoor
+- **URL health check**: Background HEAD-request checker marks `url_ok` on all job links; broken links surface as warnings in UI without removing jobs
 
 ## Project Structure
 
