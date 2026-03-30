@@ -156,55 +156,54 @@ export function needsRecovery(job: {
 // ── ATS-specific description fetchers ────────────────────────────────────────
 
 /**
- * Greenhouse public JSON API — no auth required.
- * Returns clean structured job data from boards.greenhouse.io/{co}/jobs/{id}.json
+ * Greenhouse public JSON API by slug + job ID — called directly when slug is known.
  */
-async function fetchFromGreenhouseApi(url: string): Promise<FetchedJobData | null> {
-  const match = url.match(/greenhouse\.io\/([^/?#]+)\/jobs\/(\d+)/i);
-  if (!match) return null;
-  const [, company, jobId] = match;
-
-  // Determine if this is a job-boards.greenhouse.io URL (newer subdomain)
-  const isJobBoards = url.includes('job-boards.greenhouse.io');
-
-  // Try both API endpoints: preserve original subdomain first, then the other
-  const apiUrls = isJobBoards
-    ? [
-        `https://job-boards.greenhouse.io/${company}/jobs/${jobId}.json`,
-        `https://boards.greenhouse.io/${company}/jobs/${jobId}.json`,
-      ]
-    : [
-        `https://boards.greenhouse.io/${company}/jobs/${jobId}.json`,
-        `https://job-boards.greenhouse.io/${company}/jobs/${jobId}.json`,
-      ];
-
+async function fetchFromGreenhouseApiBySlugAndId(slug: string, jobId: string): Promise<FetchedJobData | null> {
+  const apiUrls = [
+    `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs/${jobId}?content=true`,
+    `https://job-boards.greenhouse.io/${slug}/jobs/${jobId}.json`,
+    `https://boards.greenhouse.io/${slug}/jobs/${jobId}.json`,
+  ];
   for (const apiUrl of apiUrls) {
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 10000);
       const res = await fetch(apiUrl, {
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobScout/1.0)', Accept: 'application/json' },
+        redirect: 'follow',
         signal: ctrl.signal,
       });
       clearTimeout(timer);
       if (!res.ok) continue;
-
       const data = await res.json() as Record<string, unknown>;
-      // Make sure we got actual job data (has a title field), not an error page
       if (!data.title && !data.content) continue;
-
       const rawHtml = (data.content as string) ?? '';
-      const desc = rawHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 6000);
+      const desc = rawHtml
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+        .replace(/\s+/g, ' ').trim().slice(0, 6000);
       const location = (data.location as { name?: string } | undefined)?.name;
       const title = (data.title as string) || undefined;
-
-      // Sanity check: if the fetched title is unrelated to what we expect, skip
       if (!title && !desc) continue;
-
       return { title, location, description: desc || undefined, postedAt: (data.updated_at as string) || undefined, pageType: 'job_detail', sourceApi: 'greenhouse' };
     } catch { /* try next */ }
   }
   return null;
+}
+
+/**
+ * Greenhouse public JSON API — no auth required.
+ * Uses the official boards-api.greenhouse.io/v1/boards/{co}/jobs/{id}?content=true endpoint.
+ * Also attempts the legacy boards.greenhouse.io/{co}/jobs/{id}.json as fallback.
+ */
+async function fetchFromGreenhouseApi(url: string): Promise<FetchedJobData | null> {
+  // Extract slug + ID from standard greenhouse.io URL path
+  const match = url.match(/greenhouse\.io\/([^/?#]+)\/jobs\/(\d+)/i);
+  if (!match) return null;
+  const [, company, jobId] = match;
+  return fetchFromGreenhouseApiBySlugAndId(company, jobId);
 }
 
 /**
@@ -579,10 +578,10 @@ export async function fetchJobDescriptionFromCanonicalUrl(url: string): Promise<
 export async function enrichJobsPreScoring(
   jobs: Array<{ applyUrl: string; description?: string | null; title?: string; company?: string; location?: string }>,
 ): Promise<{ enriched: number; skipped: number }> {
-  // Only target jobs with ATS URLs and missing/short descriptions
+  // Target jobs with ATS URLs or gh_jid embedded in company career page
   const targets = jobs.filter(j => {
     const url = (j.applyUrl ?? '').toLowerCase();
-    const isAts = url.includes('greenhouse.io') || url.includes('lever.co') || url.includes('ashbyhq.com');
+    const isAts = url.includes('greenhouse.io') || url.includes('lever.co') || url.includes('ashbyhq.com') || url.includes('gh_jid=');
     const descLen = (j.description ?? '').replace(/<[^>]+>/g, '').trim().length;
     return isAts && descLen < 200;
   });
@@ -597,10 +596,16 @@ export async function enrichJobsPreScoring(
     await Promise.all(batch.map(async (job) => {
       try {
         let fetched: FetchedJobData | null;
-        if (job.applyUrl.toLowerCase().includes('ashbyhq.com')) {
-          fetched = await fetchFromAshbyApiWithTitle(job.applyUrl, job.title ?? '');
+        const url = job.applyUrl ?? '';
+        const ghJidMatch = url.match(/[?&]gh_jid=(\d+)/);
+        if (ghJidMatch && job.company) {
+          // Derive slug from company name as best-effort (works for simple names like databricks)
+          const slug = job.company.toLowerCase().replace(/[^a-z0-9]/g, '');
+          fetched = await fetchFromGreenhouseApiBySlugAndId(slug, ghJidMatch[1]);
+        } else if (url.toLowerCase().includes('ashbyhq.com')) {
+          fetched = await fetchFromAshbyApiWithTitle(url, job.title ?? '');
         } else {
-          fetched = await fetchJobDescriptionFromCanonicalUrl(job.applyUrl);
+          fetched = await fetchJobDescriptionFromCanonicalUrl(url);
         }
         if (fetched?.description && !isListingPageDescription(fetched.description)) {
           job.description = fetched.description;
@@ -833,6 +838,7 @@ async function writeRecoveryResult(
          validation_notes           = $6,
          resolved_title             = COALESCE($7, resolved_title),
          resolved_description       = COALESCE($8, resolved_description),
+         description                = COALESCE($8, description),
          resolved_location          = COALESCE($9, resolved_location),
          resolved_metadata_json     = COALESCE($10, resolved_metadata_json),
          metadata_last_verified_at  = NOW(),
@@ -898,19 +904,28 @@ export async function runCanonicalResolutionInBackground(
     const params: unknown[] = jobIds?.length ? [jobIds] : [];
 
     // ── PHASE A: Direct ATS description fetch (fast, parallel) ───────────────
-    // Jobs that already have a good ATS URL but are missing/short descriptions.
+    // Covers two cases:
+    //  1. Jobs with direct ATS URLs (greenhouse.io, lever.co, etc.)
+    //  2. Jobs on company career pages that embed a Greenhouse job ID via ?gh_jid=
+    // Excludes permanently-failed jobs to avoid repeated no-op retries.
     const { rows: atsJobs } = await pool.query(`
       SELECT j.id, j.title, j.company, j.location, j.apply_url, j.description,
              j.match_score, j.url_ok, j.canonical_url, j.canonical_source,
-             j.validation_status
+             j.validation_status,
+             c.ats_slug AS company_ats_slug, c.ats_type AS company_ats_type
       FROM jobs j
-      WHERE j.validation_status NOT IN ('validated', 'recovered')
-        AND j.canonical_source = 'ats_direct'
-        AND j.url_ok IS NOT FALSE
+      LEFT JOIN companies c ON LOWER(c.name) = LOWER(j.company) AND c.ats_slug IS NOT NULL
+      WHERE j.validation_status NOT IN ('validated', 'recovered', 'failed')
         AND (j.description IS NULL OR LENGTH(j.description) < 120)
+        AND (
+          -- Standard ATS direct links (greenhouse/lever/ashby with real URL)
+          (j.canonical_source = 'ats_direct' AND j.url_ok IS NOT FALSE)
+          -- Company career pages embedding a Greenhouse job ID via ?gh_jid=
+          OR (j.apply_url LIKE '%gh_jid=%' AND j.canonical_source IN ('original', 'company_career'))
+        )
         ${scopeClause}
       ORDER BY j.match_score DESC NULLS LAST
-      LIMIT 50
+      LIMIT 60
     `, params);
 
     if (atsJobs.length) {
@@ -924,19 +939,32 @@ export async function runCanonicalResolutionInBackground(
             const url: string = job.canonical_url ?? job.apply_url ?? '';
             if (!url) { aFail++; return; }
 
-            // Use title+location-aware Ashby fetcher; generic dispatcher for everything else
-            let fetchedData: FetchedJobData | null;
-            if (url.toLowerCase().includes('ashbyhq.com')) {
+            let fetchedData: FetchedJobData | null = null;
+
+            // Check for ?gh_jid= style Greenhouse embedding (e.g. Databricks career page)
+            const ghJidMatch = url.match(/[?&]gh_jid=(\d+)/);
+            if (ghJidMatch) {
+              const jobId = ghJidMatch[1];
+              const slug: string = job.company_ats_slug ?? job.company?.toLowerCase().replace(/\s+/g, '');
+              if (slug) {
+                fetchedData = await fetchFromGreenhouseApiBySlugAndId(slug, jobId);
+              }
+            } else if (url.toLowerCase().includes('ashbyhq.com')) {
               fetchedData = await fetchFromAshbyApiWithTitle(url, job.title ?? '', job.location ?? '');
             } else {
               fetchedData = await fetchJobDescriptionFromCanonicalUrl(url);
             }
 
-            // If Ashby returned a real canonical URL (jobUrl from their API), use it
-            const effectiveCanonicalUrl = fetchedData?.resolvedUrl ?? url;
+            // For gh_jid jobs, use the canonical Greenhouse URL as the recovered URL
+            let effectiveCanonicalUrl = fetchedData?.resolvedUrl ?? url;
+            if (ghJidMatch && fetchedData?.description && job.company_ats_slug) {
+              const ghUrl = `https://job-boards.greenhouse.io/${job.company_ats_slug}/jobs/${ghJidMatch[1]}`;
+              effectiveCanonicalUrl = ghUrl;
+            }
 
+            const canonSrc = (ghJidMatch && fetchedData?.description) ? 'ats_direct' : (job.canonical_source ?? 'ats_direct');
             const status = await writeRecoveryResult(
-              pool, job.id, effectiveCanonicalUrl, job.canonical_source ?? 'ats_direct',
+              pool, job.id, effectiveCanonicalUrl, canonSrc,
               false, fetchedData, job.apply_url ?? '',
             );
             if (status === 'validated' || status === 'recovered') {

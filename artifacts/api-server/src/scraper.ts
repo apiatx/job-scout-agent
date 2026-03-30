@@ -16,6 +16,8 @@ interface GreenhouseJob {
   title: string;
   absolute_url: string;
   location?: { name: string };
+  content?: string;      // HTML job description (returned when ?content=true)
+  metadata?: Array<{ id: number; name: string; value: string }>;
 }
 
 interface LeverJob {
@@ -45,12 +47,28 @@ export async function scrapeGreenhouseJobs(slug: string, companyName: string): P
       const data = (await response.json()) as { jobs?: GreenhouseJob[] };
       if (!data.jobs) return [];
       console.log(`Greenhouse: found ${data.jobs.length} jobs at ${slug}`);
-      return data.jobs.map((job) => ({
-        title: job.title,
-        company: companyName,
-        location: job.location?.name ?? 'Unknown',
-        applyUrl: job.absolute_url,
-      }));
+      return data.jobs.map((job) => {
+        // Strip HTML from content field and extract salary from metadata
+        const rawDesc = job.content ?? '';
+        const plainDesc = rawDesc
+          .replace(/<script[\s\S]*?<\/script>/gi, '')
+          .replace(/<style[\s\S]*?<\/style>/gi, '')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 4000);
+        // Extract salary from Greenhouse metadata if available
+        const salaryMeta = job.metadata?.find(m => /salary|compensation|pay/i.test(m.name));
+        return {
+          title: job.title,
+          company: companyName,
+          location: job.location?.name ?? 'Unknown',
+          applyUrl: job.absolute_url,
+          description: plainDesc.length >= 50 ? plainDesc : undefined,
+          salary: salaryMeta?.value ?? undefined,
+        };
+      });
     } catch (e) {
       if (attempt === 0) {
         console.log(`Greenhouse: timeout/error for '${slug}', retrying in 2s...`);

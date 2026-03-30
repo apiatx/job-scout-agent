@@ -212,12 +212,22 @@ async function scoreOne(
       const lines: string[] = [];
       if (minSalary) lines.push(`  - Min BASE salary: $${minSalary.toLocaleString()}`);
       if (minOte)    lines.push(`  - Min OTE (total on-target earnings): $${minOte.toLocaleString()}`);
-      salaryRule = `COMPENSATION MINIMUMS:\n${lines.join('\n')}\nRules (apply carefully):\n` +
-        `  1. If the JD explicitly states a BASE salary figure: compare it to min BASE. Below min → score 0.\n` +
-        `  2. If the JD explicitly states an OTE/total comp figure: compare it to min OTE. Below min → score 0.\n` +
-        `  3. A job PASSES if EITHER condition is satisfied (base ≥ min base OR OTE ≥ min OTE).\n` +
-        `  4. If NO salary info is stated at all: score 10 — never penalize for missing info.\n` +
-        `  5. If you cannot clearly tell base from OTE: treat the figure as OTE.`;
+      salaryRule = `COMPENSATION MINIMUMS:\n${lines.join('\n')}\n\nCOMPENSATION ANALYSIS RULES (apply in order):\n\n` +
+        `STEP 1 — Extract salary figures from the job description. Look for: base salary, base pay, OTE, total compensation, on-target earnings, total package, variable, commission. Salary figures may appear anywhere in the description.\n\n` +
+        `STEP 2 — Derive base salary using ROLE-TYPE SPLITS when only OTE is stated:\n` +
+        `  • Account Executive (AE), Sales Executive, Account Director: 50% base / 50% variable → implied base = OTE × 0.50\n` +
+        `  • Account Manager (AM), Customer Success Manager: 70% base / 30% variable → implied base = OTE × 0.70\n` +
+        `  • SDR, BDR, Sales Development Rep: 50% base / 50% variable → implied base = OTE × 0.50\n` +
+        `  • Sales Director, VP of Sales: 60% base / 40% variable → implied base = OTE × 0.60\n` +
+        `  • Sales Representative (generic, unclear type): conservative 40% base → implied base = OTE × 0.40\n` +
+        `  • If role type is ambiguous: use 50% split as the default\n\n` +
+        `STEP 3 — Score based on derived or explicit base vs the minimum:\n` +
+        `  20: Base clearly meets/exceeds minimum (explicit or derived from OTE split)\n` +
+        `  15: Base is within 10% below minimum (close)\n` +
+        `  10: No salary info anywhere in the description — cannot penalize, genuinely unknown\n` +
+        `  5:  Base derived from OTE split is 10-25% below minimum\n` +
+        `  0:  Base explicitly stated OR derived from OTE split is clearly below minimum\n\n` +
+        `IMPORTANT: If the JD lists OTE but not base, you MUST derive implied base using the split above. Do NOT default to score 10 just because "base isn't explicitly listed" — the OTE split gives you the answer.`;
     } else {
       salaryRule = 'No salary minimum set. Score compensationFit=10 if no salary listed.';
     }
@@ -294,16 +304,12 @@ COMPONENT 2 — companyQuality (0-25 points):
 
 COMPONENT 3 — compensationFit (0-20 points):
   ${salaryRule}
-  20: Salary listed and clearly meets/exceeds minimum
-  15: Salary within 10% below minimum (close), OR no salary listed but company+segment clearly pays above minimum
-  10: No salary listed and genuinely uncertain about this company's comp for this role/segment
-  5:  No salary listed but company+segment is known to pay BELOW the user's minimum (e.g., MM AE at a mid-tier SaaS company that typically pays $75-95K base when minimum is $120K)
-  0:  Salary listed and clearly below minimum
-  CRITICAL for unlisted salary: Do NOT default to 10 for all unlisted salaries. Use your knowledge:
-  - "Commercial AE" / "MM AE" at premium companies (Pure Storage, Palo Alto Networks, Cisco, CrowdStrike, Datadog, Databricks, F5, NetApp, Dell) → typically $130-160K base → score 15-18
-  - "Commercial AE" / "MM AE" at mid-tier SaaS (Samsara, most Series B/C companies, companies known for high volume/low quota) → typically $70-95K base when user minimum is $120K → score 3-5
-  - Enterprise AE at any reputable B2B SaaS/hardware company → typically $150K+ base → score 18-20
-  - Score 10 only when you genuinely have no information about typical comp ranges for this specific company+segment combination
+  (Scoring summary for quick reference — see full rules above)
+  20: Base clearly meets/exceeds minimum (explicit or OTE-derived via split)
+  15: Base within 10% below minimum, or close
+  10: Genuinely no salary/OTE info anywhere in the description
+  5:  OTE-derived base is 10-25% below minimum
+  0:  Base explicitly stated or OTE-derived and clearly below minimum
 
 COMPONENT 4 — locationFit (0-15 points):
   15: Remote US or explicitly in candidate's preferred locations

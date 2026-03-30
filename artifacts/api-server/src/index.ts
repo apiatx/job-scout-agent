@@ -2190,11 +2190,16 @@ app.get('/api/jobs/rescore-status', async (_req, res: Response) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-app.post('/api/jobs/rescore-all', async (_req, res: Response) => {
+app.post('/api/jobs/rescore-all', async (req, res: Response) => {
   if (rescoreRunning) { res.json({ started: false, message: 'Rescore already running' }); return; }
   try {
-    const { rows: unscored } = await pool.query(`SELECT * FROM jobs WHERE opportunity_tier='unscored' ORDER BY found_at DESC`);
-    if (unscored.length === 0) { res.json({ started: false, message: 'All jobs already scored', count: 0 }); return; }
+    const forceRescore = req.query.force === 'true' || (req.body as any)?.force === true;
+    // In force mode, rescore all jobs that have descriptions (descriptions may have been enriched since last score)
+    const jobQuery = forceRescore
+      ? `SELECT * FROM jobs WHERE description IS NOT NULL AND LENGTH(description) >= 50 ORDER BY match_score DESC NULLS LAST`
+      : `SELECT * FROM jobs WHERE opportunity_tier='unscored' ORDER BY found_at DESC`;
+    const { rows: unscored } = await pool.query(jobQuery);
+    if (unscored.length === 0) { res.json({ started: false, message: forceRescore ? 'No jobs with descriptions found' : 'All jobs already scored', count: 0 }); return; }
     const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
     if (cRows.length === 0) { res.status(400).json({ error: 'No criteria configured' }); return; }
     const criteria = cRows[0] as any;
@@ -2380,20 +2385,7 @@ async function reclassifyJobsLocally(): Promise<number> {
       // Hard filter 5: territory mismatch only (segment is NOT a hard block — comp handles it)
       const badTerritory = _isExcludedTerritory(j.title ?? '');
 
-      // Hard filter 6: known compensation below minimum (company+segment intel, no salary required)
-      // Used for well-known cases where typical comp is documented and clearly below user's minimum.
-      // Prevents old v1-format scores (no compensationFit field) from floating into Top Targets.
-      const knownBelowMinComp = (() => {
-        if (!minSalary || minSalary < 100_000) return false;
-        const co = (j.company ?? '').toLowerCase();
-        const t  = (j.title   ?? '').toLowerCase();
-        const isCommercialOrMM = /\b(commercial|mid[\s-]?market|midmarket)\b/.test(t);
-        // Samsara Commercial/MM AE: documented $70-95K base (well below $120K+ minimums)
-        if (co.includes('samsara') && isCommercialOrMM) return true;
-        return false;
-      })();
-
-      if (!titleMatches || hasAvoid || !locationOk || belowSalary || knownBelowMinComp || badTerritory) {
+      if (!titleMatches || hasAvoid || !locationOk || belowSalary || badTerritory) {
         tier = 'Probably Skip';
       } else if (j.sub_scores && j.match_score !== null) {
         const s: SubScores = typeof j.sub_scores === 'string' ? JSON.parse(j.sub_scores) : j.sub_scores;
@@ -3768,21 +3760,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
       droppedByTerritory = before - preFiltered.length;
     }
 
-    // Apply known-low-comp filter: company+segment combos documented to pay below user minimum
-    // These are blocked BEFORE Claude scoring since there's no upside in spending API budget on them
-    let droppedByKnownComp = 0;
-    if (criteria.min_salary && criteria.min_salary >= 100_000) {
-      const before = preFiltered.length;
-      preFiltered = preFiltered.filter(j => {
-        const co = (j.company ?? '').toLowerCase();
-        const t  = (j.title  ?? '').toLowerCase();
-        const isCommercialOrMM = /\b(commercial|mid[\s-]?market|midmarket)\b/.test(t);
-        // Samsara Commercial/MM: $70-95K base, well below typical $120K+ minimums
-        if (co.includes('samsara') && isCommercialOrMM) return false;
-        return true;
-      });
-      droppedByKnownComp = before - preFiltered.length;
-    }
+    let droppedByKnownComp = 0; // reserved for future use
 
     console.log(`\n──── PRE-FILTERS (before Claude scoring) ───────────────────`);
     console.log(`  After title filter: ${toScore.length}`);
@@ -3953,10 +3931,10 @@ async function runScoutInBackground(runId: number): Promise<void> {
       // Look up momentum warning for this company (if checked)
       const momWarning = momentumMap.get(m.company.toLowerCase().trim())?.warning ?? null;
       await pool.query(
-        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, original_url, original_title, original_description, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_score, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, original_url, original_title, original_description, description, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_score, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
          ON CONFLICT (apply_url) DO NOTHING`,
-        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.applyUrl, m.title, m.description ?? null, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskScore ?? null, m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), geminiMeta?.groundingMetadata ? JSON.stringify(geminiMeta.groundingMetadata) : null, geminiMeta?.confidence ?? null, momWarning, datePosted]
+        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.applyUrl, m.title, m.description ?? null, m.description ?? null, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskScore ?? null, m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), geminiMeta?.groundingMetadata ? JSON.stringify(geminiMeta.groundingMetadata) : null, geminiMeta?.confidence ?? null, momWarning, datePosted]
       );
     }
 
@@ -4954,7 +4932,8 @@ textarea:focus,input:focus{border-color:var(--gold)}
       <div class="rescore-msg"><strong id="rescore-msg-main">Scoring your library...</strong></div>
       <div class="rescore-progress" id="rescore-progress-msg"></div>
     </div>
-    <button class="btn btn-gold btn-sm" id="rescore-btn" onclick="startRescore()">Score All Jobs</button>
+    <button class="btn btn-gold btn-sm" id="rescore-btn" onclick="startRescore(false)">Score All Jobs</button>
+    <button class="btn btn-ghost btn-sm" id="force-rescore-btn" onclick="if(confirm('Re-score all 127 jobs with descriptions using current criteria and OTE rules? This uses AI credits and takes a few minutes.')){startRescore(true)}" title="Re-score all jobs that have descriptions, even if already scored. Use after criteria changes or description enrichment." style="font-size:11px">↺ Force Rescore</button>
     <button class="btn btn-ghost btn-sm" id="conf-filter-btn" onclick="toggleConfidenceFilter()" title="Hide jobs with broken or unresolved links" style="font-size:11px">\uD83D\uDD17 Show broken links</button>
   </div>
   <div class="jobs-sort-bar">
@@ -6032,37 +6011,41 @@ async function checkRescoreStatus() {
     _rescoreUnscored = data.unscored || 0;
     var banner = document.getElementById('rescore-banner');
     var btn = document.getElementById('rescore-btn');
+    var forceBtn = document.getElementById('force-rescore-btn');
     var msgMain = document.getElementById('rescore-msg-main');
     var msgProg = document.getElementById('rescore-progress-msg');
-    if (_rescoreUnscored > 0 || _rescoreRunning) {
+    if (_rescoreRunning) {
       banner.classList.remove('hidden');
-      if (_rescoreRunning) {
-        msgMain.textContent = 'Scoring in progress\u2026';
-        var done = _rescoreTotal - _rescoreUnscored;
-        msgProg.textContent = done + ' of ' + _rescoreTotal + ' scored \u2014 refresh to see results';
-        btn.textContent = 'Scoring\u2026';
-        btn.disabled = true;
-        if (!_rescore_pollTimer) _rescore_pollTimer = setInterval(function() { checkRescoreStatus(); loadJobs(); }, 8000);
-      } else {
-        msgMain.textContent = _rescoreUnscored + ' unscored jobs in your library';
-        msgProg.textContent = 'Click "Score All Jobs" to classify them into tiers';
-        btn.textContent = 'Score All Jobs';
-        btn.disabled = false;
-        if (_rescore_pollTimer) { clearInterval(_rescore_pollTimer); _rescore_pollTimer = null; }
-      }
+      msgMain.textContent = 'Scoring in progress\u2026';
+      var done = _rescoreTotal - _rescoreUnscored;
+      msgProg.textContent = done + ' of ' + _rescoreTotal + ' scored \u2014 refresh to see results';
+      btn.textContent = 'Scoring\u2026';
+      btn.disabled = true;
+      if (forceBtn) { forceBtn.disabled = true; forceBtn.textContent = 'Scoring\u2026'; }
+      if (!_rescore_pollTimer) _rescore_pollTimer = setInterval(function() { checkRescoreStatus(); loadJobs(); }, 8000);
+    } else if (_rescoreUnscored > 0) {
+      banner.classList.remove('hidden');
+      msgMain.textContent = _rescoreUnscored + ' unscored jobs in your library';
+      msgProg.textContent = 'Click "Score All Jobs" to classify them into tiers';
+      btn.textContent = 'Score All Jobs';
+      btn.disabled = false;
+      if (forceBtn) { forceBtn.disabled = false; forceBtn.textContent = '\u21ba Force Rescore'; }
+      if (_rescore_pollTimer) { clearInterval(_rescore_pollTimer); _rescore_pollTimer = null; }
     } else {
       banner.classList.add('hidden');
+      if (forceBtn) { forceBtn.disabled = false; forceBtn.textContent = '\u21ba Force Rescore'; }
       if (_rescore_pollTimer) { clearInterval(_rescore_pollTimer); _rescore_pollTimer = null; }
     }
   } catch(e) {}
 }
 
-async function startRescore() {
-  var btn = document.getElementById('rescore-btn');
+async function startRescore(force) {
+  var btn = document.getElementById(force ? 'force-rescore-btn' : 'rescore-btn');
   btn.disabled = true;
   btn.textContent = 'Starting\u2026';
   try {
-    var res = await fetch('/api/jobs/rescore-all', { method: 'POST' });
+    var url = force ? '/api/jobs/rescore-all?force=true' : '/api/jobs/rescore-all';
+    var res = await fetch(url, { method: 'POST' });
     var data = await res.json();
     if (data.started) {
       _rescoreRunning = true;

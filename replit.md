@@ -15,7 +15,7 @@ A full-stack automated job search agent that discovers job listings via a **hybr
 - **Job scraping**: Direct API calls to Greenhouse, Lever, Workday REST APIs; JobSpy Python script for Indeed/LinkedIn/Glassdoor
 - **URL health check**: Background HEAD-request checker marks `url_ok` on all job links; broken links surface as warnings in UI
 - **Job Recovery Engine** (`link_validator.ts`): Two-phase background system that replaces bad scraped data in the DB record itself (not suppression — recovery):
-  - **Phase A (fast, parallel)**: Fetches real job descriptions from Greenhouse/Lever public JSON APIs for ATS-direct jobs with missing/short descriptions. Runs 10 concurrent fetches. No Gemini needed, no rate limits. Tries both `boards.greenhouse.io` and `job-boards.greenhouse.io` subdomains.
+  - **Phase A (fast, parallel)**: Fetches real job descriptions from Greenhouse/Lever public JSON APIs for ATS-direct jobs with missing/short descriptions. Runs 10 concurrent fetches. No Gemini needed, no rate limits. Uses official `boards-api.greenhouse.io/v1/boards/{slug}/jobs/{id}?content=true` API (NOT the HTML URL with `.json`). Also handles company career pages embedding Greenhouse IDs via `?gh_jid=` parameter (e.g. Databricks) by joining with `companies.ats_slug`. Excludes `validation_status='failed'` jobs to prevent infinite retry loops. Writes fetched description to BOTH `description` AND `resolved_description` columns.
   - **Phase B (slow, sequential)**: Uses Gemini grounded web search to find canonical ATS URLs for aggregator-sourced (LinkedIn/Indeed/etc.) and broken-link jobs. Capped at 15 jobs/run with 1.5s between calls.
   - **Display fields**: `enrichJobRecord()` returns `display_title`, `display_description`, `display_url`, `display_location` — prefer resolved/recovered data over original scraped data, with guards against listing-page content (e.g. "Current openings at X").
   - **Validation status badge**: Cards show "✔ Recovered" (teal), "✔ Verified" (green), "✔ Direct" (faint green) based on `validation_status` field.
@@ -204,6 +204,7 @@ Logic:
 - `GET /api/jobs` — Returns all jobs with tier/score/status
 - `PATCH /api/jobs/{id}/status`, `POST /api/jobs/{id}/generate-docs`
 - `POST /api/jobs/rescore-all` — Re-score all unscored jobs with Claude (batches of 6)
+- `POST /api/jobs/rescore-all?force=true` — Re-score ALL jobs that have descriptions (≥50 chars), even if already scored. Use after description enrichment or criteria changes. Returns `{started, count}`. UI button: "↺ Force Rescore" with confirm dialog.
 - `POST /api/jobs/reclassify-local` — Re-classify all scored jobs using stored sub_scores (no AI calls)
 - `POST /api/scout/run`, `GET /api/scout/status`, `GET /api/scout/auto-status`
 - `POST /api/jobs/{id}/outreach` — Claude-generated LinkedIn DM (connection request + follow-up DM)
