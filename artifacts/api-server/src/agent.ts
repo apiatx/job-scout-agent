@@ -83,6 +83,7 @@ interface CriteriaForAgent {
   preApprovedCompanies?: string[];
   tierSettings?: TierSettings;
   candidateResume?: string;    // raw resume text for qualification matching
+  acceptedExperienceLevels?: string[]; // e.g. ['mid','senior'] — from experience_levels DB field
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -275,12 +276,13 @@ SCORING — 5 COMPONENTS (they sum to matchScore 0-100)
 ═══════════════════════════════════════════════════
 
 COMPONENT 1 — roleFit (0-30 points):
-  30: Exact target-role title match at correct seniority level (Enterprise AE when candidate is Enterprise-level)
-  20: Close match — same level, slightly different title
-  12: Related role, OR correct title but WRONG SEGMENT (e.g., "Commercial AE" / "Mid-Market AE" / "SMB AE" when candidate's history is Enterprise). Segment mismatch always caps roleFit at 12.
-  5:  Wrong level (too junior or senior for candidate)
+  30: Exact match — correct role title AND seniority level AND segment (e.g., Enterprise AE for an Enterprise-level candidate)
+  22: Correct role title and level but different SEGMENT (e.g., "Commercial AE" or "Mid-Market AE" when candidate is Enterprise-level but has Commercial AE in their target seniority settings). Lower segment = slight mismatch but not disqualifying.
+  20: Close title match — same level, slightly different wording
+  12: Related role (e.g., SDR, CSM, Solutions Engineer) — not exactly what they're targeting
+  5:  Wrong seniority level (too junior or too senior)
   0:  Wrong role type entirely (engineering, HR, marketing, etc.)
-  IMPORTANT: If the title explicitly says "Commercial", "Mid-Market", "Mid Market", "MM", or "SMB" and the candidate's resume shows $500K+ Enterprise deals, this is a segment mismatch — cap roleFit at 12 maximum.
+  NOTE: "Commercial" and "Mid-Market" in a title represent a sales segment, not a title mismatch. If the candidate explicitly includes Commercial/MM in their target seniority settings, these are acceptable — score 22 for segment step-down, not 12.
 
 COMPONENT 2 — companyQuality (0-25 points):
   Use momentum context above if provided.
@@ -293,10 +295,15 @@ COMPONENT 2 — companyQuality (0-25 points):
 COMPONENT 3 — compensationFit (0-20 points):
   ${salaryRule}
   20: Salary listed and clearly meets/exceeds minimum
-  15: Salary within 10% below minimum (close)
-  10: No salary listed — cannot penalize
-  5:  No salary listed, company known for low pay
+  15: Salary within 10% below minimum (close), OR no salary listed but company+segment clearly pays above minimum
+  10: No salary listed and genuinely uncertain about this company's comp for this role/segment
+  5:  No salary listed but company+segment is known to pay BELOW the user's minimum (e.g., MM AE at a mid-tier SaaS company that typically pays $75-95K base when minimum is $120K)
   0:  Salary listed and clearly below minimum
+  CRITICAL for unlisted salary: Do NOT default to 10 for all unlisted salaries. Use your knowledge:
+  - "Commercial AE" / "MM AE" at premium companies (Pure Storage, Palo Alto Networks, Cisco, CrowdStrike, Datadog, Databricks, F5, NetApp, Dell) → typically $130-160K base → score 15-18
+  - "Commercial AE" / "MM AE" at mid-tier SaaS (Samsara, most Series B/C companies, companies known for high volume/low quota) → typically $70-95K base when user minimum is $120K → score 3-5
+  - Enterprise AE at any reputable B2B SaaS/hardware company → typically $150K+ base → score 18-20
+  - Score 10 only when you genuinely have no information about typical comp ranges for this specific company+segment combination
 
 COMPONENT 4 — locationFit (0-15 points):
   15: Remote US or explicitly in candidate's preferred locations
@@ -738,8 +745,22 @@ export async function scoreJobsWithClaude(
 ): Promise<JobMatch[]> {
   if (jobs.length === 0) return [];
 
+  // Derive accepted sales segments from experience_levels
+  const expLevels = criteria.acceptedExperienceLevels ?? ['senior'];
+  const acceptsMid      = expLevels.includes('mid');
+  const acceptsSenior   = expLevels.includes('senior');
+  const acceptsStrategic = expLevels.includes('strategic');
+  const segmentLines: string[] = [];
+  if (acceptsStrategic) segmentLines.push('Strategic / Enterprise Hunter / Global / Named Strategic');
+  if (acceptsSenior)    segmentLines.push('Enterprise AE / Senior AE / Named AE');
+  if (acceptsMid)       segmentLines.push('Commercial AE / Mid-Market AE / Corporate AE (accepted, but score roleFit 22 not 30)');
+  const segmentText = segmentLines.length
+    ? `Accepted sales segments (seniority levels): ${segmentLines.join('; ')}`
+    : '';
+
   const criteriaText = [
     criteria.targetRoles.length ? `Target roles: ${criteria.targetRoles.join(', ')}` : '',
+    segmentText,
     criteria.industries.length ? `Target industries: ${criteria.industries.join(', ')}` : '',
     criteria.locations.length ? `Preferred locations: ${criteria.locations.join(', ')}` : '',
     (() => {

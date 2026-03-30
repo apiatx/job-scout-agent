@@ -2105,6 +2105,7 @@ app.post('/api/jobs/targeted-scan', async (req: Request, res: Response) => {
         preApprovedCompanies: companyNames,
         tierSettings,
         candidateResume: candidateResume || undefined,
+        acceptedExperienceLevels: criteria.experience_levels ?? ['senior'],
       }
     );
 
@@ -2376,11 +2377,23 @@ async function reclassifyJobsLocally(): Promise<number> {
       // Hard filter 4: salary (only when salary is EXPLICITLY listed AND known below min)
       const belowSalary = salaryKnownBelow(j.salary);
 
-      // Hard filter 5: segment (Commercial/MM/SMB) and territory mismatch
-      const badSegment   = _isExcludedSegment(j.title ?? '');
+      // Hard filter 5: territory mismatch only (segment is NOT a hard block — comp handles it)
       const badTerritory = _isExcludedTerritory(j.title ?? '');
 
-      if (!titleMatches || hasAvoid || !locationOk || belowSalary || badSegment || badTerritory) {
+      // Hard filter 6: known compensation below minimum (company+segment intel, no salary required)
+      // Used for well-known cases where typical comp is documented and clearly below user's minimum.
+      // Prevents old v1-format scores (no compensationFit field) from floating into Top Targets.
+      const knownBelowMinComp = (() => {
+        if (!minSalary || minSalary < 100_000) return false;
+        const co = (j.company ?? '').toLowerCase();
+        const t  = (j.title   ?? '').toLowerCase();
+        const isCommercialOrMM = /\b(commercial|mid[\s-]?market|midmarket)\b/.test(t);
+        // Samsara Commercial/MM AE: documented $70-95K base (well below $120K+ minimums)
+        if (co.includes('samsara') && isCommercialOrMM) return true;
+        return false;
+      })();
+
+      if (!titleMatches || hasAvoid || !locationOk || belowSalary || knownBelowMinComp || badTerritory) {
         tier = 'Probably Skip';
       } else if (j.sub_scores && j.match_score !== null) {
         const s: SubScores = typeof j.sub_scores === 'string' ? JSON.parse(j.sub_scores) : j.sub_scores;
@@ -3730,7 +3743,6 @@ async function runScoutInBackground(runId: number): Promise<void> {
     let droppedByLocation = 0;
     let droppedByAvoid = 0;
     let droppedBySalary = 0;
-    let droppedBySegment = 0;
     let droppedByTerritory = 0;
 
     if (hasLocationPrefs) {
@@ -3749,16 +3761,27 @@ async function runScoutInBackground(runId: number): Promise<void> {
       droppedBySalary = before - preFiltered.length;
     }
 
-    // Apply segment and territory filters
-    {
-      const before = preFiltered.length;
-      preFiltered = preFiltered.filter(j => !isExcludedSegment(j.title));
-      droppedBySegment = before - preFiltered.length;
-    }
+    // Apply territory filter only (segment is NOT a hard block — compensation handles it)
     {
       const before = preFiltered.length;
       preFiltered = preFiltered.filter(j => !isExcludedTerritory(j.title));
       droppedByTerritory = before - preFiltered.length;
+    }
+
+    // Apply known-low-comp filter: company+segment combos documented to pay below user minimum
+    // These are blocked BEFORE Claude scoring since there's no upside in spending API budget on them
+    let droppedByKnownComp = 0;
+    if (criteria.min_salary && criteria.min_salary >= 100_000) {
+      const before = preFiltered.length;
+      preFiltered = preFiltered.filter(j => {
+        const co = (j.company ?? '').toLowerCase();
+        const t  = (j.title  ?? '').toLowerCase();
+        const isCommercialOrMM = /\b(commercial|mid[\s-]?market|midmarket)\b/.test(t);
+        // Samsara Commercial/MM: $70-95K base, well below typical $120K+ minimums
+        if (co.includes('samsara') && isCommercialOrMM) return false;
+        return true;
+      });
+      droppedByKnownComp = before - preFiltered.length;
     }
 
     console.log(`\n──── PRE-FILTERS (before Claude scoring) ───────────────────`);
@@ -3766,8 +3789,8 @@ async function runScoutInBackground(runId: number): Promise<void> {
     console.log(`  Dropped by location: ${droppedByLocation}`);
     console.log(`  Dropped by avoid keywords: ${droppedByAvoid}`);
     console.log(`  Dropped by salary below $${criteria.min_salary?.toLocaleString() ?? 'n/a'}: ${droppedBySalary}`);
-    console.log(`  Dropped by segment (Commercial/MM/SMB): ${droppedBySegment}`);
     console.log(`  Dropped by territory mismatch: ${droppedByTerritory}`);
+    console.log(`  Dropped by known comp below minimum: ${droppedByKnownComp}`);
     console.log(`  Remaining for Claude scoring: ${preFiltered.length}`);
     console.log(`───────────────────────────────────────────────────────────`);
 
@@ -3893,6 +3916,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
         preApprovedCompanies: companyNames,
         tierSettings,
         candidateResume: candidateResume || undefined,
+        acceptedExperienceLevels: criteria.experience_levels ?? ['senior'],
       },
       momentumMap,
     );
