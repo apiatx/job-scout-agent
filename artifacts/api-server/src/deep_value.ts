@@ -48,10 +48,10 @@ export interface DeepValueResult {
 // ── Model waterfall ────────────────────────────────────────────────────────────
 
 const BUILTIN_CANDIDATES = [
-  { modelName: 'gemini-2.5-flash-preview-04-17', note: 'Gemini 2.5 Flash' },
-  { modelName: 'gemini-2.0-flash',               note: 'Gemini 2.0 Flash' },
-  { modelName: 'gemini-1.5-pro-latest',          note: 'Gemini 1.5 Pro' },
-  { modelName: 'gemini-1.5-flash-latest',        note: 'Gemini 1.5 Flash' },
+  { modelName: 'gemini-3-flash-preview',   note: 'Gemini 3 Flash' },
+  { modelName: 'gemini-3.1-pro-preview',   note: 'Gemini 3.1 Pro' },
+  { modelName: 'gemini-flash-latest',      note: 'Gemini Flash (alias)' },
+  { modelName: 'gemini-pro-latest',        note: 'Gemini Pro (alias)' },
 ];
 
 function isModelUnavailableError(err: unknown): boolean {

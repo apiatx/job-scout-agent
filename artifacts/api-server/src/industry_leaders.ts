@@ -1,12 +1,9 @@
 /**
  * Industry Leaders Intelligence Engine
  *
- * Uses Claude to identify the top 5-10 sales-led companies in each major B2B sector.
- * The focus: companies with genuine sales-driven growth engines that sales reps want to
- * work at — clear leaders, fast-rising contenders, and buzzy names dominating the category.
- *
- * Sectors: SaaS, Cybersecurity, Data Center, Storage, Data/Database, Networking,
- * Advanced Materials, AI Infrastructure, Pharma/Biotech, Utilities, Industrials, and more.
+ * Uses Claude to identify the top 5 sales-led companies in each major B2B sector.
+ * Split into two parallel Claude calls (6 sectors each) to stay within the 8K
+ * output token ceiling per call — avoids JSON truncation that plagued the single-call approach.
  */
 
 import type { Pool } from 'pg';
@@ -60,7 +57,7 @@ export async function getLatestIndustryLeaders(pool: Pool): Promise<{ data: Indu
   );
   if (!rows[0]) return null;
   const ageMs = Date.now() - new Date(rows[0].generated_at).getTime();
-  const stale = ageMs > 7 * 24 * 60 * 60 * 1000; // stale after 7 days
+  const stale = ageMs > 7 * 24 * 60 * 60 * 1000;
   return { data: rows[0].result_json as IndustryLeadersResult, stale };
 }
 
@@ -74,97 +71,106 @@ export async function saveIndustryLeaders(pool: Pool, result: IndustryLeadersRes
   );
 }
 
-// ── Claude generation ─────────────────────────────────────────────────────────
+// ── Sectors ──────────────────────────────────────────────────────────────────
 
 const SECTORS = [
-  { sector: 'AI Infrastructure', emoji: '🤖' },
-  { sector: 'Cybersecurity', emoji: '🔐' },
-  { sector: 'SaaS / Enterprise Software', emoji: '☁️' },
-  { sector: 'Data & Analytics / Database', emoji: '🗄️' },
-  { sector: 'Data Center & Cloud Infrastructure', emoji: '🏗️' },
-  { sector: 'Networking', emoji: '🌐' },
-  { sector: 'Storage', emoji: '💾' },
-  { sector: 'Advanced Materials & Semiconductors', emoji: '⚗️' },
-  { sector: 'Pharma / Biotech', emoji: '🧬' },
-  { sector: 'Utilities & Energy Tech', emoji: '⚡' },
-  { sector: 'Industrials & Manufacturing Tech', emoji: '🏭' },
-  { sector: 'FinTech & Financial Services', emoji: '💰' },
+  { sector: 'AI Infrastructure',                    emoji: '\uD83E\uDD16' },
+  { sector: 'Cybersecurity',                        emoji: '\uD83D\uDD10' },
+  { sector: 'SaaS / Enterprise Software',           emoji: '\u2601\uFE0F' },
+  { sector: 'Data & Analytics / Database',          emoji: '\uD83D\uDDC4\uFE0F' },
+  { sector: 'Data Center & Cloud Infrastructure',   emoji: '\uD83C\uDFD7\uFE0F' },
+  { sector: 'Networking',                           emoji: '\uD83C\uDF10' },
+  { sector: 'Storage',                              emoji: '\uD83D\uDCBE' },
+  { sector: 'Advanced Materials & Semiconductors',  emoji: '\u2697\uFE0F' },
+  { sector: 'Pharma / Biotech',                     emoji: '\uD83E\uDDEC' },
+  { sector: 'Utilities & Energy Tech',              emoji: '\u26A1' },
+  { sector: 'Industrials & Manufacturing Tech',     emoji: '\uD83C\uDFED' },
+  { sector: 'FinTech & Financial Services',         emoji: '\uD83D\uDCB0' },
 ];
 
-export async function generateIndustryLeaders(): Promise<IndustryLeadersResult> {
-  const Sdk = (await import('@anthropic-ai/sdk')).default;
-  const ac = new Sdk({ apiKey: process.env.ANTHROPIC_API_KEY });
+// ── Prompt builder ────────────────────────────────────────────────────────────
 
-  const sectorList = SECTORS.map(s => `- ${s.sector}`).join('\n');
+function buildBatchPrompt(batchSectors: typeof SECTORS, includeOverview: boolean): string {
+  const sectorList = batchSectors.map(s => `- ${s.sector}`).join('\n');
+  const overviewInstruction = includeOverview
+    ? 'Also return "market_overview": 2-3 sentences on the current macro environment for B2B sales pros across all sectors — what\'s hot, where money is flowing, what\'s cooling off.'
+    : 'Return "market_overview": "" (empty string — not needed for this batch).';
 
-  const prompt = `You are a senior enterprise sales recruiter and market intelligence analyst with deep knowledge of the B2B technology and industrial landscape as of early 2026.
+  return `You are a senior enterprise sales recruiter and market intelligence analyst with deep knowledge of the B2B technology landscape as of early 2026.
 
-Your task: For each sector below, identify the TOP 5–10 companies that sales professionals most want to work at RIGHT NOW. These should be the shining stars — clear category leaders, fast-growing challengers, and companies with elite sales cultures and strong commission upside.
+Task: For each sector below, identify the TOP 5 companies that sales professionals most want to work at RIGHT NOW. Exactly 5 per sector.
 
-CRITICAL CRITERIA — every company must have:
-1. A proven sales-led growth engine (not PLG, not pure self-serve — enterprise sales reps are core to their revenue)
-2. Serious market momentum right now (hypergrowth, major contract wins, aggressive hiring, recent funding, category dominance)
-3. Strong or above-market OTE potential for enterprise sales reps
-4. A reputation in the industry as a top place to sell — known quota attainment, training, culture
+CRITERIA:
+1. Sales-led growth engine (enterprise reps are core to revenue — not PLG/self-serve)
+2. Strong market momentum (hypergrowth, major wins, aggressive hiring, recent funding, category dominance)
+3. Above-market OTE for enterprise AEs
+4. Elite reputation as a place to sell — quota attainment, training, comp culture
 
-Sectors to cover:
+Sectors:
 ${sectorList}
 
-For EACH company return:
+For EACH company, return these exact fields (keep values concise):
 - name: company name
-- website: their main website URL (e.g. "paloaltonetworks.com")
-- ticker: stock ticker if public (null if private)
+- website: domain only e.g. "paloaltonetworks.com"
+- ticker: stock ticker if public, null if private
 - is_public: boolean
-- stage: if private, funding stage like "Series C", "Series D+", "Late Stage Private" — null if public
-- rank: 1-based rank within the sector (1 = #1 pick)
-- tagline: one punchy sentence on what they do / why they matter (max 15 words)
-- why_sales_led: 1-2 sentences explaining why their sales motion is world-class and why reps love it
-- growth_signal: the single most compelling recent signal (e.g. "Raised $500M Series D, 180% ARR growth, hiring 400 AEs in 2025")
-- ote_range: realistic OTE range for a mid-market or enterprise AE (e.g. "$280K–$380K") or null if unknown
-- rep_quality: one sentence on what caliber of rep excels here and what makes their process distinctive
-- action: one of "apply_now" | "network_in" | "watch" | "monitor"
-  - apply_now = actively hiring, hot right now, get in
-  - network_in = great company, build relationships before applying
-  - watch = great trajectory, keep on radar
-  - monitor = solid but check timing
+- stage: funding stage if private e.g. "Series C", null if public
+- rank: 1-based rank within sector (1 = top pick)
+- tagline: max 12 words — what they do and why they matter
+- why_sales_led: 1 sentence — why their sales motion is elite
+- growth_signal: 1 concrete recent signal (funding, ARR, hiring surge)
+- ote_range: AE OTE e.g. "$280K-$380K" or null if unknown
+- rep_quality: 1 sentence — what caliber of rep thrives here
+- action: "apply_now" | "network_in" | "watch" | "monitor"
 
-Also return:
-- market_overview: 2-3 sentence synthesis of the current macro environment for B2B sales professionals across these sectors — what's hot, where money is flowing, what's cooling off
+${overviewInstruction}
 
-Return ONLY valid JSON in this exact structure (no markdown, no prose):
+Return ONLY valid JSON (no markdown, no code fences):
 {
   "market_overview": "...",
   "sectors": [
     {
-      "sector": "AI Infrastructure",
-      "emoji": "🤖",
-      "market_context": "1-2 sentences on what's happening in this sector right now for sales",
-      "companies": [ { ...company fields... }, ... ]
-    },
-    ...
+      "sector": "sector name here",
+      "emoji": "emoji here",
+      "market_context": "1 sentence on what is happening in this sector for sales right now",
+      "companies": [
+        {
+          "name": "...", "website": "...", "ticker": null, "is_public": false,
+          "stage": "...", "rank": 1, "tagline": "...", "why_sales_led": "...",
+          "growth_signal": "...", "ote_range": "...", "rep_quality": "...", "action": "apply_now"
+        }
+      ]
+    }
   ]
 }`;
+}
 
+// ── Claude call helper ────────────────────────────────────────────────────────
+
+async function callClaude(ac: any, prompt: string): Promise<any> {
   const response = await ac.messages.create({
     model: 'claude-opus-4-5',
-    max_tokens: 16000,
+    max_tokens: 8000,
     messages: [{ role: 'user', content: prompt }],
   });
-
-  const raw = response.content[0].type === 'text' ? response.content[0].text : '';
-  
-  let parsed: any;
-  try {
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('No JSON found in response');
-    parsed = JSON.parse(jsonMatch[0]);
-  } catch (e) {
-    throw new Error(`Failed to parse Claude response: ${e}. Raw: ${raw.slice(0, 500)}`);
+  const raw = response.content[0]?.type === 'text' ? (response.content[0] as any).text : '';
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error(`No JSON found in Claude response. stop_reason: ${response.stop_reason}. Raw start: ${raw.slice(0, 400)}`);
   }
+  try {
+    return JSON.parse(jsonMatch[0]);
+  } catch (e) {
+    throw new Error(`Failed to parse Claude JSON: ${e}. Raw: ${raw.slice(0, 500)}`);
+  }
+}
 
-  const sectors: IndustrySector[] = (parsed.sectors || []).map((s: any) => ({
+// ── Sector parser ─────────────────────────────────────────────────────────────
+
+function parseSectors(parsed: any): IndustrySector[] {
+  return (parsed.sectors || []).map((s: any) => ({
     sector: s.sector || '',
-    emoji: SECTORS.find(x => x.sector === s.sector)?.emoji || s.emoji || '🏢',
+    emoji: SECTORS.find(x => x.sector === s.sector)?.emoji || s.emoji || '\uD83C\uDFE2',
     market_context: s.market_context || '',
     companies: (s.companies || []).map((c: any, i: number) => ({
       name: c.name || '',
@@ -178,14 +184,30 @@ Return ONLY valid JSON in this exact structure (no markdown, no prose):
       growth_signal: c.growth_signal || '',
       ote_range: c.ote_range || null,
       rep_quality: c.rep_quality || '',
-      action: c.action || 'watch',
+      action: (['apply_now', 'network_in', 'watch', 'monitor'].includes(c.action) ? c.action : 'watch') as IndustryLeaderCompany['action'],
     })),
   }));
+}
+
+// ── Main generation — two parallel batches of 6 sectors each ─────────────────
+
+export async function generateIndustryLeaders(): Promise<IndustryLeadersResult> {
+  const Sdk = (await import('@anthropic-ai/sdk')).default;
+  const ac = new Sdk({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+  const batch1 = SECTORS.slice(0, 6);   // AI Infra → Networking
+  const batch2 = SECTORS.slice(6);      // Storage → FinTech
+
+  // Run both batches in parallel — each stays well inside the 8K output limit
+  const [parsed1, parsed2] = await Promise.all([
+    callClaude(ac, buildBatchPrompt(batch1, true)),   // batch 1 generates market_overview
+    callClaude(ac, buildBatchPrompt(batch2, false)),  // batch 2 skips it
+  ]);
 
   return {
     generated_at: new Date().toISOString(),
-    market_overview: parsed.market_overview || '',
-    sectors,
+    market_overview: parsed1.market_overview || '',
+    sectors: [...parseSectors(parsed1), ...parseSectors(parsed2)],
     model_used: 'claude-opus-4-5',
   };
 }
