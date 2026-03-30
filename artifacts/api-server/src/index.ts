@@ -4123,6 +4123,12 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .run-stage{font-size:11px;color:var(--gold);margin-left:4px;font-style:italic}
 .run-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .auto-run-badge{font-size:11px;color:var(--muted);padding:3px 9px;border:1px solid #2a2a2a;border-radius:20px;margin-left:auto;white-space:nowrap}
+/* Quick-link job site pills */
+.quick-links{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.quick-link-sep{width:1px;height:16px;background:var(--border);flex-shrink:0;margin:0 2px}
+.ql-btn{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:11.5px;font-weight:500;color:#aaa;background:transparent;border:1px solid #2a2a2a;text-decoration:none;white-space:nowrap;cursor:pointer;transition:background .12s,color .12s,border-color .12s;user-select:none}
+.ql-btn:hover{color:#fff;border-color:#444;background:#1e1e1e}
+.ql-btn img{width:13px;height:13px;border-radius:2px;object-fit:contain;flex-shrink:0}
 
 /* Outreach modal */
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px}
@@ -4683,6 +4689,30 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <button class="btn btn-gold" id="run-btn" onclick="runScout()">&#9654; Run Scout Now</button>
   <span class="run-msg" id="run-msg"></span>
   <span class="run-stage" id="run-stage" style="display:none"></span>
+  <span class="quick-link-sep"></span>
+  <div class="quick-links">
+    <a class="ql-btn" href="https://www.linkedin.com/jobs/" target="_blank" rel="noopener">
+      <img src="https://www.google.com/s2/favicons?domain=linkedin.com&sz=32" alt="">LinkedIn
+    </a>
+    <a class="ql-btn" href="https://www.indeed.com" target="_blank" rel="noopener">
+      <img src="https://www.google.com/s2/favicons?domain=indeed.com&sz=32" alt="">Indeed
+    </a>
+    <a class="ql-btn" href="https://www.glassdoor.com/Job/index.htm" target="_blank" rel="noopener">
+      <img src="https://www.google.com/s2/favicons?domain=glassdoor.com&sz=32" alt="">Glassdoor
+    </a>
+    <a class="ql-btn" href="https://www.repvue.com" target="_blank" rel="noopener">
+      <img src="https://www.google.com/s2/favicons?domain=repvue.com&sz=32" alt="">RepVue
+    </a>
+    <a class="ql-btn" href="https://wellfound.com/jobs" target="_blank" rel="noopener">
+      <img src="https://www.google.com/s2/favicons?domain=wellfound.com&sz=32" alt="">Wellfound
+    </a>
+    <a class="ql-btn" href="https://www.levels.fyi/jobs" target="_blank" rel="noopener">
+      <img src="https://www.google.com/s2/favicons?domain=levels.fyi&sz=32" alt="">Levels.fyi
+    </a>
+    <a class="ql-btn" href="https://www.ziprecruiter.com" target="_blank" rel="noopener">
+      <img src="https://www.google.com/s2/favicons?domain=ziprecruiter.com&sz=32" alt="">ZipRecruiter
+    </a>
+  </div>
   <span class="auto-run-badge" id="auto-run-badge" style="display:none"></span>
 </div>
 
