@@ -1,0 +1,209 @@
+I need to improve my Job Search Scout so the jobs page does NOT display broken links, dead links, wrong titles, wrong companies, or low-confidence job data. Right now, if the jobs page shows inaccurate jobs or unusable links, the product loses trust.
+
+Goal:
+Create a job URL validation + canonical link resolution layer on top of the existing JobSpy + Gemini discovery pipeline so that the jobs page shows the most accurate and reliable version of each job posting available on the internet.
+
+Core principle:
+JobSpy is useful for discovery, but it is not always the final source of truth for the canonical job posting URL or the cleanest metadata.
+Gemini grounded web search should be used as a resolver/validator when JobSpy returns broken, stale, incorrect, or lower-confidence results.
+
+What I want built:
+
+PART 1: PROBLEM TO SOLVE
+For jobs found by JobSpy or Gemini, I need the system to:
+
+* detect broken or dead links
+* detect incorrect titles / mismatched metadata
+* detect aggregator links when a better direct company/ATS link exists
+* find the real live job posting page wherever it actually lives on the web
+* prefer the best and most reliable canonical posting URL
+* avoid displaying garbage to the user
+
+This needs to work cleanly and automatically in the backend.
+
+PART 2: CANONICAL JOB URL RESOLUTION
+Add a canonical URL resolution stage to the pipeline.
+
+For every discovered job, try to determine the best canonical posting URL using this preference order:
+
+1. direct company careers / ATS page
+
+   * greenhouse
+   * lever
+   * ashby
+   * workday
+   * company careers page
+2. reliable job board page if no direct source exists
+3. original JobSpy link only if it passes validation and no better canonical source is found
+
+Implement logic that:
+
+* normalizes URLs
+* follows redirects where safe
+* detects broken pages / 404 / irrelevant pages
+* checks whether the page appears to match the expected company + job title
+* upgrades aggregator links to direct company job pages when possible
+
+PART 3: GEMINI AS LINK RESOLVER / VALIDATOR
+Use the existing Gemini grounded search integration to help resolve job links when:
+
+* JobSpy URL is dead
+* JobSpy URL is suspicious or mismatched
+* metadata appears incomplete or inaccurate
+* a direct company page may exist elsewhere
+
+Use Gemini for:
+
+* searching the web for the real live posting
+* finding direct company careers pages for the same role
+* comparing candidate URLs
+* extracting or validating title/company/location from search-grounded evidence
+* helping choose the best canonical result
+
+Important:
+Gemini should not blindly create jobs from thin air.
+Gemini should help validate and resolve discovered jobs into cleaner, more accurate records.
+
+PART 4: VALIDATION RULES
+Create a validation layer for each job record.
+
+Each job should get:
+
+* url_status: live | broken | redirected | unknown
+* title_match_score
+* company_match_score
+* source_trust_score
+* canonical_url
+* canonical_source
+* validation_notes
+* link_confidence_score
+
+Validation should consider:
+
+* HTTP status if available
+* final resolved URL
+* whether the page title matches the expected job title
+* whether the company name matches
+* whether the destination page is clearly a job page
+* whether the page is a direct ATS/company page or just an aggregator
+* whether the page looks stale or generic
+* whether Gemini found a better canonical source
+
+PART 5: SOURCE TRUST HIERARCHY
+Build a source trust hierarchy that prefers:
+
+* direct company careers pages
+* ATS pages like Greenhouse / Lever / Ashby / Workday
+* strong job boards only if no canonical company source exists
+* low trust for ambiguous or obviously broken pages
+
+Prefer direct company URLs over aggregator pages whenever both exist.
+
+PART 6: PIPELINE INTEGRATION
+Integrate this into the current jobs pipeline cleanly.
+
+Expected order:
+
+1. collect jobs from JobSpy
+2. collect jobs from Gemini discovery if enabled
+3. normalize into common schema
+4. dedupe obvious duplicates
+5. validate links and resolve canonical URLs
+6. enrich metadata if a better canonical page is found
+7. apply deterministic hard filters
+8. score / rank
+9. return only validated high-confidence jobs to the jobs page
+
+Do NOT just dump raw JobSpy results directly to the jobs page if they fail validation.
+
+PART 7: FRONTEND / API RESPONSE CHANGES
+Update the jobs response so each job can include:
+
+* canonical_url
+* display_url
+* original_url
+* url_status
+* canonical_source
+* link_confidence_score
+* validation_notes
+* source_trust_score
+* was_resolved_by_gemini (boolean)
+
+The frontend should use:
+
+* canonical_url as the main click target
+* original_url only for debugging if needed
+* optional badge if a job was “validated” or “resolved”
+
+PART 8: GEMINI SEARCH STRATEGY FOR RESOLUTION
+When resolving a bad or suspicious job link, generate focused queries like:
+
+* "[company] [job title] careers"
+* site:[company-domain] careers "[job title]"
+* site:boards.greenhouse.io "[company]" "[job title]"
+* site:jobs.lever.co "[company]" "[job title]"
+* site:jobs.ashbyhq.com "[company]" "[job title]"
+* "[company] [job title] workday"
+
+Use company + title + location when available.
+Favor direct company pages over third-party boards.
+
+PART 9: GRACEFUL BEHAVIOR
+If canonical resolution fails:
+
+* keep the original job only if it still has acceptable confidence
+* otherwise suppress it from the jobs page
+* log why it was suppressed
+
+I would rather show fewer high-confidence jobs than a larger number of broken or inaccurate jobs.
+
+PART 10: STORAGE / SCHEMA
+Extend the jobs schema if needed to store:
+
+* canonical_url
+* canonical_source
+* original_url
+* url_status
+* title_match_score
+* company_match_score
+* source_trust_score
+* link_confidence_score
+* validation_notes
+* was_resolved_by_gemini
+* validation_checked_at
+
+PART 11: IMPLEMENTATION RULES
+
+* inspect the existing architecture first
+* integrate safely into the current backend
+* do not break the current jobs page
+* keep JobSpy intact as a discovery source
+* keep Gemini as validation / resolution support
+* add logging around:
+
+  * total jobs collected
+  * broken links detected
+  * canonical URLs resolved
+  * jobs suppressed due to low confidence
+  * direct company URLs found
+* make this additive and modular
+
+PART 12: OUTPUT EXPECTATIONS
+When finished, provide:
+
+1. summary of what changed
+2. files modified
+3. new schema/storage changes
+4. how canonical resolution works
+5. what confidence thresholds are used
+6. what jobs get suppressed and why
+7. any follow-up improvements recommended
+
+Before coding, first inspect and summarize the current relevant architecture:
+
+* current JobSpy ingestion
+* current Gemini discovery integration
+* current jobs response shape
+* where links are currently stored and returned
+
+Then implement the canonical link validation/resolution layer against the actual codebase.

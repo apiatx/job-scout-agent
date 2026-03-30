@@ -8,6 +8,7 @@ import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, Unde
 import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, runJobSpyScraper, proxyConfigured } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
 import { runGeminiJobDiscovery, deduplicateJobLists, isDirectCompanyUrl, normalizeUrl as normalizeJobUrl } from './gemini_discovery.js';
+import { runCanonicalResolutionInBackground, computeLinkConfidence, classifySourceTrust } from './link_validator.js';
 import { generateCareerIntel } from './career_intel.js';
 import type { CareerIntelCriteria } from './career_intel.js';
 import { generatePreIpo, initPreIpoDB, getLatestPreIpo, savePreIpo } from './preipo.js';
@@ -389,6 +390,12 @@ async function initDb(): Promise<void> {
   await safeAddColumn('jobs', 'date_posted', 'TEXT');
   await safeAddColumn('jobs', 'url_ok', 'BOOLEAN');
   await safeAddColumn('jobs', 'url_checked_at', 'TIMESTAMPTZ');
+  await safeAddColumn('jobs', 'canonical_url', 'TEXT');
+  await safeAddColumn('jobs', 'canonical_source', 'TEXT');
+  await safeAddColumn('jobs', 'original_url', 'TEXT');
+  await safeAddColumn('jobs', 'link_confidence', 'TEXT');
+  await safeAddColumn('jobs', 'was_resolved_by_gemini', 'BOOLEAN NOT NULL DEFAULT false');
+  await safeAddColumn('jobs', 'validation_notes', 'TEXT');
   await safeAddColumn('jobs', 'is_hardware', 'BOOLEAN NOT NULL DEFAULT false');
   await safeAddColumn('jobs', 'created_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()');
   await safeAddColumn('jobs', 'status', "TEXT NOT NULL DEFAULT 'new'");
@@ -1146,6 +1153,13 @@ function enrichJobRecord(job: Record<string, unknown>, criteria: CriteriaForRepo
     })(),
     date_posted: job.date_posted ?? null,
     url_ok:      job.url_ok      ?? null,
+    // Canonical URL resolution fields
+    canonical_url:           (job.canonical_url as string | null) ?? applyUrl,
+    original_url:            (job.original_url  as string | null) ?? applyUrl,
+    canonical_source:        (job.canonical_source as string | null) ?? classifySourceTrust(applyUrl),
+    link_confidence:         (job.link_confidence as string | null) ?? computeLinkConfidence(applyUrl, job.url_ok as boolean | null, false),
+    was_resolved_by_gemini:  job.was_resolved_by_gemini ?? false,
+    validation_notes:        job.validation_notes ?? null,
   };
 }
 
@@ -1153,6 +1167,7 @@ function enrichJobRecord(job: Record<string, unknown>, criteria: CriteriaForRepo
 app.get('/api/jobs', async (req: Request, res: Response) => {
   try {
     const minScore = Number(req.query.min_score) || 0;
+    const hideLowConfidence = req.query.hide_low_confidence === 'true';
     const sort = req.query.sort === 'score' ? 'match_score DESC, found_at DESC' : 'found_at DESC, match_score DESC';
 
     // Load criteria once for enrichment (deterministic score + explanation fields)
@@ -1181,6 +1196,7 @@ app.get('/api/jobs', async (req: Request, res: Response) => {
          LIMIT 1
        ) cm ON true
        WHERE j.match_score >= $1
+         ${hideLowConfidence ? "AND (j.link_confidence IS NULL OR j.link_confidence NOT IN ('low') OR j.was_resolved_by_gemini = true)" : ''}
        ORDER BY ${sort}`,
       [minScore]
     );
@@ -1208,6 +1224,17 @@ app.get('/api/jobs', async (req: Request, res: Response) => {
 });
 
 // Source breakdown — returns count of jobs per discovery source
+// Manually trigger canonical URL re-validation for broken / low-confidence links
+app.post('/api/jobs/re-validate', async (_req, res: Response) => {
+  try {
+    res.json({ ok: true, message: 'Canonical URL resolution started in background' });
+    runCanonicalResolutionInBackground(pool).catch(() => {});
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    res.status(500).json({ error: msg });
+  }
+});
+
 app.get('/api/jobs/source-breakdown', async (_req, res: Response) => {
   try {
     const { rows } = await pool.query(`
@@ -3754,10 +3781,10 @@ async function runScoutInBackground(runId: number): Promise<void> {
       // Look up momentum warning for this company (if checked)
       const momWarning = momentumMap.get(m.company.toLowerCase().trim())?.warning ?? null;
       await pool.query(
-        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, original_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
          ON CONFLICT (apply_url) DO NOTHING`,
-        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), geminiMeta?.groundingMetadata ? JSON.stringify(geminiMeta.groundingMetadata) : null, geminiMeta?.confidence ?? null, momWarning, datePosted]
+        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.applyUrl, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), geminiMeta?.groundingMetadata ? JSON.stringify(geminiMeta.groundingMetadata) : null, geminiMeta?.confidence ?? null, momWarning, datePosted]
       );
     }
 
@@ -3770,7 +3797,10 @@ async function runScoutInBackground(runId: number): Promise<void> {
       );
       const newIds = newlyInserted.map((r: any) => r.id as number);
       if (newIds.length > 0) {
-        checkUrlHealthInBackground(newIds).catch(() => {});
+        // Chain: URL health check → canonical resolution (canonical runs after health check so url_ok is populated)
+        checkUrlHealthInBackground(newIds)
+          .then(() => runCanonicalResolutionInBackground(pool, newIds))
+          .catch(() => {});
       }
     }
 
@@ -3954,8 +3984,10 @@ initDb()
       if (n > 0) console.log(`Startup reclassify: updated ${n} job tiers to match current logic`);
     } catch (e) { console.warn('Startup reclassify skipped:', e); }
 
-    // Background URL health check for any unchecked jobs (non-blocking)
-    checkUrlHealthInBackground().catch(() => {});
+    // Background URL health check + canonical resolution for any unchecked jobs (non-blocking)
+    checkUrlHealthInBackground()
+      .then(() => runCanonicalResolutionInBackground(pool))
+      .catch(() => {});
 
     // Start auto-scheduler: check immediately after 2 min, then every 15 min
     setTimeout(checkAutoRun, 2 * 60 * 1000);
@@ -4676,6 +4708,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       <div class="rescore-progress" id="rescore-progress-msg"></div>
     </div>
     <button class="btn btn-gold btn-sm" id="rescore-btn" onclick="startRescore()">Score All Jobs</button>
+    <button class="btn btn-ghost btn-sm" id="conf-filter-btn" onclick="toggleConfidenceFilter()" title="Hide jobs with broken or unresolved links" style="font-size:11px">\uD83D\uDD17 Show broken links</button>
   </div>
   <div class="inner-tabs">
     <div class="inner-tab tier-target active" id="jtab-target" onclick="showJobsTab('target')">&#x1F3AF; Top Targets <span id="jtab-count-target" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
@@ -5952,6 +5985,17 @@ function renderJobCard(j, opts) {
   // Source badge
   var srcBadge = j.source ? '<span class="source-badge" data-src="' + esc(j.source) + '">' + esc(j.source) + '</span>' : '';
 
+  // Link confidence / canonical source badge
+  var linkConf = j.link_confidence || 'unknown';
+  var linkResolved = !!j.was_resolved_by_gemini;
+  var linkBroken = j.url_ok === false && !linkResolved;
+  var confidenceBadge = '';
+  if (linkResolved) {
+    confidenceBadge = '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:600;background:rgba(0,200,150,.12);color:#00c896;border:1px solid rgba(0,200,150,.3)" title="Broken link was resolved to a verified canonical posting by AI web search">\u2714 Link Resolved</span>';
+  } else if (linkConf === 'high' && (j.canonical_source === 'ats_direct' || (j.apply_url || '').match(/greenhouse|lever\.co|ashbyhq|workday/i))) {
+    confidenceBadge = '<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:600;background:rgba(74,222,128,.08);color:#4ade80;border:1px solid rgba(74,222,128,.2)" title="Direct ATS link \u2014 verified live">\u2714 Direct Link</span>';
+  }
+
   // RepVue badge
   var repvueBadge = renderRepVueBadge(j);
 
@@ -6029,13 +6073,14 @@ function renderJobCard(j, opts) {
       momentumWarning +
       territoryBadge +
       srcBadge +
+      confidenceBadge +
       repvueBadge +
       ssToggle +
     '</div>' +
     ssHtml +
     // ── Actions
     '<div class="card-foot">' +
-      '<a href="' + esc(j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-apply btn-sm' + (j.url_ok === false ? ' btn-link-warn' : '') + '" title="' + (j.url_ok === false ? '\u26a0 Link may be broken or expired \u2014 try searching the company careers page' : 'Apply to this job') + '">Apply Now \u2192' + (j.url_ok === false ? ' \u26a0' : '') + '</a>' +
+      '<a href="' + esc(j.canonical_url || j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-apply btn-sm' + (linkBroken ? ' btn-link-warn' : '') + '" title="' + (linkBroken ? '\u26a0 Link may be broken or expired \u2014 try searching the company careers page' : linkResolved ? '\u2714 Link verified and resolved by AI web search' : 'Apply to this job') + '">Apply Now \u2192' + (linkBroken ? ' \u26a0' : '') + '</a>' +
       reachBtn +
       '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ')">Tailor Resume</button>' +
       '<button class="btn btn-ghost btn-sm" data-jid="' + j.id + '" data-jtit="' + esc(j.title) + '" data-jco="' + esc(j.company) + '" onclick="openCoverLetter(this.dataset.jid,this.dataset.jtit,this.dataset.jco)">\u270D Cover Letter</button>' +
@@ -6104,9 +6149,24 @@ function renderJobs() {
   grid.innerHTML = jobs.map(function(j) { return renderJobCard(j, { showNew: true }); }).join('');
 }
 
+var _hideLowConfidence = false;
+
+function toggleConfidenceFilter() {
+  _hideLowConfidence = !_hideLowConfidence;
+  var btn = document.getElementById('conf-filter-btn');
+  if (btn) {
+    btn.textContent = _hideLowConfidence ? '\uD83D\uDD17 Show broken links' : '\uD83D\uDD17 Hide broken links';
+    btn.style.background = _hideLowConfidence ? 'rgba(0,200,150,.12)' : '';
+    btn.style.color = _hideLowConfidence ? '#00c896' : '';
+    btn.style.borderColor = _hideLowConfidence ? 'rgba(0,200,150,.3)' : '';
+  }
+  loadJobs();
+}
+
 async function loadJobs() {
   try {
-    var res = await fetch('/api/jobs?min_score=50');
+    var url = '/api/jobs?min_score=50' + (_hideLowConfidence ? '&hide_low_confidence=true' : '');
+    var res = await fetch(url);
     if (!res.ok) {
       var body = '';
       try { body = JSON.stringify(await res.json()); } catch(_){}
@@ -6214,7 +6274,7 @@ function renderPipelineCard(j, stage) {
     ? '<button class="btn btn-sm" style="background:rgba(129,140,248,.12);color:#818cf8;border:1px solid rgba(129,140,248,.3);font-size:11px" data-jid="' + j.id + '" data-jtit="' + esc(j.title) + '" data-jco="' + esc(j.company) + '" onclick="openInterviewPrep(this.dataset.jid,this.dataset.jtit,this.dataset.jco)">&#x1F3AF; ' + (hasPrep ? 'View Prep' : 'Gen Prep') + '</button>'
     : '';
   var viewJobsBtn = '<button class="btn btn-ghost btn-sm" style="font-size:11px" onclick="filterToCompany(' + JSON.stringify(j.company) + ')">All ' + esc(j.company) + ' jobs</button>';
-  var applyBtn = '<a href="' + esc(j.apply_url || '#') + '" target="_blank" class="btn btn-sm" style="background:rgba(245,200,66,.1);color:var(--gold);border:1px solid rgba(245,200,66,.3);font-size:11px">Apply &rarr;</a>';
+  var applyBtn = '<a href="' + esc(j.canonical_url || j.apply_url || '#') + '" target="_blank" class="btn btn-sm" style="background:rgba(245,200,66,.1);color:var(--gold);border:1px solid rgba(245,200,66,.3);font-size:11px">Apply &rarr;</a>';
   return '<div class="pipeline-card">' +
     '<div class="pipeline-card-title">' + esc(j.title) + '</div>' +
     '<div class="pipeline-card-co">' + esc(j.company) + '</div>' +
@@ -8377,7 +8437,7 @@ function renderTargetedJobCard(j) {
   var salaryHtml = j.salary && j.salary !== 'Unknown' && j.salary !== 'N/A' && j.salary.trim()
     ? '<span style="font-size:11px;color:var(--muted)">' + esc(j.salary) + '</span>'
     : '';
-  var applyUrl = j.apply_url || '#';
+  var applyUrl = j.canonical_url || j.apply_url || '#';
   return '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:10px">' +
     '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">' +
       '<div style="flex:1;min-width:0">' +

@@ -13,7 +13,8 @@ A full-stack automated job search agent that discovers job listings via a **hybr
 - **AI**: Anthropic Claude — `claude-haiku-4-5` (scoring/research/salary), `claude-sonnet-4-5` (resume tailoring)
 - **Frontend**: Server-rendered HTML templates embedded in index.ts (single-file approach)
 - **Job scraping**: Direct API calls to Greenhouse, Lever, Workday REST APIs; JobSpy Python script for Indeed/LinkedIn/Glassdoor
-- **URL health check**: Background HEAD-request checker marks `url_ok` on all job links; broken links surface as warnings in UI without removing jobs
+- **URL health check**: Background HEAD-request checker marks `url_ok` on all job links; broken links surface as warnings in UI
+- **Canonical URL resolution**: `link_validator.ts` classifies source trust (ATS direct/company/aggregator/unknown), computes `link_confidence` (high/medium/low/unknown), and uses Gemini grounded search to find live canonical URLs for broken links (score ≥ 50 threshold)
 
 ## Project Structure
 
@@ -25,6 +26,7 @@ artifacts/api-server/
 │   ├── scraper.ts           # Greenhouse, Lever, Workday scrapers + JobSpy wrapper
 │   ├── jobspy_scraper.py    # Python: LinkedIn/Indeed/Glassdoor via jobspy
 │   ├── gemini_discovery.ts  # Gemini + Google Search grounding discovery module
+│   ├── link_validator.ts    # Canonical URL resolution: source trust scoring, confidence computation, Gemini resolver
 │   └── lib/
 │       ├── salary.ts        # Claude-based salary estimation
 │       └── gmail.ts         # Gmail OAuth + email sending
@@ -34,7 +36,7 @@ artifacts/api-server/
 
 - `criteria` — All user-configurable search settings
 - `companies` — Target companies (greenhouse/lever/workday/plain types)
-- `jobs` — Job matches with AI scores, tiers, sub_scores JSONB, `user_action`, `user_action_at`, `interview_prep_json`, `interview_prep_at`
+- `jobs` — Job matches with AI scores, tiers, sub_scores JSONB, `user_action`, `user_action_at`, `interview_prep_json`, `interview_prep_at`, `canonical_url`, `canonical_source`, `original_url`, `link_confidence`, `was_resolved_by_gemini`, `validation_notes`
 - `settings` — Key/value store (resume text `key='resume'`, schedule, etc.)
 - `saved_resumes` — Named resume versions (id, name, content, created_at)
 - `scout_runs` — Run history (+ `current_stage TEXT`, `jobs_in_pipeline INT` for live progress tracking)
