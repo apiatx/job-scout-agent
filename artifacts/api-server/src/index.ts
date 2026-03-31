@@ -2041,6 +2041,7 @@ app.get('/api/jobs/saved', async (_req, res: Response) => {
         SELECT * FROM hiring_managers WHERE job_id = j.id ORDER BY created_at DESC LIMIT 1
       ) hm ON true
       WHERE j.saved_at IS NOT NULL
+        AND (j.user_action IS NULL OR j.user_action NOT IN ('interested', 'applied', 'interviewing'))
       ORDER BY j.saved_at DESC LIMIT 200
     `);
     // Attach salary estimates for jobs missing salary
@@ -9264,6 +9265,8 @@ async function removePipelineJob(jobId) {
 }
 
 async function moveToPipeline(jobId) {
+  var btn = document.querySelector('[onclick="moveToPipeline(' + jobId + ')"]');
+  if (btn) { btn.disabled = true; btn.textContent = 'Moving...'; }
   try {
     var res = await fetch('/api/jobs/' + jobId + '/action', {
       method: 'PUT',
@@ -9276,10 +9279,11 @@ async function moveToPipeline(jobId) {
     for (var i = 0; i < _allJobs.length; i++) {
       if (_allJobs[i].id == jobId) { _allJobs[i] = updated; break; }
     }
-    // Show confirmation on the card
-    var btn = document.querySelector('[onclick="moveToPipeline(' + jobId + ')"]');
-    if (btn) { btn.textContent = '\u2713 Added to Pipeline'; btn.disabled = true; }
-  } catch(e) { console.error('moveToPipeline failed:', e); }
+    await loadSavedJobs();
+  } catch(e) {
+    console.error('moveToPipeline failed:', e);
+    if (btn) { btn.disabled = false; btn.textContent = '\u2795 Move to Pipeline'; }
+  }
 }
 
 async function trackJobAction(jobId, field) {
