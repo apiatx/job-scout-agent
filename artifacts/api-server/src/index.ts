@@ -8773,11 +8773,12 @@ function renderJobCard(j, opts) {
 function updateTabCounts() {
   var counts = { target:0, win:0, stretch:0, skip:0, unscored:0 };
   _allJobs.forEach(function(j) {
+    if (j.saved_at) return;
     var k = tierKey(j);
     if (counts[k] !== undefined) counts[k]++;
     else counts.unscored++;
   });
-  var allCount = _allJobs.length;
+  var allCount = _allJobs.filter(function(j) { return !j.saved_at; }).length;
   ['target','win','stretch','skip'].forEach(function(t) {
     var el = document.getElementById('jtab-count-' + t);
     if (el) el.textContent = counts[t] > 0 ? '(' + counts[t] + ')' : '';
@@ -8793,13 +8794,15 @@ function renderJobs() {
 
   updateTabCounts();
 
+  var unsavedJobs = _allJobs.filter(function(j) { return !j.saved_at; });
+
   if (_currentJobsTab === 'all') {
-    jobs = sortJobs(_allJobs);
+    jobs = sortJobs(unsavedJobs);
     cnt.textContent = jobs.length + ' job' + (jobs.length !== 1 ? 's' : '') + ' total';
   } else {
     var tierMap = { target:'Top Target', win:'Fast Win', stretch:'Stretch Role', skip:'Probably Skip' };
     var tierLabel = tierMap[_currentJobsTab];
-    jobs = sortJobs(_allJobs.filter(function(j) { return tierKey(j) === _currentJobsTab; }));
+    jobs = sortJobs(unsavedJobs.filter(function(j) { return tierKey(j) === _currentJobsTab; }));
     var emptyMsg = {
       target: 'No Top Target roles yet \\u2014 run the scout or score your library',
       win: 'No Fast Wins identified yet',
