@@ -27,3 +27,25 @@ run = ["sh", "-c", "PORT=8080 pnpm --filter @workspace/api-server run start"]
 deploymentTarget = "cloudrun"
 
 [workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "lsof -ti:8080 2>/dev/null | xargs -r kill -9 2>/dev/null; sleep 0.3; cd artifacts/api-server && PORT=8080 npm run dev"
+waitForPort = 8080
+
+[workflows.workflow.metadata]
+outputType = "webview"
