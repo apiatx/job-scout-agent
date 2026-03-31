@@ -2058,6 +2058,77 @@ app.get('/api/jobs/saved', async (_req, res: Response) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+// ── Custom Job — paste description, Claude scores it, drops into Apply pipeline ──
+app.post('/api/jobs/custom', async (req: Request, res: Response) => {
+  try {
+    const { company, description, title: rawTitle, applyUrl: rawUrl } = req.body as any;
+    if (!company || !description) {
+      res.status(400).json({ error: 'company and description are required' }); return;
+    }
+
+    // Load criteria + resume
+    const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
+    if (!cRows.length) { res.status(400).json({ error: 'No criteria configured — complete Search Criteria first' }); return; }
+    const criteria = cRows[0] as any;
+    const { rows: resumeRows } = await pool.query("SELECT value FROM settings WHERE key='resume' LIMIT 1");
+    const resume: string = resumeRows[0]?.value ?? '';
+    const { rows: companyRows } = await pool.query('SELECT name FROM companies');
+    const companyNames = companyRows.map((r: any) => r.name as string);
+
+    const criteriaText = [
+      criteria.target_roles?.length ? `Target roles: ${criteria.target_roles.join(', ')}` : '',
+      criteria.industries?.length ? `Target industries: ${criteria.industries.join(', ')}` : '',
+      criteria.locations?.length ? `Preferred locations: ${criteria.locations.join(', ')}` : '',
+      criteria.must_have?.length ? `Must have: ${criteria.must_have.join(', ')}` : '',
+      criteria.nice_to_have?.length ? `Nice to have: ${criteria.nice_to_have.join(', ')}` : '',
+    ].filter(Boolean).join('\n');
+
+    const tierSettings = {
+      verticalNiches: criteria.vertical_niches ?? [],
+      topTargetScore: criteria.top_target_score ?? 65,
+      fastWinScore: criteria.fast_win_score ?? 55,
+      stretchScore: criteria.stretch_score ?? 55,
+      experienceLevels: criteria.experience_levels ?? ['senior'],
+    };
+
+    const preApprovedSection = companyNames.length > 0
+      ? `PRE-APPROVED COMPANIES:\n${companyNames.join(', ')}`
+      : '';
+
+    // Use a unique URL so we don't hit the ON CONFLICT constraint
+    const customUrl = rawUrl?.trim() || `custom://${company.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
+
+    const result = await rescoreJobOpportunity(
+      { id: 0, title: rawTitle?.trim() || company + ' — Custom Role', company, location: 'See description', salary: null, applyUrl: customUrl, description },
+      criteriaText, preApprovedSection, companyNames, tierSettings,
+      criteria.min_salary ?? null, resume || undefined, criteria.min_ote ?? null,
+    );
+
+    const tier   = result?.opportunityTier ?? 'unscored';
+    const score  = result?.matchScore ?? 0;
+    const why    = result?.whyGoodFit ?? 'Custom job added manually.';
+    const sub    = result?.subScores ?? null;
+    const aiRisk = result?.aiRisk ?? 'unknown';
+    const aiRiskScore  = result?.aiRiskScore ?? null;
+    const aiRiskReason = result?.aiRiskReason ?? null;
+    const parsedTitle  = (result as any)?.title || rawTitle?.trim() || `${company} Role`;
+    const parsedLoc    = (result as any)?.location || 'See description';
+    const parsedSalary = (result as any)?.salary || null;
+
+    const { rows: inserted } = await pool.query(
+      `INSERT INTO jobs (title, company, location, salary, apply_url, description, why_good_fit, match_score,
+        source, is_hardware, ai_risk, ai_risk_score, ai_risk_reason, opportunity_tier, sub_scores,
+        user_action, user_action_at, saved_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'custom',false,$9,$10,$11,$12,$13,'interested',NOW(),NOW())
+       RETURNING *`,
+      [parsedTitle, company, parsedLoc, parsedSalary, customUrl, description, why, score,
+       aiRisk, aiRiskScore, aiRiskReason, tier, sub ? JSON.stringify(sub) : null]
+    );
+
+    res.json({ job: inserted[0] });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 app.post('/api/jobs/:id/save', async (req: Request, res: Response) => {
   try {
     const { rows } = await pool.query(
@@ -6628,6 +6699,37 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <span class="auto-run-badge" id="auto-run-badge" style="display:none"></span>
 </div>
 
+<!-- Custom Job modal -->
+<div class="modal-overlay" id="custom-job-modal" style="display:none" onclick="if(event.target===this)closeCustomJobModal()">
+  <div class="modal-box" style="max-width:620px;width:100%">
+    <button class="modal-close" onclick="closeCustomJobModal()">&times;</button>
+    <div class="modal-title">Add Custom Job</div>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:18px">Paste the full job description below. Claude will score it against your resume and drop it into your <strong>Apply</strong> pipeline.</div>
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div class="fg">
+        <label style="font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Company</label>
+        <input type="text" id="cj-company" placeholder="e.g. Pure Storage" style="width:100%;box-sizing:border-box;background:#111;border:1px solid var(--border);border-radius:6px;padding:9px 12px;color:var(--text);font-size:13px">
+      </div>
+      <div class="fg">
+        <label style="font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Job Title <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional — Claude will extract from description)</span></label>
+        <input type="text" id="cj-title" placeholder="e.g. Enterprise Account Executive" style="width:100%;box-sizing:border-box;background:#111;border:1px solid var(--border);border-radius:6px;padding:9px 12px;color:var(--text);font-size:13px">
+      </div>
+      <div class="fg">
+        <label style="font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Job Posting URL <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional — for the Apply button)</span></label>
+        <input type="text" id="cj-url" placeholder="https://company.com/careers/..." style="width:100%;box-sizing:border-box;background:#111;border:1px solid var(--border);border-radius:6px;padding:9px 12px;color:var(--text);font-size:13px">
+      </div>
+      <div class="fg">
+        <label style="font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Job Description <span style="color:#e55353">*</span></label>
+        <textarea id="cj-description" placeholder="Paste the full job description here..." rows="10" style="width:100%;box-sizing:border-box;background:#111;border:1px solid var(--border);border-radius:6px;padding:9px 12px;color:var(--text);font-size:13px;resize:vertical;font-family:inherit"></textarea>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <button class="btn btn-gold" id="cj-submit-btn" onclick="submitCustomJob()">Score &amp; Add to Pipeline</button>
+        <span id="cj-status" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Outreach modal -->
 <div class="modal-overlay" id="outreach-modal" style="display:none" onclick="if(event.target===this)closeOutreach()">
   <div class="modal-box">
@@ -10346,6 +10448,7 @@ async function loadCompanies() {
           '<span class="' + statusCls + '">' + statusLabel + ' \u00B7 ' + esc(atsLabel) + '</span>' +
         '</div>' +
         '<div style="display:flex;gap:4px">' +
+          '<button class="btn btn-sm" style="background:rgba(245,200,66,.12);color:var(--gold);border:1px solid rgba(245,200,66,.3);font-size:11px" data-co="' + esc(c.name) + '" onclick="openCustomJobModal(this.dataset.co)">+ Add Custom Job</button>' +
           '<button class="btn btn-ghost btn-sm" onclick="rescanCareersPage(' + c.id + ',' + JSON.stringify(c.name) + ',this)" title="Re-detect careers page" style="font-size:11px">\u21BB Rescan</button>' +
           '<button class="btn btn-ghost btn-sm" onclick="deleteCompany(' + c.id + ')" style="font-size:11px;color:#ef4444">Remove</button>' +
         '</div>' +
@@ -10557,6 +10660,76 @@ async function openOutreach(jobId, title, company) {
 
 function closeOutreach() {
   document.getElementById('outreach-modal').style.display = 'none';
+}
+
+// ── Custom Job Modal ──────────────────────────────────────────────────────────
+function openCustomJobModal(companyName) {
+  var modal = document.getElementById('custom-job-modal');
+  document.getElementById('cj-company').value = companyName || '';
+  document.getElementById('cj-title').value = '';
+  document.getElementById('cj-url').value = '';
+  document.getElementById('cj-description').value = '';
+  document.getElementById('cj-status').textContent = '';
+  var btn = document.getElementById('cj-submit-btn');
+  btn.disabled = false;
+  btn.textContent = 'Score & Add to Pipeline';
+  modal.style.display = 'flex';
+}
+
+function closeCustomJobModal() {
+  document.getElementById('custom-job-modal').style.display = 'none';
+}
+
+async function submitCustomJob() {
+  var company = document.getElementById('cj-company').value.trim();
+  var title = document.getElementById('cj-title').value.trim();
+  var url = document.getElementById('cj-url').value.trim();
+  var description = document.getElementById('cj-description').value.trim();
+  var statusEl = document.getElementById('cj-status');
+  var btn = document.getElementById('cj-submit-btn');
+
+  if (!company) { statusEl.textContent = 'Company name is required.'; statusEl.style.color = '#e55353'; return; }
+  if (!description || description.length < 50) { statusEl.textContent = 'Please paste a full job description (at least 50 characters).'; statusEl.style.color = '#e55353'; return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Scoring with Claude\u2026';
+  statusEl.textContent = 'This usually takes 10-20 seconds\u2026';
+  statusEl.style.color = 'var(--muted)';
+
+  try {
+    var res = await fetch('/api/jobs/custom', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ company: company, title: title || undefined, applyUrl: url || undefined, description: description }),
+    });
+    var data = await res.json();
+    if (!res.ok) { throw new Error(data.error || 'Server error'); }
+
+    // Add to local cache so it shows up in pipeline immediately
+    var job = data.job;
+    if (job) {
+      _jobsById[job.id] = job;
+      _allJobs.push(job);
+    }
+
+    statusEl.textContent = '\u2713 Added to pipeline!';
+    statusEl.style.color = '#4ade80';
+    btn.textContent = 'Done!';
+
+    // Navigate to pipeline after a short delay
+    setTimeout(function() {
+      closeCustomJobModal();
+      showTab('pipeline');
+      loadPipeline();
+    }, 1200);
+
+  } catch(e) {
+    console.error('submitCustomJob failed:', e);
+    statusEl.textContent = 'Error: ' + (e.message || 'Something went wrong');
+    statusEl.style.color = '#e55353';
+    btn.disabled = false;
+    btn.textContent = 'Score & Add to Pipeline';
+  }
 }
 
 function copyOutreach(elId, btn) {
