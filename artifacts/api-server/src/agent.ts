@@ -1193,6 +1193,33 @@ Return ONLY a JSON object:
   }
 }
 
+// Default cover letter style instructions stored in DB under key 'cover_letter_instructions'.
+// These can be overridden per-generation by passing customInstructions.
+export const DEFAULT_COVER_LETTER_INSTRUCTIONS = `You write cover letters structured exactly like great B2B sales cold emails. Your letters do NOT recap the resume — the hiring manager will read that anyway. You lead with the company's situation, position the candidate as the solution to a specific problem, and close with a low-commitment ask.
+
+STRUCTURE (follow this exactly):
+
+1. OPENING (1-2 sentences): Lead with what is happening at the company RIGHT NOW that makes this role urgent or strategic. Ground it in real research — a product launch, an expansion, a funding event, a market shift. Do NOT start with "I" or "I am applying for." Start with THEM, their moment, their problem.
+
+2. PIVOT (1 sentence): A tight transition that bridges from their situation to the candidate. Something like "That is exactly the problem I have spent the last [X] years solving." Natural, confident, not sycophantic.
+
+3. THREE PROOF BULLETS (3 lines, no more): Each bullet = one metric, one outcome, one line. These are the candidate's most relevant accomplishments for this specific role. Use plain dashes (-). Make them tight and scannable — a hiring manager spending 15 seconds gets the full picture from just these three.
+
+4. POSITIONING SENTENCE (1 sentence): Connect their specific problem to the candidate's specific track record. Not generic. Name the problem, name the solution.
+
+5. CLOSE (2 sentences max): Ask for a specific next step with low commitment. Example: "Would 20 minutes next week make sense?" or "Happy to share a few relevant case studies if useful." Never "I would welcome the opportunity." Never "I look forward to hearing from you." Just signal and a clear ask.
+
+CRITICAL RULES:
+- No em dashes (—) or en dashes (–) anywhere
+- No "leverage" or "leveraging"
+- No "passionate" or "passionate about"
+- No "I am excited to" or "I am thrilled to"
+- No "synergy" or any corporate buzzwords
+- No "utilize" — use "use" instead
+- No dense paragraphs — the structure above is the structure
+- Total length: under 200 words — shorter is better
+- The letter must never mention Claude, AI, or that it was generated`;
+
 export async function generateCoverLetterWithClaude(params: {
   jobTitle: string;
   companyName: string;
@@ -1203,8 +1230,9 @@ export async function generateCoverLetterWithClaude(params: {
   temperature?: number;
   model?: string;
   territoryContext?: TerritoryContext | null;
+  customInstructions?: string | null;
 }): Promise<CoverLetterResult> {
-  const { jobTitle, companyName, jobDescription, resumeText, userName, existingResearch, territoryContext } = params;
+  const { jobTitle, companyName, jobDescription, resumeText, userName, existingResearch, territoryContext, customInstructions } = params;
   const temperature = params.temperature ?? 1;
   const MODEL_CL = params.model || 'claude-opus-4-6';
 
@@ -1259,58 +1287,34 @@ Respond with ONLY this JSON structure — no other text:
 
   // ── STEP 2: Cover letter generation grounded in research ──────────────────
   const factsBlock = research
-    ? `RECENT COMPANY RESEARCH (use at least 2 of these specific facts naturally in the letter):\n${research.specificFacts.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\nCOMPANY MOMENT (work this into the opening or closing):\n${research.companyMoment}\n\nROLE CONTEXT (what problem am I being hired to solve):\n${research.roleContext}`
-    : `Note: Live research was unavailable. Use the job description and resume to craft the most compelling letter possible.`;
+    ? `COMPANY RESEARCH (use the most relevant facts to ground the opening and positioning):\n${research.specificFacts.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\nCOMPANY MOMENT: ${research.companyMoment}\n\nROLE CONTEXT (the specific problem they are hiring this person to solve): ${research.roleContext}`
+    : `Note: Live research was unavailable. Use the job description to ground the opening in what is happening at the company.`;
 
-  const systemPrompt = `You are an expert cover letter writer who has helped hundreds of enterprise technology sales professionals land roles at top hardware, semiconductor, AI infrastructure, and industrial technology companies. You write cover letters that sound completely human — like they were written by a confident, articulate sales professional who knows exactly what they want and why they are the right person for this role.
+  // Use custom instructions from DB if provided, otherwise use default
+  const styleInstructions = customInstructions?.trim() || DEFAULT_COVER_LETTER_INSTRUCTIONS;
 
-CRITICAL RULES FOR HUMAN-SOUNDING WRITING:
-- Never use em dashes (—) or en dashes (–) anywhere in the letter
-- Never use the word "leverage" or "leveraging"
-- Never use the word "passionate" or "passionate about"
-- Never use the phrase "I am excited to" or "I am thrilled to"
-- Never use the word "synergy" or "synergistic"
-- Never use the word "utilize" — use "use" instead
-- Never use "in terms of"
-- Never use bullet points or lists — this is prose only
-- Vary sentence length naturally — mix short punchy sentences with longer ones
-- Write in first person with confidence, not humility
-- Never start consecutive sentences with "I"
-- Never use corporate buzzwords like "thought leader", "best-in-class", "cutting-edge"
-- The letter should sound like it was written by a real person who is genuinely interested but not sycophantic
-- Maximum 4 paragraphs, each focused and tight
-- Total length: 250-350 words maximum — hiring managers do not read long cover letters
-- The letter must never mention Claude, AI, or that it was generated`;
+  const systemPrompt = `You are a cover letter strategist for enterprise technology sales professionals. ${styleInstructions}`;
 
   // Build territory block if context exists
   const territoryBlock = territoryContext
-    ? `\nTERRITORY INTELLIGENCE:\nThis role is specifically for the ${territoryContext.territoryDetected} territory.\nWhy this territory matters: ${territoryContext.whyThisTerritory}\nKey industries to reference: ${territoryContext.keyIndustries.join(', ')}\nLikely target accounts in territory: ${territoryContext.majorProspects.join(', ')}\nMarket moment: ${territoryContext.marketMoment}\nWhy the candidate fits this territory specifically: ${territoryContext.candidateAdvantage}\n\nADDITIONAL COVER LETTER INSTRUCTIONS FOR TERRITORY ROLES:\n- The opening paragraph should reference something specific about why this territory is strategically important for this company right now\n- If the candidate has sold to, worked with, or has relationships in this territory based on their resume, call it out explicitly — "Having spent my career closing enterprise deals across the ${territoryContext.territoryDetected} including accounts like X and Y..."\n- Reference 1-2 specific prospect types or industries concentrated in this territory to show you understand the opportunity\n- Do NOT just say "I am based in the ${territoryContext.territoryDetected}" — show you understand the business opportunity in that geography`
+    ? `\nTERRITORY CONTEXT: This is a ${territoryContext.territoryDetected} territory role.\nWhy this territory matters to the company: ${territoryContext.whyThisTerritory}\nKey prospect industries in territory: ${territoryContext.keyIndustries.join(', ')}\nMajor prospect accounts: ${territoryContext.majorProspects.join(', ')}\nMarket moment: ${territoryContext.marketMoment}\nWhy the candidate fits this territory: ${territoryContext.candidateAdvantage}\n\nFor territory roles: work the geography into the opening or proof points — show you understand the specific business opportunity in ${territoryContext.territoryDetected}, not just that you live there.`
     : '';
 
-  const userPrompt = `Write a cover letter for this application. Here is all the context you need:
+  const userPrompt = `Write a cover letter for this application. Follow the structure and rules in the system prompt exactly.
 
 ROLE: ${jobTitle} at ${companyName}
 
 JOB DESCRIPTION:
 ${jobDescription.slice(0, 1500)}
 
-MY RESUME:
+MY RESUME (pull the 3 most relevant proof points from here — metrics, outcomes, company names):
 ${resumeText.slice(0, 2000)}
 
 MY NAME: ${userName || 'The Candidate'}
 
 ${factsBlock}${territoryBlock}
 
-INSTRUCTIONS:
-Paragraph 1 — Opening: Reference something specific and recent about the company that shows genuine research. Connect it to why this role at this company matters right now. Do NOT open with "I am applying for" — start with the company insight.
-
-Paragraph 2 — My fit: Pull 2-3 specific, quantified achievements from my resume that directly map to what this role requires. Be concrete — numbers, company names, outcomes. Do not be generic.
-
-Paragraph 3 — Why this company specifically: Show that you understand their market position, what they are building, and why my specific experience makes me valuable to them at this exact moment. Reference the company moment if research is available.${territoryContext ? `\n\nParagraph 3 must also weave in the territory opportunity — show you understand the ${territoryContext.territoryDetected} market specifically. Reference why this geography matters to the company and how your background uniquely fits it.` : ''}
-
-Paragraph 4 — Close: Confident, direct, brief. Express genuine interest without begging. End with a specific call to action.
-
-Write the full cover letter now. Return ONLY the cover letter text — no subject line, no preamble, no explanation. Start directly with the first paragraph.`;
+Return ONLY the cover letter text. No subject line. No preamble. No explanation. Start with the opening line about their situation.`;
 
   const genMsg = await anthropic.messages.create({
     model: MODEL_CL,

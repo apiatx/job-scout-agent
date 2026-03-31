@@ -26,7 +26,7 @@ import {
   getOutputs, generateOutputs, getObjections, generateObjections,
   getNarrative, saveNarrative, draftNarrative
 } from './positioning.js';
-import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier, generateCoverLetterWithClaude, tailorResumeV2WithClaude, detectTerritory, analyzeTerritoryContext, getCompanyMomentum } from './agent.js';
+import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier, generateCoverLetterWithClaude, tailorResumeV2WithClaude, detectTerritory, analyzeTerritoryContext, getCompanyMomentum, DEFAULT_COVER_LETTER_INSTRUCTIONS } from './agent.js';
 import type { MomentumScore } from './agent.js';
 import type { SubScores, OpportunityTier, TierSettings, TailoringAnalysis } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
@@ -500,6 +500,12 @@ async function initDb(): Promise<void> {
       ]
     );
   }
+
+  // Seed default cover letter instructions if not set
+  await pool.query(
+    `INSERT INTO settings (key, value) VALUES ('cover_letter_instructions', $1) ON CONFLICT (key) DO NOTHING`,
+    [DEFAULT_COVER_LETTER_INSTRUCTIONS]
+  );
 
   // Seed companies if none exist
   const { rows: coRows } = await pool.query('SELECT id FROM companies LIMIT 1');
@@ -2077,11 +2083,13 @@ app.post('/api/jobs/:id/cover-letter', async (req: Request, res: Response) => {
       return;
     }
 
-    // 4. Load user name from criteria + document model preference
+    // 4. Load user name, document model, and cover letter style instructions
     const { rows: cRows } = await pool.query('SELECT your_name, your_email FROM criteria LIMIT 1');
     const userName: string = cRows[0]?.your_name ?? '';
     const { rows: dmRows } = await pool.query("SELECT value FROM settings WHERE key='document_model'");
     const documentModel: string = dmRows[0]?.value || 'claude-opus-4-6';
+    const { rows: clInstrRows } = await pool.query("SELECT value FROM settings WHERE key='cover_letter_instructions'");
+    const coverLetterInstructions: string | null = clInstrRows[0]?.value ?? null;
 
     // 5. Load existing research brief if fresh (< 24h)
     const { rows: briefRows } = await pool.query(
@@ -2115,6 +2123,7 @@ app.post('/api/jobs/:id/cover-letter', async (req: Request, res: Response) => {
       temperature,
       model: documentModel,
       territoryContext: territoryCtx,
+      customInstructions: coverLetterInstructions,
     });
 
     console.log(`[CoverLetter] Generated (${result.coverLetter.length} chars) | researchFailed=${result.researchFailed}`);
@@ -5664,7 +5673,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       <div class="sec-title" style="margin-bottom:8px">Job Description</div>
       <textarea id="job-desc-text" rows="20" placeholder="Paste the job listing description here…"></textarea>
       <div class="save-row">
-        <button class="btn btn-gold" onclick="tailorFromDesc()">Tailor Resume</button>
+        <button class="btn btn-gold" onclick="tailorFromDesc()">Tailor Resume and Write CV</button>
         <span id="tailor-inline-msg" style="font-size:12px;color:var(--muted)"></span>
       </div>
     </div>
@@ -6952,13 +6961,13 @@ function computeScorecard(j) {
     terrFitPct  = Math.round(((s.territoryFit != null ? Number(s.territoryFit) : 7) / 10) * 100);
     realPct     = Math.round(((Number(s.realVsFake) || 5)      / 10) * 100);
   } else {
-    // v1 legacy format: all fields on 0-10 scale
-    roleFitPct  = Math.round(((Number(s.roleFit) || 0)         / 10) * 100);
-    compQualPct = Math.round(((Number(s.companyQuality) || 0)  / 10) * 100);
+    // v1 legacy format or null sub_scores — default to 0 if no data
+    roleFitPct  = s ? Math.round(((Number(s.roleFit) || 0)        / 10) * 100) : 0;
+    compQualPct = s ? Math.round(((Number(s.companyQuality) || 0) / 10) * 100) : 0;
     compFitPct  = s && s.qualificationFit != null ? Math.round((Number(s.qualificationFit) / 10) * 100) : 50;
-    locFitPct   = Math.round(((Number(s.locationFit) || 0)     / 10) * 100);
+    locFitPct   = s ? Math.round(((Number(s.locationFit) || 0)    / 10) * 100) : 0;
     terrFitPct  = 70; // no territory field in v1
-    realPct     = Math.round(((Number(s.realVsFake) || 5)      / 10) * 100);
+    realPct     = s ? Math.round(((Number(s.realVsFake) || 5)     / 10) * 100) : 50;
   }
   // Recompute raw values used later (normalized to same effective scale as pct)
   var compFitRaw   = isNewFmt ? (Number(s.compensationFit) || 0) : 10;
@@ -7377,7 +7386,7 @@ function renderJobCard(j, opts) {
       recActionHtml(j) +
       '<a href="' + esc(j.display_url || j.canonical_url || j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-apply btn-sm' + (linkBroken ? ' btn-link-warn' : '') + '" title="' + (linkBroken ? '\u26a0 Link may be broken or expired \u2014 try searching the company careers page' : (validationStatus === 'recovered' || validationStatus === 'validated') ? '\u2714 Verified direct source link' : 'Apply to this job') + '">Apply Now \u2192' + (linkBroken ? ' \u26a0' : '') + '</a>' +
       reachBtn +
-      '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ')">Tailor Resume</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ')">Tailor Resume and Write CV</button>' +
       '<button class="btn btn-ghost btn-sm" data-jid="' + j.id + '" data-jtit="' + esc(j.title) + '" data-jco="' + esc(j.company) + '" onclick="openCoverLetter(this.dataset.jid,this.dataset.jtit,this.dataset.jco)">\u270D Cover Letter</button>' +
       '<button class="btn btn-ghost btn-sm" id="research-btn-' + j.id + '" onclick="researchCompany(' + j.id + ')">\uD83D\uDD0D Research</button>' +
       '<select class="btn btn-ghost btn-sm track-status-sel" data-jid="' + j.id + '" onchange="markJobAction(this.dataset.jid,this.value);this.blur()" style="cursor:pointer">' +
