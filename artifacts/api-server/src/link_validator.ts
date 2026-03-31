@@ -157,8 +157,11 @@ export function needsRecovery(job: {
 
 /**
  * Greenhouse public JSON API by slug + job ID — called directly when slug is known.
+ * If the specific jobId is not found AND jobTitle is provided, falls back to a
+ * title-based search of the company's full job board (handles hallucinated IDs
+ * returned by Gemini or stale IDs from aggregators).
  */
-async function fetchFromGreenhouseApiBySlugAndId(slug: string, jobId: string): Promise<FetchedJobData | null> {
+async function fetchFromGreenhouseApiBySlugAndId(slug: string, jobId: string, jobTitle?: string): Promise<FetchedJobData | null> {
   const apiUrls = [
     `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs/${jobId}?content=true`,
     `https://job-boards.greenhouse.io/${slug}/jobs/${jobId}.json`,
@@ -190,20 +193,66 @@ async function fetchFromGreenhouseApiBySlugAndId(slug: string, jobId: string): P
       return { title, location, description: desc || undefined, postedAt: (data.updated_at as string) || undefined, pageType: 'job_detail', sourceApi: 'greenhouse' };
     } catch { /* try next */ }
   }
-  return null;
+
+  // ── Title-based fallback: job ID was fake/stale — search full board by title ──
+  if (!jobTitle) return null;
+  try {
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 12000);
+    const boardRes = await fetch(`https://boards-api.greenhouse.io/v1/boards/${slug}/jobs?content=true`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobScout/1.0)', Accept: 'application/json' },
+      signal: ctrl.signal,
+    });
+    if (!boardRes.ok) return null;
+    const board = await boardRes.json() as { jobs?: Array<{ id: number; title: string; absolute_url: string; content?: string; location?: { name?: string } }> };
+    const allJobs = board.jobs ?? [];
+    if (allJobs.length === 0) return null;
+
+    const titleLow  = jobTitle.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim();
+    const titleWords = new Set(titleLow.split(/\s+/).filter(w => w.length > 2));
+    let bestMatch: typeof allJobs[number] | null = null;
+    let bestScore = 0;
+    for (const j of allJobs) {
+      const jLow = j.title.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim();
+      if (jLow === titleLow) { bestMatch = j; bestScore = 999; break; }
+      const overlap = jLow.split(/\s+/).filter(w => w.length > 2 && titleWords.has(w)).length;
+      if (overlap > bestScore) { bestScore = overlap; bestMatch = j; }
+    }
+    if (!bestMatch || bestScore < 2) return null;
+
+    console.log(`[GH-fallback] Matched "${bestMatch.title}" by title (score=${bestScore}) in ${slug}`);
+    const rawHtml = (bestMatch.content as string) ?? '';
+    const desc = rawHtml
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
+      .replace(/\s+/g, ' ').trim().slice(0, 6000);
+    return {
+      title:       bestMatch.title,
+      location:    bestMatch.location?.name,
+      description: desc || undefined,
+      pageType:    'job_detail',
+      sourceApi:   'greenhouse',
+      resolvedUrl: bestMatch.absolute_url,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Greenhouse public JSON API — no auth required.
  * Uses the official boards-api.greenhouse.io/v1/boards/{co}/jobs/{id}?content=true endpoint.
  * Also attempts the legacy boards.greenhouse.io/{co}/jobs/{id}.json as fallback.
+ * Pass jobTitle to enable title-based board search when the job ID is stale/hallucinated.
  */
-async function fetchFromGreenhouseApi(url: string): Promise<FetchedJobData | null> {
+async function fetchFromGreenhouseApi(url: string, jobTitle?: string): Promise<FetchedJobData | null> {
   // Extract slug + ID from standard greenhouse.io URL path
   const match = url.match(/greenhouse\.io\/([^/?#]+)\/jobs\/(\d+)/i);
   if (!match) return null;
   const [, company, jobId] = match;
-  return fetchFromGreenhouseApiBySlugAndId(company, jobId);
+  return fetchFromGreenhouseApiBySlugAndId(company, jobId, jobTitle);
 }
 
 /**
@@ -542,12 +591,13 @@ export async function fetchFromAshbyApiWithTitle(
 /**
  * Main dispatcher: fetches real job data from a canonical URL.
  * Tries API-first for known ATS platforms, falls back to HTML parsing.
+ * Pass jobTitle to enable title-based board search when the Greenhouse job ID is stale/hallucinated.
  */
-export async function fetchJobDescriptionFromCanonicalUrl(url: string): Promise<FetchedJobData | null> {
+export async function fetchJobDescriptionFromCanonicalUrl(url: string, jobTitle?: string): Promise<FetchedJobData | null> {
   const lower = url.toLowerCase();
   try {
     if (lower.includes('greenhouse.io')) {
-      const result = await fetchFromGreenhouseApi(url);
+      const result = await fetchFromGreenhouseApi(url, jobTitle);
       if (result?.description) return result;
     }
     if (lower.includes('lever.co')) {
@@ -605,7 +655,7 @@ export async function enrichJobsPreScoring(
         } else if (url.toLowerCase().includes('ashbyhq.com')) {
           fetched = await fetchFromAshbyApiWithTitle(url, job.title ?? '');
         } else {
-          fetched = await fetchJobDescriptionFromCanonicalUrl(url);
+          fetched = await fetchJobDescriptionFromCanonicalUrl(url, job.title ?? undefined);
         }
         if (fetched?.description && !isListingPageDescription(fetched.description)) {
           job.description = fetched.description;
@@ -947,12 +997,12 @@ export async function runCanonicalResolutionInBackground(
               const jobId = ghJidMatch[1];
               const slug: string = job.company_ats_slug ?? job.company?.toLowerCase().replace(/\s+/g, '');
               if (slug) {
-                fetchedData = await fetchFromGreenhouseApiBySlugAndId(slug, jobId);
+                fetchedData = await fetchFromGreenhouseApiBySlugAndId(slug, jobId, job.title ?? undefined);
               }
             } else if (url.toLowerCase().includes('ashbyhq.com')) {
               fetchedData = await fetchFromAshbyApiWithTitle(url, job.title ?? '', job.location ?? '');
             } else {
-              fetchedData = await fetchJobDescriptionFromCanonicalUrl(url);
+              fetchedData = await fetchJobDescriptionFromCanonicalUrl(url, job.title ?? undefined);
             }
 
             // For gh_jid jobs, use the canonical Greenhouse URL as the recovered URL
@@ -1041,10 +1091,15 @@ export async function runCanonicalResolutionInBackground(
         }
 
         // Even if Gemini didn't improve the URL, try fetching the current URL
-        const fetchedData = canonicalUrl ? await fetchJobDescriptionFromCanonicalUrl(canonicalUrl) : null;
+        const fetchedData = canonicalUrl ? await fetchJobDescriptionFromCanonicalUrl(canonicalUrl, job.title as string ?? undefined) : null;
+
+        // If the Greenhouse title-based fallback returned a real URL (resolvedUrl),
+        // use that as the effective canonical URL — it's the real posting, not the fake ID.
+        const effectiveCanonicalUrl = fetchedData?.resolvedUrl ?? canonicalUrl;
+        const effectiveCanonicalSource = fetchedData?.resolvedUrl ? 'greenhouse-board-title-match' : canonicalSource;
 
         const status = await writeRecoveryResult(
-          pool, job.id, canonicalUrl, canonicalSource, usedGemini, fetchedData, job.apply_url ?? '',
+          pool, job.id, effectiveCanonicalUrl, effectiveCanonicalSource, usedGemini, fetchedData, job.apply_url ?? '',
         );
 
         if (status === 'recovered' || status === 'validated') {

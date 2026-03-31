@@ -251,10 +251,15 @@ export async function runGeminiJobDiscovery(
       const rawJobs = parseJobsFromText(text);
       console.log(`[Gemini] Parsed ${rawJobs.length} raw job records`);
 
-      const jobs = normalizeGeminiJobs(rawJobs, groundingMeta, sources, webSearchQueriesUsed, criteria);
-      const limited = jobs.slice(0, maxResults);
+      const normalized = normalizeGeminiJobs(rawJobs, groundingMeta, sources, webSearchQueriesUsed, criteria);
 
-      console.log(`[Gemini] ${limited.length} valid normalized jobs (${rawJobs.length - limited.length} dropped/trimmed)`);
+      // Validate Greenhouse URLs — Gemini frequently hallucinates job IDs.
+      // This hits the real public Greenhouse API and either confirms the URL,
+      // finds the real job by title match, or drops the listing entirely.
+      const validated = await validateGreenhouseUrls(normalized);
+      const limited = validated.slice(0, maxResults);
+
+      console.log(`[Gemini] ${limited.length} valid normalized jobs (${rawJobs.length} parsed, ${normalized.length - validated.length} GH-dropped, ${validated.length - limited.length} trimmed)`);
       console.log(`───────────────────────────────────────────────────────────`);
 
       return {
@@ -531,6 +536,127 @@ function guessLocation(criteria: GeminiDiscoveryCriteria): string {
   if (criteria.work_type === 'remote') return 'Remote';
   if (criteria.locations.length > 0)  return criteria.locations[0];
   return 'Unknown';
+}
+
+// ── Greenhouse URL validator ───────────────────────────────────────────────────
+// Gemini often returns Greenhouse URLs with hallucinated job IDs (e.g. /jobs/4000000).
+// This validator hits the real public Greenhouse API for every GH URL:
+//   - If the job ID is real → keep it (and update URL from the API's absolute_url).
+//   - If the job ID is fake/missing → search the company's full job board by title.
+//   - If no real match is found → drop the listing entirely.
+// Results are cached per slug+id to avoid redundant network calls.
+
+const _ghValidationCache = new Map<string, string | null>(); // key → real URL or null
+
+async function resolveGreenhouseUrl(applyUrl: string, title: string): Promise<string | null> {
+  const ghMatch = applyUrl.match(/greenhouse\.io\/([^/?#]+)\/jobs\/(\d+)/i);
+  if (!ghMatch) return applyUrl; // not a GH job URL — pass through
+
+  const [, slug, jobId] = ghMatch;
+  const cacheKey = `${slug}::${jobId}`;
+  if (_ghValidationCache.has(cacheKey)) return _ghValidationCache.get(cacheKey)!;
+
+  // Step 1: verify the specific job ID exists
+  const idUrl = `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs/${jobId}?content=false`;
+  try {
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 8000);
+    const res = await fetch(idUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+      signal: ctrl.signal,
+    });
+    if (res.ok) {
+      const data = await res.json() as { absolute_url?: string; title?: string };
+      const realUrl = data.absolute_url ?? applyUrl;
+      console.log(`[GH-validate] ✓ Real job: ${slug}/jobs/${jobId} → "${data.title ?? 'unknown'}"`);
+      _ghValidationCache.set(cacheKey, realUrl);
+      return realUrl;
+    }
+    // 404 or other error — job ID is fake, fall through to title search
+    console.log(`[GH-validate] ✗ Job ID ${jobId} not found for ${slug} — searching by title`);
+  } catch {
+    console.log(`[GH-validate] ✗ Timeout checking ${slug}/jobs/${jobId} — searching by title`);
+  }
+
+  // Step 2: search the company's full job board by title match
+  const boardUrl = `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs?content=false`;
+  try {
+    const ctrl2 = new AbortController();
+    setTimeout(() => ctrl2.abort(), 10000);
+    const res2 = await fetch(boardUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+      signal: ctrl2.signal,
+    });
+    if (res2.ok) {
+      const board = await res2.json() as { jobs?: Array<{ id: number; title: string; absolute_url: string }> };
+      const jobs = board.jobs ?? [];
+      if (jobs.length === 0) {
+        console.log(`[GH-validate] ✗ ${slug} board returned 0 jobs — dropping listing`);
+        _ghValidationCache.set(cacheKey, null);
+        return null;
+      }
+      // Score matches: exact title > title words overlap
+      const titleLow = title.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim();
+      const titleWords = new Set(titleLow.split(/\s+/).filter(w => w.length > 2));
+      let bestMatch: { id: number; title: string; absolute_url: string } | null = null;
+      let bestScore = 0;
+      for (const j of jobs) {
+        const jLow = j.title.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').trim();
+        if (jLow === titleLow) { bestMatch = j; bestScore = 999; break; }
+        const overlap = jLow.split(/\s+/).filter(w => w.length > 2 && titleWords.has(w)).length;
+        if (overlap > bestScore) { bestScore = overlap; bestMatch = j; }
+      }
+      if (bestMatch && bestScore >= 2) {
+        console.log(`[GH-validate] ✓ Found by title match (score=${bestScore}): "${bestMatch.title}" → ${bestMatch.absolute_url}`);
+        _ghValidationCache.set(`${slug}::${bestMatch.id}`, bestMatch.absolute_url);
+        _ghValidationCache.set(cacheKey, bestMatch.absolute_url);
+        return bestMatch.absolute_url;
+      }
+      console.log(`[GH-validate] ✗ No title match (score=${bestScore}) for "${title}" in ${slug} (${jobs.length} jobs on board) — dropping`);
+    } else {
+      console.log(`[GH-validate] ✗ ${slug} board unreachable (${res2.status}) — dropping listing`);
+    }
+  } catch {
+    console.log(`[GH-validate] ✗ Timeout fetching board for ${slug} — dropping listing`);
+  }
+
+  _ghValidationCache.set(cacheKey, null);
+  return null;
+}
+
+/**
+ * Validate and fix Greenhouse URLs in a list of Gemini jobs.
+ * Jobs with unresolvable Greenhouse URLs are dropped.
+ * Non-Greenhouse jobs are passed through unchanged.
+ */
+async function validateGreenhouseUrls(jobs: GeminiJob[]): Promise<GeminiJob[]> {
+  const ghJobs    = jobs.filter(j => /greenhouse\.io\/[^/?#]+\/jobs\/\d+/i.test(j.applyUrl));
+  const nonGhJobs = jobs.filter(j => !/greenhouse\.io\/[^/?#]+\/jobs\/\d+/i.test(j.applyUrl));
+
+  if (ghJobs.length === 0) return jobs;
+
+  console.log(`[GH-validate] Validating ${ghJobs.length} Greenhouse URL(s) from Gemini…`);
+
+  // Run in parallel (max 5 concurrent to be gentle on the API)
+  const CHUNK = 5;
+  const resolved: GeminiJob[] = [];
+  for (let i = 0; i < ghJobs.length; i += CHUNK) {
+    const chunk = ghJobs.slice(i, i + CHUNK);
+    const results = await Promise.all(
+      chunk.map(async (job) => {
+        const realUrl = await resolveGreenhouseUrl(job.applyUrl, job.title);
+        if (!realUrl) return null;
+        return realUrl === job.applyUrl ? job : { ...job, applyUrl: realUrl };
+      })
+    );
+    for (const r of results) { if (r) resolved.push(r); }
+  }
+
+  const dropped = ghJobs.length - resolved.length;
+  if (dropped > 0) console.log(`[GH-validate] Dropped ${dropped} Greenhouse listing(s) with unresolvable/fake job IDs`);
+  console.log(`[GH-validate] ${resolved.length}/${ghJobs.length} Greenhouse URL(s) validated`);
+
+  return [...nonGhJobs, ...resolved];
 }
 
 // ── Cross-source deduplication (used by pipeline in index.ts) ─────────────────
