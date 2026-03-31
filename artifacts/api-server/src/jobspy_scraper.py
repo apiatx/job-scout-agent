@@ -418,9 +418,57 @@ def best_apply_url(row: pd.Series) -> str:
     return agg_url
 
 
+# Patterns that indicate a generic careers-page listing, NOT a specific job posting.
+# LinkedIn in particular sometimes returns these when it can't resolve a direct job URL.
+_JUNK_TITLE_RE = re.compile(
+    r'^(jobs|careers|openings|positions|opportunities|job opportunities|open roles|current openings)\s+at\b'
+    r'|^(work|join us|life)\s+at\b'
+    r'|^(jobs|careers|open roles|job openings|job opportunities)$'
+    r'|\bjobs?\s+listing\b'
+    r'|\bcareer\s+(portal|page|site|hub)\b',
+    re.IGNORECASE,
+)
+
+# URLs that resolve to a generic careers home page rather than a specific job posting.
+# We catch the most common patterns: /careers, /jobs, /job-board (with no further path).
+_GENERIC_CAREERS_URL_RE = re.compile(
+    r'(?:linkedin\.com/company/[^/]+/?$'           # linkedin company page (no /jobs/)
+    r'|/careers/?(?:\?[^/]*)?$'                     # site.com/careers or /careers?...
+    r'|/jobs/?(?:\?[^/]*)?$'                        # site.com/jobs or /jobs?...
+    r'|/job-board/?(?:\?[^/]*)?$'                   # site.com/job-board
+    r'|/about/careers/?$'                           # site.com/about/careers
+    r'|greenhouse\.io/[^/]+/?$'                     # greenhouse company root, no /jobs/
+    r'|lever\.co/[^/]+/?$)',                        # lever company root, no /apply/...
+    re.IGNORECASE,
+)
+
+
+def _is_junk_listing(title: str, url: str) -> bool:
+    """
+    Return True if this row looks like a generic careers-page listing rather than
+    a real, specific job posting. These are silently dropped to keep the pipeline clean.
+    """
+    t = title.strip()
+    if not t or t.lower() in ("unknown", "nan", "none", ""):
+        return True
+    if _JUNK_TITLE_RE.search(t):
+        return True
+    # Extra guard: if the URL is a generic careers/jobs root page, drop it regardless of title
+    if url and _GENERIC_CAREERS_URL_RE.search(url):
+        return True
+    return False
+
+
 def row_to_job(row: pd.Series) -> dict | None:
     apply_url = best_apply_url(row)
     if not apply_url or apply_url == "nan":
+        return None
+
+    raw_title = str(row.get("title", "Unknown"))
+
+    # Drop generic careers-page listings (e.g. "Jobs at Acme Corp" from LinkedIn)
+    if _is_junk_listing(raw_title, apply_url):
+        print(f'  [filter] Dropped junk listing: "{raw_title}" → {apply_url[:80]}', file=sys.stderr)
         return None
 
     # Location string
@@ -456,7 +504,7 @@ def row_to_job(row: pd.Series) -> dict | None:
             date_posted_str = None
 
     job: dict = {
-        "title":    str(row.get("title",   "Unknown")),
+        "title":    raw_title,
         "company":  str(row.get("company", "Unknown")),
         "location": job_location,
         "applyUrl": apply_url,
