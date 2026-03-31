@@ -8085,6 +8085,49 @@ textarea:focus,input:focus{border-color:var(--gold)}
   </div>
 </div>
 
+<!-- Hiring Manager Details Modal -->
+<div class="modal-overlay" id="hm-details-modal" style="display:none" onclick="if(event.target===this)closeHMDetailsModal()">
+  <div class="modal" style="max-width:460px;width:100%">
+    <div class="modal-header">
+      <div style="font-weight:700;font-size:15px">&#x1F464; Hiring Manager Details</div>
+      <button class="modal-close" onclick="closeHMDetailsModal()">&times;</button>
+    </div>
+    <div style="padding:20px;display:flex;flex-direction:column;gap:14px">
+      <div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:3px;letter-spacing:.05em">NAME</div>
+        <div id="hmd-name" style="font-size:15px;font-weight:600"></div>
+        <div id="hmd-title" style="font-size:12px;color:var(--muted);margin-top:2px"></div>
+      </div>
+      <div id="hmd-li-row" style="display:none">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:3px;letter-spacing:.05em">LINKEDIN</div>
+        <a id="hmd-li-link" href="#" target="_blank" rel="noopener" style="font-size:13px;color:#0a66c2;word-break:break-all"></a>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:5px;letter-spacing:.05em">EMAIL</div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span id="hmd-email-val" style="font-size:13px;font-family:monospace;color:#7ec8f7"></span>
+          <span id="hmd-email-loading" style="font-size:12px;color:var(--muted)">Searching Hunter.io&hellip;</span>
+          <span id="hmd-email-none" style="font-size:12px;color:var(--muted);display:none">Not found</span>
+          <button id="hmd-email-copy" class="btn btn-ghost btn-sm" style="font-size:10px;display:none" data-target="hmd-email-val" onclick="copyHMDetail(this.dataset.target,this)">Copy</button>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:5px;letter-spacing:.05em">PHONE</div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span id="hmd-phone-val" style="font-size:13px;font-family:monospace;color:#7ec8f7"></span>
+          <span id="hmd-phone-loading" style="font-size:12px;color:var(--muted)">Searching Apollo.io&hellip;</span>
+          <span id="hmd-phone-none" style="font-size:12px;color:var(--muted);display:none">Not found</span>
+          <button id="hmd-phone-copy" class="btn btn-ghost btn-sm" style="font-size:10px;display:none" data-target="hmd-phone-val" onclick="copyHMDetail(this.dataset.target,this)">Copy</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;padding-top:12px;border-top:1px solid rgba(255,255,255,.08)">
+        <button id="hmd-li-msg-btn" class="btn btn-ghost btn-sm" style="font-size:11px;color:#0a66c2" onclick="openLIModalFromDetails()">&#x1F4AC; Draft LinkedIn Message</button>
+        <button id="hmd-edit-btn" class="btn btn-ghost btn-sm" style="font-size:11px" onclick="openHMEditFromDetails()">&#x270E; Edit</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- LinkedIn Message Modal -->
 <div class="modal-overlay" id="li-msg-modal" style="display:none" onclick="if(event.target===this)closeLIModal()">
   <div class="modal" style="max-width:560px;width:100%">
@@ -8801,22 +8844,10 @@ function renderJobCard(j, opts) {
         + ' data-hmid="' + esc(j.hm_id || '') + '" data-jid="' + esc(j.id) + '"'
         + ' onclick="openLIModal(this.dataset.hmid,this.dataset.jid,this)">&#x1F4AC; LI</button>';
 
-      hmHtml = '<div style="margin:8px 0 4px;padding:8px 10px;background:rgba(245,200,66,.05);border:1px solid rgba(245,200,66,.15);border-radius:6px">'
-        + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap">'
-          + '<div style="flex:1;min-width:0">'
-            + '<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:1px">'
-              + '<span style="font-size:10px;color:var(--muted)">&#x1F464; HM</span>'
-              + '<div style="font-size:12px">' + hmNameHtml + '</div>'
-              + '<span style="display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;background:' + hmConfColor + '22;color:' + hmConfColor + ';border:1px solid ' + hmConfColor + '44">' + hmConfLabel + '</span>'
-              + hmSrcHtml
-              + liStatusBadge
-            + '</div>'
-            + (j.hm_title ? '<div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(j.hm_title) + '</div>' : '')
-            + hmEmailHtml
-            + hmPhoneHtml
-          + '</div>'
-          + '<div style="display:flex;gap:3px;flex-wrap:wrap;align-items:flex-start;flex-shrink:0">' + hmBtns + '</div>'
-        + '</div>'
+      hmHtml = '<div style="margin:8px 0 4px" id="hm-row-' + j.id + '">'
+        + '<button class="btn btn-ghost btn-sm" style="font-size:11px;width:100%;background:rgba(245,200,66,.06);border:1px solid rgba(245,200,66,.2);color:var(--gold)"'
+        + ' data-hmid="' + esc(String(j.hm_id || '')) + '" data-jid="' + esc(String(j.id)) + '" data-hmname="' + esc(j.hm_name || '') + '" data-hmtitle="' + esc(j.hm_title || '') + '" data-hmurl="' + esc(j.hm_linkedin_url || '') + '" data-hmemail="' + esc(j.hm_email || '') + '" data-hmphone="' + esc(j.hm_phone || '') + '" data-hmdomain="' + esc(j.hm_company_domain || '') + '" data-jco="' + esc(j.company || '') + '" data-hmsrc="' + esc(j.hm_enrichment_source || '') + '"'
+        + ' onclick="openHMDetailsModal(this.dataset.hmid,this.dataset.jid,this.dataset.hmname,this.dataset.hmtitle,this.dataset.hmurl,this.dataset.hmemail,this.dataset.hmphone,this.dataset.hmdomain,this.dataset.jco,this.dataset.hmsrc)">&#x1F464; View Hiring Manager Details</button>'
       + '</div>';
     } else {
       hmHtml = '<div style="margin:8px 0 4px" id="hm-row-' + j.id + '">'
@@ -9082,22 +9113,16 @@ function renderPipelineCard(j, stage) {
     } else if (j.hm_li_msg_status === 'draft') {
       pcLiStatus = '<span style="background:#f5c84222;color:#f5c842;border:1px solid #f5c84244;padding:0 4px;border-radius:3px;font-size:9px;margin-left:4px">LI Draft</span>';
     }
-    var pcEmailHtml = j.hm_email ? ' <span style="font-size:10px;color:#7ec8f7">&middot; ' + esc(j.hm_email) + '</span>' : '';
-    hmRow = '<div style="margin:5px 0;font-size:11px;color:var(--muted)">'
-      + '&#x1F464; <span style="color:var(--text)">' + pcLink + '</span>'
-      + (j.hm_title ? '<span style="font-size:10px"> &middot; ' + esc(j.hm_title) + '</span>' : '')
-      + ' <span style="display:inline-block;padding:0 4px;border-radius:3px;font-size:10px;font-weight:600;background:' + pcColor + '22;color:' + pcColor + ';border:1px solid ' + pcColor + '44">' + pcConf + '</span>'
-      + pcEmailHtml
-      + pcLiStatus
-      + ' <button class="btn btn-ghost btn-sm" style="font-size:9px;padding:1px 5px;margin-left:4px" title="Draft LinkedIn message"'
-        + ' data-hmid="' + esc(j.hm_id || '') + '" data-jid="' + esc(j.id) + '"'
-        + ' onclick="openLIModal(this.dataset.hmid,this.dataset.jid,this)">&#x1F4AC;</button>'
+    hmRow = '<div style="margin:5px 0" id="hm-pc-row-' + j.id + '">'
+      + '<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 8px;background:rgba(245,200,66,.06);border:1px solid rgba(245,200,66,.2);color:var(--gold)"'
+      + ' data-hmid="' + esc(String(j.hm_id || '')) + '" data-jid="' + esc(String(j.id)) + '" data-hmname="' + esc(j.hm_name || '') + '" data-hmtitle="' + esc(j.hm_title || '') + '" data-hmurl="' + esc(j.hm_linkedin_url || '') + '" data-hmemail="' + esc(j.hm_email || '') + '" data-hmphone="' + esc(j.hm_phone || '') + '" data-hmdomain="' + esc(j.hm_company_domain || '') + '" data-jco="' + esc(j.company || '') + '" data-hmsrc="' + esc(j.hm_enrichment_source || '') + '"'
+      + ' onclick="openHMDetailsModal(this.dataset.hmid,this.dataset.jid,this.dataset.hmname,this.dataset.hmtitle,this.dataset.hmurl,this.dataset.hmemail,this.dataset.hmphone,this.dataset.hmdomain,this.dataset.jco,this.dataset.hmsrc)">&#x1F464; View Hiring Manager Details</button>'
     + '</div>';
   } else {
     hmRow = '<div style="margin:5px 0" id="hm-pc-row-' + j.id + '">'
       + '<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px"'
       + ' data-jid="' + j.id + '" data-jco="' + esc(j.company) + '" data-jtit="' + esc(j.title) + '" data-jloc="' + esc(j.location || '') + '" data-jdesc=""'
-      + ' onclick="identifyHiringManager(this.dataset.jid,this.dataset.jco,this.dataset.jtit,this.dataset.jloc,this.dataset.jdesc)">&#x1F50D; Find HM</button>'
+      + ' onclick="identifyHiringManager(this.dataset.jid,this.dataset.jco,this.dataset.jtit,this.dataset.jloc,this.dataset.jdesc)">&#x1F50D; Identify Hiring Manager</button>'
     + '</div>';
   }
 
@@ -9106,7 +9131,6 @@ function renderPipelineCard(j, stage) {
   if (j.researched_at) completedBadges += '<span style="display:inline-flex;padding:1px 5px;border-radius:3px;font-size:9px;font-weight:600;background:rgba(0,200,110,.1);color:#00c86e;border:1px solid rgba(0,200,110,.25);margin-right:3px">&#x2713; Researched</span>';
   if (j.tailored_at) completedBadges += '<span style="display:inline-flex;padding:1px 5px;border-radius:3px;font-size:9px;font-weight:600;background:rgba(124,141,255,.12);color:#7c8dff;border:1px solid rgba(124,141,255,.25);margin-right:3px">&#x2713; Tailored</span>';
   if (j.reached_out_at) completedBadges += '<span style="display:inline-flex;padding:1px 5px;border-radius:3px;font-size:9px;font-weight:600;background:rgba(14,102,194,.12);color:#7ec8f7;border:1px solid rgba(14,102,194,.25);margin-right:3px">&#x2713; Reached Out</span>';
-  if (j.hm_identified_at || j.hm_name) completedBadges += '<span style="display:inline-flex;padding:1px 5px;border-radius:3px;font-size:9px;font-weight:600;background:rgba(245,200,66,.1);color:var(--gold);border:1px solid rgba(245,200,66,.25)">&#x2713; HM Found</span>';
 
   // Stage progression buttons (FIX #2)
   var nextStageMap = { interested: 'applied', applied: 'interviewing' };
@@ -9123,11 +9147,9 @@ function renderPipelineCard(j, stage) {
   if (stage === 'interested') {
     stageActionBtns =
       '<button class="btn btn-ghost btn-sm" style="font-size:11px" onclick="tailorResume(' + j.id + ')">Tailor Resume and Write CV</button>' +
-      '<button class="btn btn-ghost btn-sm" style="font-size:11px" data-jid="' + j.id + '" data-jco="' + esc(j.company) + '" data-jtit="' + esc(j.title) + '" data-jloc="' + esc(j.location || '') + '" data-jdesc="" onclick="identifyHiringManager(this.dataset.jid,this.dataset.jco,this.dataset.jtit,this.dataset.jloc,this.dataset.jdesc)">&#x1F50D; Identify Hiring Manager</button>' +
       '<button class="btn btn-ghost btn-sm" style="font-size:11px" onclick="researchCompany(' + j.id + ')">&#x1F4CB; Research</button>';
   } else if (stage === 'applied') {
     stageActionBtns =
-      '<button class="btn btn-ghost btn-sm" style="font-size:11px" data-jid="' + j.id + '" data-jco="' + esc(j.company) + '" data-jtit="' + esc(j.title) + '" data-jloc="' + esc(j.location || '') + '" data-jdesc="" onclick="identifyHiringManager(this.dataset.jid,this.dataset.jco,this.dataset.jtit,this.dataset.jloc,this.dataset.jdesc)">&#x1F50D; Identify Hiring Manager</button>' +
       '<button class="btn btn-reach btn-sm" style="font-size:11px" data-jid="' + j.id + '" data-jtit="' + esc(j.title) + '" data-jco="' + esc(j.company) + '" onclick="openOutreach(this.dataset.jid,this.dataset.jtit,this.dataset.jco)">&#x2709; Reach Out</button>';
   }
 
@@ -9557,6 +9579,163 @@ function openHMModal(hmId, name, title, url, jobId, jobCo, src) {
 
 function closeHMModal() {
   document.getElementById('hm-edit-modal').style.display = 'none';
+}
+
+// ── HM Details Modal ────────────────────────────────────────────────────────
+var _hmdHmId   = null;
+var _hmdJobId  = null;
+var _hmdHmName = null;
+var _hmdHmTitle = null;
+var _hmdHmUrl  = null;
+var _hmdHmDomain = null;
+var _hmdHmCo   = null;
+var _hmdHmSrc  = null;
+
+function closeHMDetailsModal() {
+  document.getElementById('hm-details-modal').style.display = 'none';
+}
+
+async function openHMDetailsModal(hmId, jobId, name, title, url, email, phone, domain, company, src) {
+  _hmdHmId    = hmId;
+  _hmdJobId   = jobId;
+  _hmdHmName  = name;
+  _hmdHmTitle = title;
+  _hmdHmUrl   = url;
+  _hmdHmDomain = domain;
+  _hmdHmCo    = company;
+  _hmdHmSrc   = src;
+
+  document.getElementById('hmd-name').textContent = name || 'Unknown';
+  document.getElementById('hmd-title').textContent = title || '';
+
+  var liRow = document.getElementById('hmd-li-row');
+  var liLink = document.getElementById('hmd-li-link');
+  if (url) {
+    liLink.href = url;
+    var liParts = url.split('linkedin.com/in/');
+    var liSlug = liParts.length > 1 ? liParts[1].split('/')[0] : url;
+    liLink.textContent = liSlug || url;
+    liRow.style.display = '';
+  } else {
+    liRow.style.display = 'none';
+  }
+
+  // Email — show immediately if available, else auto-fetch from Hunter.io
+  var emailVal     = document.getElementById('hmd-email-val');
+  var emailLoading = document.getElementById('hmd-email-loading');
+  var emailNone    = document.getElementById('hmd-email-none');
+  var emailCopy    = document.getElementById('hmd-email-copy');
+  if (email) {
+    emailVal.textContent = email;
+    emailLoading.style.display = 'none';
+    emailNone.style.display = 'none';
+    emailCopy.style.display = '';
+  } else {
+    emailVal.textContent = '';
+    emailCopy.style.display = 'none';
+    emailNone.style.display = 'none';
+    emailLoading.style.display = '';
+    _fetchHMEmailForModal(hmId, name, domain);
+  }
+
+  // Phone — show immediately if available, else auto-fetch from Apollo.io
+  var phoneVal     = document.getElementById('hmd-phone-val');
+  var phoneLoading = document.getElementById('hmd-phone-loading');
+  var phoneNone    = document.getElementById('hmd-phone-none');
+  var phoneCopy    = document.getElementById('hmd-phone-copy');
+  if (phone) {
+    phoneVal.textContent = phone;
+    phoneLoading.style.display = 'none';
+    phoneNone.style.display = 'none';
+    phoneCopy.style.display = '';
+  } else {
+    phoneVal.textContent = '';
+    phoneCopy.style.display = 'none';
+    phoneNone.style.display = 'none';
+    phoneLoading.style.display = '';
+    _fetchHMPhoneForModal(hmId, domain);
+  }
+
+  document.getElementById('hm-details-modal').style.display = 'flex';
+}
+
+async function _fetchHMEmailForModal(hmId, name, domain) {
+  try {
+    var nameParts = (name || '').trim().split(' ');
+    var res = await fetch('/api/hunter/find-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hiring_manager_id: Number(hmId), first_name: nameParts[0] || '', last_name: nameParts.slice(1).join(' ') || '', company_domain: domain || '' }),
+    });
+    var data = await res.json();
+    var emailLoading = document.getElementById('hmd-email-loading');
+    var emailNone    = document.getElementById('hmd-email-none');
+    var emailVal     = document.getElementById('hmd-email-val');
+    var emailCopy    = document.getElementById('hmd-email-copy');
+    if (emailLoading) emailLoading.style.display = 'none';
+    if (res.ok && data.email) {
+      if (emailVal) emailVal.textContent = data.email;
+      if (emailCopy) emailCopy.style.display = '';
+      loadSavedJobs();
+      if (document.getElementById('panel-pipeline').classList.contains('active')) loadPipeline();
+    } else {
+      if (emailNone) emailNone.style.display = '';
+    }
+  } catch(e) {
+    var emailLoading = document.getElementById('hmd-email-loading');
+    var emailNone    = document.getElementById('hmd-email-none');
+    if (emailLoading) emailLoading.style.display = 'none';
+    if (emailNone) { emailNone.textContent = 'Fetch error'; emailNone.style.display = ''; }
+  }
+}
+
+async function _fetchHMPhoneForModal(hmId, domain) {
+  try {
+    var res = await fetch('/api/apollo/enrich-person', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hiring_manager_id: Number(hmId), company_domain: domain || '' }),
+    });
+    var data = await res.json();
+    var phoneLoading = document.getElementById('hmd-phone-loading');
+    var phoneNone    = document.getElementById('hmd-phone-none');
+    var phoneVal     = document.getElementById('hmd-phone-val');
+    var phoneCopy    = document.getElementById('hmd-phone-copy');
+    if (phoneLoading) phoneLoading.style.display = 'none';
+    if (res.ok && data.person && data.person.phone_number) {
+      if (phoneVal) phoneVal.textContent = data.person.phone_number;
+      if (phoneCopy) phoneCopy.style.display = '';
+      loadSavedJobs();
+      if (document.getElementById('panel-pipeline').classList.contains('active')) loadPipeline();
+    } else {
+      if (phoneNone) phoneNone.style.display = '';
+    }
+  } catch(e) {
+    var phoneLoading = document.getElementById('hmd-phone-loading');
+    var phoneNone    = document.getElementById('hmd-phone-none');
+    if (phoneLoading) phoneLoading.style.display = 'none';
+    if (phoneNone) { phoneNone.textContent = 'Fetch error'; phoneNone.style.display = ''; }
+  }
+}
+
+function copyHMDetail(targetId, btn) {
+  var el = document.getElementById(targetId);
+  if (el && el.textContent) {
+    navigator.clipboard.writeText(el.textContent).then(function() {
+      var orig = btn ? btn.textContent : '';
+      if (btn) { btn.textContent = 'Copied!'; setTimeout(function(){ if (btn) btn.textContent = orig; }, 1500); }
+    });
+  }
+}
+
+function openLIModalFromDetails() {
+  closeHMDetailsModal();
+  openLIModal(_hmdHmId, _hmdJobId, null);
+}
+
+function openHMEditFromDetails() {
+  closeHMDetailsModal();
+  openHMModal(_hmdHmId, _hmdHmName, _hmdHmTitle, _hmdHmUrl, _hmdJobId, _hmdHmCo, _hmdHmSrc);
 }
 
 async function saveHMEdit() {
