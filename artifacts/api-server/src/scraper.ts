@@ -28,7 +28,11 @@ interface LeverJob {
   descriptionPlain?: string;
 }
 
-export async function scrapeGreenhouseJobs(slug: string, companyName: string): Promise<ScrapedJob[]> {
+export async function scrapeGreenhouseJobs(
+  slug: string,
+  companyName: string,
+  titleFilter?: RegExp,
+): Promise<ScrapedJob[]> {
   const url = `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs?content=true`;
 
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -46,8 +50,17 @@ export async function scrapeGreenhouseJobs(slug: string, companyName: string): P
       }
       const data = (await response.json()) as { jobs?: GreenhouseJob[] };
       if (!data.jobs) return [];
-      console.log(`Greenhouse: found ${data.jobs.length} jobs at ${slug}`);
-      return data.jobs.map((job) => {
+
+      // Apply title filter early — Greenhouse boards return ALL company jobs (engineering,
+      // finance, marketing, etc). We only want roles matching the user's target roles.
+      const matchedJobs = titleFilter
+        ? data.jobs.filter(j => titleFilter.test(j.title))
+        : data.jobs;
+      console.log(
+        `Greenhouse: ${slug} → ${data.jobs.length} total, ${matchedJobs.length} match target roles`,
+      );
+
+      return matchedJobs.map((job) => {
         // Strip HTML from content field and extract salary from metadata
         const rawDesc = job.content ?? '';
         const plainDesc = rawDesc
@@ -82,7 +95,11 @@ export async function scrapeGreenhouseJobs(slug: string, companyName: string): P
   return [];
 }
 
-export async function scrapeLeverJobs(slug: string, companyName: string): Promise<ScrapedJob[]> {
+export async function scrapeLeverJobs(
+  slug: string,
+  companyName: string,
+  titleFilter?: RegExp,
+): Promise<ScrapedJob[]> {
   try {
     const url = `https://api.lever.co/v0/postings/${slug}?mode=json`;
     console.log(`Lever: scanning ${slug}...`);
@@ -92,8 +109,9 @@ export async function scrapeLeverJobs(slug: string, companyName: string): Promis
       return [];
     }
     const data = (await response.json()) as LeverJob[];
-    console.log(`Lever: found ${data.length} jobs at ${slug}`);
-    return data.map((job) => ({
+    const matched = titleFilter ? data.filter(j => titleFilter.test(j.text)) : data;
+    console.log(`Lever: ${slug} → ${data.length} total, ${matched.length} match target roles`);
+    return matched.map((job) => ({
       title: job.text,
       company: companyName,
       location: job.categories?.location ?? 'Unknown',

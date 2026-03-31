@@ -5023,6 +5023,15 @@ async function runScoutInBackground(runId: number): Promise<void> {
     const perCompanyStats: { name: string; type: string; jobs: number; error?: string }[] = [];
 
     await setStage(`Scraping ${companies.length} ATS job boards…`);
+
+    // Build title filter once before the ATS loop so Greenhouse/Lever can apply it
+    // at the source — this prevents hundreds of irrelevant jobs (engineering, finance,
+    // HR, etc.) from entering the pipeline just to be dropped later.
+    const atsTitleFilter = buildTitleFilter(criteria.target_roles);
+    if (atsTitleFilter) {
+      console.log(`ATS title filter active: ${criteria.target_roles.slice(0, 5).join(', ')}${criteria.target_roles.length > 5 ? '…' : ''}`);
+    }
+
     // ── Stage 2a: Scrape Greenhouse, Lever, and Workday companies ──
     for (const c of companies) {
       const co = c as { id: number; name: string; ats_type: string; ats_slug: string | null; careers_url: string | null; scan_failures: number; ats_types_tried: string[] };
@@ -5030,21 +5039,23 @@ async function runScoutInBackground(runId: number): Promise<void> {
         let jobCount = 0;
         let scraped = false;
         if (co.ats_type === 'greenhouse' && co.ats_slug) {
-          const jobs = await scrapeGreenhouseJobs(co.ats_slug, co.name);
+          const jobs = await scrapeGreenhouseJobs(co.ats_slug, co.name, atsTitleFilter ?? undefined);
           jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Greenhouse' })));
           perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
           scraped = true;
         } else if (co.ats_type === 'lever' && co.ats_slug) {
-          const jobs = await scrapeLeverJobs(co.ats_slug, co.name);
+          const jobs = await scrapeLeverJobs(co.ats_slug, co.name, atsTitleFilter ?? undefined);
           jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Lever' })));
           perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
           scraped = true;
         } else if (co.ats_type === 'workday' && co.ats_slug && co.careers_url) {
           const jobs = await scrapeWorkdayJobs(co.name, co.careers_url, co.ats_slug);
-          jobCount = jobs.length;
-          allJobs.push(...jobs.map(j => ({ ...j, source: 'Workday' })));
+          // Workday already uses keyword search terms, but apply title filter as a safety pass
+          const filteredWorkday = atsTitleFilter ? jobs.filter(j => atsTitleFilter.test(j.title)) : jobs;
+          jobCount = filteredWorkday.length;
+          allJobs.push(...filteredWorkday.map(j => ({ ...j, source: 'Workday' })));
           perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
           scraped = true;
         }
