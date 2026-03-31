@@ -1,0 +1,63 @@
+
+> @workspace/api-server@1.0.0 dev
+> node -e "require('fs').rmSync('dist',{recursive:true,force:true})" && tsx ./src/index.ts
+
+Port 8080 in use, killing existing process...
+URL health check: checking 11 unchecked job URLs…
+URL health check complete: 0 live, 0 broken, 11 skipped
+
+──── JOB RECOVERY ENGINE ────────────────────────────────────
+[Recovery Phase B] 20 aggregator/broken jobs | Gemini: enabled
+node:events:486
+      throw er; // Unhandled 'error' event
+      ^
+
+Error: listen EADDRINUSE: address already in use :::8080
+    at Server.setupListenHandle [as _listen2] (node:net:1940:16)
+    at listenInCluster (node:net:1997:12)
+    at Server.listen (node:net:2102:7)
+    at app.listen (/home/runner/workspace/node_modules/.pnpm/express@4.22.1/node_modules/express/lib/application.js:635:24)
+    at Timeout._onTimeout (/home/runner/workspace/artifacts/api-server/src/index.ts:5802:17)
+    at listOnTimeout (node:internal/timers:605:17)
+    at process.processTimers (node:internal/timers:541:7)
+Emitted 'error' event on Server instance at:
+    at emitErrorNT (node:net:1976:8)
+    at process.processTicksAndRejections (node:internal/process/task_queues:89:21) {
+  code: 'EADDRINUSE',
+  errno: -98,
+  syscall: 'listen',
+  address: '::',
+  port: 8080
+}
+
+Node.js v24.13.0
+> @workspace/api-server@1.0.0 dev
+> node -e "require('fs').rmSync('dist',{recursive:true,force:true})" && tsx ./src/index.ts
+
+Port 8080 in use, killing existing process...
+URL health check: checking 11 unchecked job URLs…
+URL health check complete: 0 live, 0 broken, 11 skipped
+
+──── JOB RECOVERY ENGINE ────────────────────────────────────
+[Recovery Phase B] 20 aggregator/broken jobs | Gemini: enabled
+node:events:486
+      throw er; // Unhandled 'error' event
+      ^
+
+Error: listen EADDRINUSE: address already in use :::8080
+    at Server.setupListenHandle [as _listen2] (node:net:1940:16)
+    at listenInCluster (node:net:1997:12)
+    at Server.listen (node:net:2102:7)
+    at app.listen (/home/runner/workspace/node_modules/.pnpm/express@4.22.1/node_modules/express/lib/application.js:635:24)
+    at Timeout._onTimeout (/home/runner/workspace/artifacts/api-server/src/index.ts:5802:17)
+    at listOnTimeout (node:internal/timers:605:17)
+    at process.processTimers (node:internal/timers:541:7)
+Emitted 'error' event on Server instance at:
+    at emitErrorNT (node:net:1976:8)
+    at process.processTicksAndRejections (node:internal/process/task_queues:89:21) {
+  code: 'EADDRINUSE',
+  errno: -98,
+  syscall: 'listen',
+  address: '::',
+  port: 8080
+}
