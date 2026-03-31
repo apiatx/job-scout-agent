@@ -6694,7 +6694,6 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="nav-group">
     <div class="nav-group-label">Search</div>
     <div class="tab active" id="tab-jobs" onclick="showTab('jobs')" data-tooltip="Your scored job board. Claude rates every listing Top Target / Fast Win / Stretch / Probably Skip against your resume and settings.">Scout</div>
-    <div class="tab" id="tab-saved" onclick="showTab('saved')" data-tooltip="Jobs you've starred. Generate tailored resumes and cover letters from each one.">Saved Jobs</div>
     <div class="tab" id="tab-intel" onclick="showTab('intel')" data-tooltip="Gemini scans the web daily for companies actively hiring in your space. Market trends, emerging themes, hot companies to target now.">Career Intel</div>
     <div class="tab" id="tab-pulse" onclick="showTab('pulse')" data-tooltip="Job Market Pulse — which companies are hiring most aggressively, what roles are trending, salary patterns from your scout data, and Gemini's verdict: true growth or hype?">Job Market Pulse</div>
     <div class="tab" id="tab-leaders" onclick="showTab('leaders')" data-tooltip="Claude-ranked top 5-10 sales-led companies per sector — SaaS, Cybersecurity, AI Infrastructure, Networking and more. The gold standard companies to target for your next move.">Industry Leaders</div>
@@ -6706,6 +6705,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   </div>
   <div class="nav-group">
     <div class="nav-group-label">Execute</div>
+    <div class="tab" id="tab-saved" onclick="showTab('saved')" data-tooltip="Jobs you've starred. Generate tailored resumes and cover letters from each one.">Saved Jobs</div>
     <div class="tab" id="tab-pipeline" onclick="showTab('pipeline')" data-tooltip="Your active application pipeline. Track every job you've applied to, are interviewing for, or are interested in — with daily AI action recommendations.">My Pipeline</div>
     <div class="tab" id="tab-research" onclick="showTab('research')" data-tooltip="Deep-dive company research powered by Claude. Culture, financials, hiring signals, and interview prep before you apply.">Company Research</div>
     <div class="tab" id="tab-positioning" onclick="showTab('positioning')" data-tooltip="Content studio — separate from the job search. Generates your LinkedIn headline, pitches, bios, and objection prep from your intake form. Never affects scoring or discovery.">Positioning</div>
@@ -6783,7 +6783,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <!-- Kanban columns -->
   <div class="pipeline-columns" id="pipeline-columns">
     <div class="pipeline-col">
-      <div class="pipeline-col-header col-interested">&#x2605; Interested <span class="pipeline-col-count" id="pipe-count-interested">0</span></div>
+      <div class="pipeline-col-header col-interested">&#x2795; Apply <span class="pipeline-col-count" id="pipe-count-interested">0</span></div>
       <div id="pipe-col-interested"></div>
     </div>
     <div class="pipeline-col">
@@ -8596,7 +8596,7 @@ function renderJobCard(j, opts) {
   // User action status badge
   var userAction = j.user_action || '';
   var actionColors = { applied: '#4ade80', interested: '#f5c842', interviewing: '#818cf8', rejected: '#e55353', skipped: '#555' };
-  var actionLabels = { applied: '\u2713 Applied', interested: '\u2605 Interested', interviewing: '\uD83D\uDCCB Interviewing', rejected: '\u2715 Rejected', skipped: '\u2014 Skipped' };
+  var actionLabels = { applied: '\u2713 Applied', interested: '\u2795 Apply', interviewing: '\uD83D\uDCCB Interviewing', rejected: '\u2715 Rejected', skipped: '\u2014 Skipped' };
   var actionBadgeHtml = userAction ? '<span style="display:inline-flex;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:700;background:' + (actionColors[userAction] || '#555') + '22;color:' + (actionColors[userAction] || '#888') + ';border:1px solid ' + (actionColors[userAction] || '#555') + '44">' + (actionLabels[userAction] || userAction) + '</span>' : '';
 
   // Momentum badge (fresh data from company_momentum join)
@@ -8754,11 +8754,12 @@ function renderJobCard(j, opts) {
       '<button class="btn btn-ghost btn-sm" data-jid="' + j.id + '" data-jtit="' + esc(j.title) + '" data-jco="' + esc(j.company) + '" onclick="openCoverLetter(this.dataset.jid,this.dataset.jtit,this.dataset.jco)">\u270D Cover Letter</button>' +
       '<button class="btn btn-ghost btn-sm" id="research-btn-' + j.id + '" onclick="researchCompany(' + j.id + ')">\uD83D\uDD0D Research</button>' +
       (opts.showSavedDate
-        ? '<button class="btn btn-sm" style="background:rgba(229,83,83,.15);color:#e55353;border:1px solid rgba(229,83,83,.4)" onclick="unsaveJob(' + j.id + ')" id="unsave-btn-' + j.id + '">\u2715 Unsave</button>'
+        ? '<button class="btn btn-sm" style="background:rgba(0,200,110,.12);color:#00c86e;border:1px solid rgba(0,200,110,.3)" onclick="moveToPipeline(' + j.id + ')">&#x2795; Move to Pipeline</button>' +
+          '<button class="btn btn-sm" style="background:rgba(229,83,83,.15);color:#e55353;border:1px solid rgba(229,83,83,.4)" onclick="unsaveJob(' + j.id + ')" id="unsave-btn-' + j.id + '">\u2715 Unsave</button>'
         : '<select class="btn btn-ghost btn-sm track-status-sel" data-jid="' + j.id + '" onchange="markJobAction(this.dataset.jid,this.value);this.blur()" style="cursor:pointer">' +
             '<option value="">' + (userAction ? '\u21BA Change Status' : '\u2295 Track Status') + '</option>' +
             '<option value="applied"' + (userAction === 'applied' ? ' selected' : '') + '>\u2713 Applied</option>' +
-            '<option value="interested"' + (userAction === 'interested' ? ' selected' : '') + '>\u2605 Interested</option>' +
+            '<option value="interested"' + (userAction === 'interested' ? ' selected' : '') + '>\u2795 Apply</option>' +
             '<option value="interviewing"' + (userAction === 'interviewing' ? ' selected' : '') + '>\uD83D\uDCCB Interviewing</option>' +
             '<option value="rejected"' + (userAction === 'rejected' ? ' selected' : '') + '>\u2715 Rejected</option>' +
             '<option value="skipped"' + (userAction === 'skipped' ? ' selected' : '') + '>\u2014 Skipped</option>' +
@@ -9257,6 +9258,25 @@ async function removePipelineJob(jobId) {
     }
     await loadPipeline();
   } catch(e) { console.error('removePipelineJob failed:', e); }
+}
+
+async function moveToPipeline(jobId) {
+  try {
+    var res = await fetch('/api/jobs/' + jobId + '/action', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'interested' }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var updated = await res.json();
+    _jobsById[jobId] = updated;
+    for (var i = 0; i < _allJobs.length; i++) {
+      if (_allJobs[i].id == jobId) { _allJobs[i] = updated; break; }
+    }
+    // Show confirmation on the card
+    var btn = document.querySelector('[onclick="moveToPipeline(' + jobId + ')"]');
+    if (btn) { btn.textContent = '\u2713 Added to Pipeline'; btn.disabled = true; }
+  } catch(e) { console.error('moveToPipeline failed:', e); }
 }
 
 async function trackJobAction(jobId, field) {
