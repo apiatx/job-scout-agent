@@ -541,6 +541,10 @@ async function initDb(): Promise<void> {
   await safeAddColumn('jobs', 'user_action_at', 'TIMESTAMPTZ');
   await safeAddColumn('jobs', 'interview_prep_json', 'TEXT');
   await safeAddColumn('jobs', 'interview_prep_at', 'TIMESTAMPTZ');
+  await safeAddColumn('jobs', 'researched_at', 'TIMESTAMPTZ');
+  await safeAddColumn('jobs', 'tailored_at', 'TIMESTAMPTZ');
+  await safeAddColumn('jobs', 'reached_out_at', 'TIMESTAMPTZ');
+  await safeAddColumn('jobs', 'hm_identified_at', 'TIMESTAMPTZ');
   // Enhancement 1: Apollo fields on hiring_managers
   await safeAddColumn('hiring_managers', 'apollo_id', 'TEXT');
   await safeAddColumn('hiring_managers', 'email', 'TEXT');
@@ -2086,6 +2090,22 @@ app.put('/api/jobs/:id/action', async (req: Request, res: Response) => {
         ? 'UPDATE jobs SET user_action=NULL, user_action_at=NULL WHERE id=$1 RETURNING *'
         : 'UPDATE jobs SET user_action=$1, user_action_at=NOW() WHERE id=$2 RETURNING *',
       action === 'none' ? [req.params.id] : [action, req.params.id]
+    );
+    if (!rows.length) { res.status(404).json({ error: 'Job not found' }); return; }
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Track completed action (research, tailor, reach-out, hm-identify) ────────
+app.put('/api/jobs/:id/track-action', async (req: Request, res: Response) => {
+  try {
+    const valid = ['researched_at', 'tailored_at', 'reached_out_at', 'hm_identified_at'];
+    const field: string = req.body?.field;
+    if (!field || !valid.includes(field)) {
+      res.status(400).json({ error: 'Invalid field. Must be: ' + valid.join(', ') }); return;
+    }
+    const { rows } = await pool.query(
+      `UPDATE jobs SET ${field} = NOW() WHERE id = $1 RETURNING *`, [req.params.id]
     );
     if (!rows.length) { res.status(404).json({ error: 'Job not found' }); return; }
     res.json(rows[0]);
@@ -8603,9 +8623,9 @@ function renderJobCard(j, opts) {
   var ssHtml = subScoresHtml(j);
   var ssToggle = j.sub_scores ? '<button class="sub-score-toggle" style="font-size:10px;margin-left:auto" onclick="toggleSubScores(' + j.id + ')">Details</button>' : '';
 
-  // Show "Reach Out" only for Top Target and Fast Win
+  // Show "Reach Out" — always on Saved Jobs page, or for Top Target/Fast Win on Scout
   var tier = (j.opportunity_tier || '').toLowerCase();
-  var showReach = tier.indexOf('top') !== -1 || tier.indexOf('fast') !== -1;
+  var showReach = opts.showSavedDate || tier.indexOf('top') !== -1 || tier.indexOf('fast') !== -1;
   // Use data-* attributes to avoid escaping issues in onclick
   var reachBtn = showReach ? '<button class="btn btn-reach btn-sm" data-jid="' + j.id + '" data-jtit="' + esc(j.title) + '" data-jco="' + esc(j.company) + '" onclick="openOutreach(this.dataset.jid,this.dataset.jtit,this.dataset.jco)">\u2709 Reach Out</button>' : '';
 
@@ -8728,21 +8748,23 @@ function renderJobCard(j, opts) {
     ssHtml +
     // ── Actions
     '<div class="card-foot">' +
-      recActionHtml(j) +
       '<a href="' + esc(j.display_url || j.canonical_url || j.apply_url) + '" target="_blank" rel="noopener" class="btn btn-apply btn-sm' + (linkBroken ? ' btn-link-warn' : '') + '" title="' + (linkBroken ? '\u26a0 Link may be broken or expired \u2014 try searching the company careers page' : (validationStatus === 'recovered' || validationStatus === 'validated') ? '\u2714 Verified direct source link' : 'Apply to this job') + '">Apply Now \u2192' + (linkBroken ? ' \u26a0' : '') + '</a>' +
       reachBtn +
       '<button class="btn btn-ghost btn-sm" onclick="tailorResume(' + j.id + ')">Tailor Resume and Write CV</button>' +
       '<button class="btn btn-ghost btn-sm" data-jid="' + j.id + '" data-jtit="' + esc(j.title) + '" data-jco="' + esc(j.company) + '" onclick="openCoverLetter(this.dataset.jid,this.dataset.jtit,this.dataset.jco)">\u270D Cover Letter</button>' +
       '<button class="btn btn-ghost btn-sm" id="research-btn-' + j.id + '" onclick="researchCompany(' + j.id + ')">\uD83D\uDD0D Research</button>' +
-      '<select class="btn btn-ghost btn-sm track-status-sel" data-jid="' + j.id + '" onchange="markJobAction(this.dataset.jid,this.value);this.blur()" style="cursor:pointer">' +
-        '<option value="">' + (userAction ? '\u21BA Change Status' : '\u2295 Track Status') + '</option>' +
-        '<option value="applied"' + (userAction === 'applied' ? ' selected' : '') + '>\u2713 Applied</option>' +
-        '<option value="interested"' + (userAction === 'interested' ? ' selected' : '') + '>\u2605 Interested</option>' +
-        '<option value="interviewing"' + (userAction === 'interviewing' ? ' selected' : '') + '>\uD83D\uDCCB Interviewing</option>' +
-        '<option value="rejected"' + (userAction === 'rejected' ? ' selected' : '') + '>\u2715 Rejected</option>' +
-        '<option value="skipped"' + (userAction === 'skipped' ? ' selected' : '') + '>\u2014 Skipped</option>' +
-      '</select>' +
-      '<button class="' + saveClass + '" onclick="toggleSave(' + j.id + ')" id="save-btn-' + j.id + '">' + saveLabel + '</button>' +
+      (opts.showSavedDate
+        ? '<button class="btn btn-sm" style="background:rgba(229,83,83,.15);color:#e55353;border:1px solid rgba(229,83,83,.4)" onclick="unsaveJob(' + j.id + ')" id="unsave-btn-' + j.id + '">\u2715 Unsave</button>'
+        : '<select class="btn btn-ghost btn-sm track-status-sel" data-jid="' + j.id + '" onchange="markJobAction(this.dataset.jid,this.value);this.blur()" style="cursor:pointer">' +
+            '<option value="">' + (userAction ? '\u21BA Change Status' : '\u2295 Track Status') + '</option>' +
+            '<option value="applied"' + (userAction === 'applied' ? ' selected' : '') + '>\u2713 Applied</option>' +
+            '<option value="interested"' + (userAction === 'interested' ? ' selected' : '') + '>\u2605 Interested</option>' +
+            '<option value="interviewing"' + (userAction === 'interviewing' ? ' selected' : '') + '>\uD83D\uDCCB Interviewing</option>' +
+            '<option value="rejected"' + (userAction === 'rejected' ? ' selected' : '') + '>\u2715 Rejected</option>' +
+            '<option value="skipped"' + (userAction === 'skipped' ? ' selected' : '') + '>\u2014 Skipped</option>' +
+          '</select>' +
+          '<button class="' + saveClass + '" onclick="toggleSave(' + j.id + ')" id="save-btn-' + j.id + '">' + saveLabel + '</button>'
+      ) +
     '</div>' +
   '</div>';
 }
@@ -8961,17 +8983,52 @@ function renderPipelineCard(j, stage) {
     + '</div>';
   }
 
+  // Completion badges (FIX #5 — track what has been done)
+  var completedBadges = '';
+  if (j.researched_at) completedBadges += '<span style="display:inline-flex;padding:1px 5px;border-radius:3px;font-size:9px;font-weight:600;background:rgba(0,200,110,.1);color:#00c86e;border:1px solid rgba(0,200,110,.25);margin-right:3px">&#x2713; Researched</span>';
+  if (j.tailored_at) completedBadges += '<span style="display:inline-flex;padding:1px 5px;border-radius:3px;font-size:9px;font-weight:600;background:rgba(124,141,255,.12);color:#7c8dff;border:1px solid rgba(124,141,255,.25);margin-right:3px">&#x2713; Tailored</span>';
+  if (j.reached_out_at) completedBadges += '<span style="display:inline-flex;padding:1px 5px;border-radius:3px;font-size:9px;font-weight:600;background:rgba(14,102,194,.12);color:#7ec8f7;border:1px solid rgba(14,102,194,.25);margin-right:3px">&#x2713; Reached Out</span>';
+  if (j.hm_identified_at || j.hm_name) completedBadges += '<span style="display:inline-flex;padding:1px 5px;border-radius:3px;font-size:9px;font-weight:600;background:rgba(245,200,66,.1);color:var(--gold);border:1px solid rgba(245,200,66,.25)">&#x2713; HM Found</span>';
+
+  // Stage progression buttons (FIX #2)
+  var nextStageMap = { interested: 'applied', applied: 'interviewing' };
+  var nextStageLabelMap = { interested: 'Mark Applied', applied: 'Mark Interviewing' };
+  var nextStage = nextStageMap[stage] || '';
+  var nextStageLabel = nextStageLabelMap[stage] || '';
+  var progressBtn = nextStage
+    ? '<button class="btn btn-sm" style="background:rgba(0,200,110,.12);color:#00c86e;border:1px solid rgba(0,200,110,.3);font-size:11px" data-jid="' + j.id + '" data-ns="' + nextStage + '" onclick="markJobAction(this.dataset.jid,this.dataset.ns)">&#x2192; ' + esc(nextStageLabel) + '</button>'
+    : '';
+  var removeBtn = '<button class="btn btn-sm" style="background:rgba(229,83,83,.1);color:#e55353;border:1px solid rgba(229,83,83,.3);font-size:11px" onclick="removePipelineJob(' + j.id + ')">&#x2715; Remove</button>';
+
+  // Stage-specific action buttons (FIX #4)
+  var stageActionBtns = '';
+  if (stage === 'interested') {
+    stageActionBtns =
+      '<button class="btn btn-ghost btn-sm" style="font-size:11px" onclick="tailorResume(' + j.id + ')">Tailor Resume and Write CV</button>' +
+      '<button class="btn btn-ghost btn-sm" style="font-size:11px" data-jid="' + j.id + '" data-jco="' + esc(j.company) + '" data-jtit="' + esc(j.title) + '" data-jloc="' + esc(j.location || '') + '" data-jdesc="" onclick="identifyHiringManager(this.dataset.jid,this.dataset.jco,this.dataset.jtit,this.dataset.jloc,this.dataset.jdesc)">&#x1F50D; Identify Hiring Manager</button>' +
+      '<button class="btn btn-ghost btn-sm" style="font-size:11px" onclick="researchCompany(' + j.id + ')">&#x1F4CB; Research</button>';
+  } else if (stage === 'applied') {
+    stageActionBtns =
+      '<button class="btn btn-ghost btn-sm" style="font-size:11px" data-jid="' + j.id + '" data-jco="' + esc(j.company) + '" data-jtit="' + esc(j.title) + '" data-jloc="' + esc(j.location || '') + '" data-jdesc="" onclick="identifyHiringManager(this.dataset.jid,this.dataset.jco,this.dataset.jtit,this.dataset.jloc,this.dataset.jdesc)">&#x1F50D; Identify Hiring Manager</button>' +
+      '<button class="btn btn-reach btn-sm" style="font-size:11px" data-jid="' + j.id + '" data-jtit="' + esc(j.title) + '" data-jco="' + esc(j.company) + '" onclick="openOutreach(this.dataset.jid,this.dataset.jtit,this.dataset.jco)">&#x2709; Reach Out</button>';
+  }
+
   return '<div class="pipeline-card">' +
     '<div class="pipeline-card-title">' + esc(j.title) + '</div>' +
     '<div class="pipeline-card-co">' + esc(j.company) + '</div>' +
     hmRow +
+    (completedBadges ? '<div style="margin:4px 0 5px">' + completedBadges + '</div>' : '') +
     '<div class="pipeline-card-meta">' +
       '<span>&#x1F552; ' + esc(daysLabel) + '</span>' +
       (scoreHtml ? '<span>' + scoreHtml + '/100</span>' : '') +
       prepBadge + docsBadge +
     '</div>' +
     '<div class="pipeline-card-actions">' +
+      stageActionBtns +
       applyBtn + prepBtn + viewJobsBtn +
+    '</div>' +
+    '<div class="pipeline-card-actions" style="margin-top:5px;border-top:1px solid rgba(255,255,255,.06);padding-top:7px">' +
+      progressBtn + removeBtn +
     '</div>' +
   '</div>';
 }
@@ -9158,13 +9215,65 @@ async function toggleSave(jobId) {
       res = await fetch('/api/jobs/' + jobId + '/save', { method: 'POST' });
     }
     var updated = await res.json();
-    // update local data
     _jobsById[jobId] = updated;
     for (var i = 0; i < _allJobs.length; i++) {
       if (_allJobs[i].id === jobId) { _allJobs[i] = updated; break; }
     }
     renderJobs();
   } catch(e) {}
+}
+
+async function unsaveJob(jobId) {
+  var btn = document.getElementById('unsave-btn-' + jobId);
+  if (btn) { btn.disabled = true; btn.textContent = 'Removing...'; }
+  try {
+    var res = await fetch('/api/jobs/' + jobId + '/save', { method: 'DELETE' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var updated = await res.json();
+    _jobsById[jobId] = updated;
+    for (var i = 0; i < _allJobs.length; i++) {
+      if (_allJobs[i].id == jobId) { _allJobs[i] = updated; break; }
+    }
+    // Reload the saved jobs grid to remove the card
+    await loadSavedJobs();
+  } catch(e) {
+    console.error('unsaveJob failed:', e);
+    if (btn) { btn.disabled = false; btn.textContent = '\u2715 Unsave'; }
+  }
+}
+
+async function removePipelineJob(jobId) {
+  try {
+    var res = await fetch('/api/jobs/' + jobId + '/action', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'none' }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var updated = await res.json();
+    _jobsById[jobId] = updated;
+    for (var i = 0; i < _allJobs.length; i++) {
+      if (_allJobs[i].id == jobId) { _allJobs[i] = updated; break; }
+    }
+    await loadPipeline();
+  } catch(e) { console.error('removePipelineJob failed:', e); }
+}
+
+async function trackJobAction(jobId, field) {
+  try {
+    var res = await fetch('/api/jobs/' + jobId + '/track-action', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ field: field }),
+    });
+    if (res.ok) {
+      var updated = await res.json();
+      _jobsById[jobId] = updated;
+      for (var i = 0; i < _allJobs.length; i++) {
+        if (_allJobs[i].id == jobId) { _allJobs[i] = updated; break; }
+      }
+    }
+  } catch(e) { console.warn('trackJobAction failed:', e); }
 }
 
 // ── saved jobs ────────────────────────────────────────────────────────────
@@ -9221,6 +9330,8 @@ async function identifyHiringManager(jobId, company, title, location, descSnippe
       }
       return;
     }
+    // Track the action (FIX #5)
+    trackJobAction(jobId, 'hm_identified_at');
     // Reload saved jobs to reflect new HM data
     await loadSavedJobs();
     // Update pipeline if visible
@@ -9859,6 +9970,7 @@ function trSetStep(step, state) {
 }
 
 async function tailorResume(jobId) {
+  trackJobAction(jobId, 'tailored_at');
   var j = _jobsById[jobId] || {};
   _trJobId = jobId;
   _trJobTitle = j.title || '';
@@ -10386,6 +10498,7 @@ async function loadAutoRunBadge() {
 
 // ── Outreach modal ──────────────────────────────────────────────────────────
 async function openOutreach(jobId, title, company) {
+  trackJobAction(jobId, 'reached_out_at');
   var modal = document.getElementById('outreach-modal');
   var titleEl = document.getElementById('outreach-title');
   var body = document.getElementById('outreach-body');
@@ -11039,6 +11152,7 @@ async function _pollResearch(briefId) {
 }
 
 async function researchCompany(jobId) {
+  trackJobAction(jobId, 'researched_at');
   _researchJobId = jobId;
   var j = _jobsById[jobId] || {};
   var btn = document.getElementById('research-btn-' + jobId);
