@@ -2510,17 +2510,27 @@ Rules:
           `Focus only on people who are currently at ${companyName} — not former employees.`,
         ].join(' ');
 
-        const hmSearchResp = await hmGenAI.models.generateContent({
-          model: 'gemini-2.5-flash-preview',
-          contents: geminiHMPrompt,
-          config: { tools: [{ googleSearch: {} }] },
-        });
-
-        const rawText = (hmSearchResp as any).text || '';
-        if (rawText.length > 80) {
-          geminiWebSearchText = rawText;
-          enrichmentSource = 'gemini';
-          console.log(`[HiringManager] Gemini web search: ${rawText.length} chars of web-grounded results`);
+        const hmModels = ['gemini-3-flash-preview', 'gemini-flash-latest', 'gemini-pro-latest'];
+        for (const hmModel of hmModels) {
+          try {
+            const hmSearchResp = await hmGenAI.models.generateContent({
+              model: hmModel,
+              contents: geminiHMPrompt,
+              config: { tools: [{ googleSearch: {} }] },
+            });
+            const rawText = (hmSearchResp as any).text || '';
+            if (rawText.length > 80) {
+              geminiWebSearchText = rawText;
+              enrichmentSource = 'gemini';
+              console.log(`[HiringManager] Gemini web search (${hmModel}): ${rawText.length} chars`);
+            }
+            break; // success — stop waterfall
+          } catch (hmModelErr: any) {
+            const msg = hmModelErr instanceof Error ? hmModelErr.message : String(hmModelErr);
+            const isUnavail = msg.includes('not found') || msg.includes('404') || msg.includes('deprecated') || msg.includes('not available');
+            console.warn(`[HiringManager] Gemini model ${hmModel} failed: ${msg.slice(0, 120)}`);
+            if (!isUnavail) break; // non-model error — don't try next model
+          }
         }
       } catch (geminiHMErr) {
         console.warn('[HiringManager] Gemini web search failed:', geminiHMErr instanceof Error ? geminiHMErr.message : geminiHMErr);
@@ -2551,24 +2561,28 @@ Rules:
       const step3 = await hmClaude.messages.create({
         model: 'claude-opus-4-6',
         max_tokens: 1024,
-        system: `You are a hiring manager identification engine. Given search results (LinkedIn profiles and/or Apollo data) and context about a job opening, identify the single most likely hiring manager.
+        system: `You are a hiring manager identification engine. Your job is to ALWAYS return the most likely hiring manager — never return null names unless the company is completely fictional or unknown.
+
+Priority order for identification:
+1. SEARCH RESULTS (highest confidence): Use any LinkedIn profiles, Apollo data, or web search results provided. Extract real names, titles, and LinkedIn URLs.
+2. YOUR TRAINING KNOWLEDGE (medium confidence): You know the leadership teams of thousands of companies. Draw on that. If you know who the VP of Sales or Director of Enterprise Sales is at this company, use that knowledge.
+3. REASONED INFERENCE (low confidence): If you have no specific knowledge, reason about what title the hiring manager would have given the role, department, region, and company size/type. Make a specific educated guess — a likely name from your knowledge or the most plausible person.
 
 Rules:
 - The hiring manager is the person this role REPORTS TO, not the recruiter
-- Ignore recruiters, talent acquisition, HR people — they post the job but don't manage the role
-- Ignore people with the SAME title as the open role — they'd be peers, not managers
-- Look for someone one level ABOVE the open role in the same department and region
-- If multiple candidates match, pick the one whose title and region most closely align
-- If no strong match exists, say so honestly — don't guess
+- Ignore recruiters, talent acquisition, HR people
+- Ignore people with the SAME title as the open role — they'd be peers
+- Look one level ABOVE the open role in the same department and region
+- ALWAYS return a real person name. Only set full_name to null if the company is completely made-up or you have zero information whatsoever.
 
 Return ONLY valid JSON with no other text:
 
 {
   "full_name": "First Last",
   "title": "Their current title at the company",
-  "linkedin_url": "https://linkedin.com/in/their-profile",
+  "linkedin_url": "URL only if confirmed in search results or from training data — otherwise null",
   "confidence": "high or medium or low",
-  "reasoning": "One sentence explaining why you picked this person",
+  "reasoning": "One sentence: what source did you use and why this person",
   "alternative": {
     "full_name": "Second choice name or null",
     "title": "Second choice title or null",
@@ -2577,19 +2591,11 @@ Return ONLY valid JSON with no other text:
 }
 
 Confidence levels:
-- high: Title is clearly one level above the open role, same department, same region, currently at the company
-- medium: Title matches but region is unclear, or the person might be lateral, or the profile snippet is ambiguous
-- low: Best guess from limited data — might be wrong
+- high: Confirmed from live search results — specific person, title matches, currently at company
+- medium: From your training knowledge of this company's leadership (may be slightly dated)
+- low: Educated inference — most plausible candidate given company/role/region context
 
-If you truly cannot identify anyone from the results, return:
-{
-  "full_name": null,
-  "title": null,
-  "linkedin_url": null,
-  "confidence": "none",
-  "reasoning": "Explanation of why no match was found",
-  "alternative": null
-}`,
+Important: Never fabricate a LinkedIn URL. Only include one if you found it in the search results or are certain of it from training data.`,
         messages: [{
           role: 'user',
           content: `OPEN ROLE CONTEXT:
@@ -2650,7 +2656,7 @@ ${flattenedResults}`,
         job_id,
         hmData.full_name || null,
         hmData.title || null,
-        hmData.linkedin_url || null,
+        (hmData.linkedin_url && String(hmData.linkedin_url).startsWith('http')) ? hmData.linkedin_url : null,
         companyName,
         analysis.region || location || null,
         hmData.confidence || 'none',
