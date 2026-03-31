@@ -1231,8 +1231,10 @@ export async function generateCoverLetterWithClaude(params: {
   model?: string;
   territoryContext?: TerritoryContext | null;
   customInstructions?: string | null;
+  systemPrompt?: string | null;
+  tailoredResumeText?: string | null;
 }): Promise<CoverLetterResult> {
-  const { jobTitle, companyName, jobDescription, resumeText, userName, existingResearch, territoryContext, customInstructions } = params;
+  const { jobTitle, companyName, jobDescription, resumeText, userName, existingResearch, territoryContext, customInstructions, tailoredResumeText } = params;
   const temperature = params.temperature ?? 1;
   const MODEL_CL = params.model || 'claude-opus-4-6';
 
@@ -1290,37 +1292,39 @@ Respond with ONLY this JSON structure — no other text:
     ? `COMPANY RESEARCH (use the most relevant facts to ground the opening and positioning):\n${research.specificFacts.map((f, i) => `${i + 1}. ${f}`).join('\n')}\n\nCOMPANY MOMENT: ${research.companyMoment}\n\nROLE CONTEXT (the specific problem they are hiring this person to solve): ${research.roleContext}`
     : `Note: Live research was unavailable. Use the job description to ground the opening in what is happening at the company.`;
 
-  // Use custom instructions from DB if provided, otherwise use default
-  const styleInstructions = customInstructions?.trim() || DEFAULT_COVER_LETTER_INSTRUCTIONS;
-
-  const systemPrompt = `You are a cover letter strategist for enterprise technology sales professionals. ${styleInstructions}`;
+  // Priority: DB-loaded systemPrompt > customInstructions > DEFAULT_COVER_LETTER_INSTRUCTIONS
+  const resolvedSystemPrompt = params.systemPrompt?.trim()
+    || customInstructions?.trim()
+    || DEFAULT_COVER_LETTER_INSTRUCTIONS;
 
   // Build territory block if context exists
   const territoryBlock = territoryContext
     ? `\nTERRITORY CONTEXT: This is a ${territoryContext.territoryDetected} territory role.\nWhy this territory matters to the company: ${territoryContext.whyThisTerritory}\nKey prospect industries in territory: ${territoryContext.keyIndustries.join(', ')}\nMajor prospect accounts: ${territoryContext.majorProspects.join(', ')}\nMarket moment: ${territoryContext.marketMoment}\nWhy the candidate fits this territory: ${territoryContext.candidateAdvantage}\n\nFor territory roles: work the geography into the opening or proof points — show you understand the specific business opportunity in ${territoryContext.territoryDetected}, not just that you live there.`
     : '';
 
+  // Include tailored resume if available — this is the ATS-matched version the cover letter should pull proof points from
+  const tailoredResumeBlock = tailoredResumeText?.trim()
+    ? `\nTAILORED RESUME (pull the 3 most relevant proof points from here — this has already been matched to this specific role):\n${tailoredResumeText.slice(0, 2500)}`
+    : `\nMASTER RESUME (pull the 3 most relevant proof points from here — metrics, outcomes, company names):\n${resumeText.slice(0, 2000)}`;
+
   const userPrompt = `Write a cover letter for this application. Follow the structure and rules in the system prompt exactly.
 
+APPLICANT NAME: ${userName || 'The Candidate'}
 ROLE: ${jobTitle} at ${companyName}
 
 JOB DESCRIPTION:
 ${jobDescription.slice(0, 1500)}
-
-MY RESUME (pull the 3 most relevant proof points from here — metrics, outcomes, company names):
-${resumeText.slice(0, 2000)}
-
-MY NAME: ${userName || 'The Candidate'}
+${tailoredResumeBlock}
 
 ${factsBlock}${territoryBlock}
 
-Return ONLY the cover letter text. No subject line. No preamble. No explanation. Start with the opening line about their situation.`;
+Return ONLY the cover letter text. No subject line. No preamble. No explanation.`;
 
   const genMsg = await anthropic.messages.create({
     model: MODEL_CL,
     max_tokens: 2000,
     temperature,
-    system: systemPrompt,
+    system: resolvedSystemPrompt,
     messages: [{ role: 'user', content: userPrompt }],
   });
 
@@ -1370,8 +1374,9 @@ export async function tailorResumeV2WithClaude(params: {
   companyResearchContext?: string | null;
   model?: string;
   territoryContext?: TerritoryContext | null;
+  resumeSystemPrompt?: string | null;
 }): Promise<TailoredResumeV2Result> {
-  const { jobTitle, companyName, jobDescription, resumeText, companyResearchContext, territoryContext } = params;
+  const { jobTitle, companyName, jobDescription, resumeText, companyResearchContext, territoryContext, resumeSystemPrompt } = params;
   const MODEL = params.model || 'claude-opus-4-6';
 
   console.log(`[TailorV2] Starting 3-step tailoring for ${jobTitle} @ ${companyName}`);
@@ -1496,7 +1501,8 @@ Return ONLY a JSON object:
     ? `\n\nTERRITORY CONTEXT FOR THIS ROLE:\nTerritory: ${territoryContext.territoryDetected}\nKey industries in territory: ${territoryContext.keyIndustries.join(', ')}\nLikely target accounts: ${territoryContext.majorProspects.join(', ')}\nWhy candidate fits this territory: ${territoryContext.candidateAdvantage}\n\nADDITIONAL RESUME TAILORING INSTRUCTIONS FOR TERRITORY ROLES:\n- In the professional summary, if the candidate has relevant geographic or industry experience for this territory, surface it explicitly\n- If the candidate has sold to companies headquartered or operating heavily in this territory, reframe those bullets to make the geographic relevance clear\n- If the candidate's past accounts include companies that are in the same industry as the major prospects in this territory, highlight that industry expertise\n- Add the territory name naturally in the summary if the candidate has genuine relevant experience there — do not fabricate geographic experience`
     : '';
 
-  const systemPrompt = `You are an expert resume writer who specializes in helping enterprise technology sales professionals land roles at hardware, semiconductor, AI infrastructure, networking, and industrial technology companies. You write resumes that pass ATS screening and impress human recruiters.
+  // Use DB-loaded system prompt if provided, otherwise fall back to hardcoded default
+  const systemPrompt = resumeSystemPrompt?.trim() || `You are an expert resume writer who specializes in helping enterprise technology sales professionals land roles at hardware, semiconductor, AI infrastructure, networking, and industrial technology companies. You write resumes that pass ATS screening and impress human recruiters.
 
 CRITICAL RULES:
 - Never fabricate experience, metrics, companies, or achievements — only use what is in the source resume

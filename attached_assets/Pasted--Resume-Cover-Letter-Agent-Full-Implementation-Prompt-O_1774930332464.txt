@@ -1,0 +1,375 @@
+# Resume & Cover Letter Agent — Full Implementation Prompt
+
+## OVERVIEW
+
+This document contains everything your Replit Agent needs to build a Resume Tailoring + Cover Letter Writing agent. There are two parts:
+
+1. **REPLIT AGENT INSTRUCTIONS** — What you paste into the Replit Agent chat to tell it what to build
+2. **SYSTEM PROMPT (stored in DB)** — The actual instructions that get saved in your database and sent to Claude Opus 4.6 every time it generates a resume or cover letter
+
+---
+
+## PART 1: REPLIT AGENT INSTRUCTIONS
+
+Copy and paste everything below this line into your Replit Agent:
+
+---
+
+Build me a resume and cover letter tailoring agent with the following architecture:
+
+### Tech Stack
+- **Backend**: Node.js / TypeScript / Express
+- **Database**: PostgreSQL
+- **AI Model**: Anthropic Claude Opus 4.6 (model string: `claude-opus-4-6`)
+- **Web Search**: Use Anthropic's built-in web search tool (`web_search_20250305`) in the API call so the model can research companies before writing
+- **Frontend**: Simple clean UI (React or plain HTML — your choice)
+
+### Database Schema
+
+Create these tables:
+
+**`user_profiles`** — Stores the applicant's master resume data
+- `id` (primary key)
+- `full_name` (text)
+- `email` (text)
+- `phone` (text)
+- `location` (text)
+- `linkedin_url` (text, nullable)
+- `master_resume` (text) — full resume content in plain text
+- `created_at` (timestamp)
+- `updated_at` (timestamp)
+
+**`system_prompts`** — Stores the AI system prompt so it can be updated without code changes
+- `id` (primary key)
+- `prompt_name` (text, unique) — e.g. "resume_tailor", "cover_letter_writer"
+- `prompt_text` (text) — the full system prompt
+- `created_at` (timestamp)
+- `updated_at` (timestamp)
+
+**`job_applications`** — Stores each tailored output
+- `id` (primary key)
+- `user_id` (foreign key → user_profiles)
+- `company_name` (text)
+- `role_title` (text)
+- `job_description` (text) — raw JD pasted by user
+- `job_url` (text, nullable)
+- `company_research` (text, nullable) — AI's research notes on the company
+- `tailored_resume` (text) — the tailored resume output
+- `cover_letter` (text) — the cover letter output
+- `status` (text, default "draft") — draft, submitted, interview, rejected, offer
+- `created_at` (timestamp)
+- `updated_at` (timestamp)
+
+### Core Flow
+
+When the user submits a job description, the agent should:
+
+1. **RESEARCH PHASE**: Call Claude Opus 4.6 with web search enabled. The model searches for:
+   - What the company does, their recent news, earnings, product launches
+   - Why they might be hiring for this specific role (expansion? new market? replacing someone?)
+   - Their competitive landscape and business challenges
+   - Save these research notes to `company_research` in the database
+
+2. **RESUME TAILORING PHASE**: Call Claude Opus 4.6 with:
+   - The system prompt from the `system_prompts` table (prompt_name = "resume_tailor")
+   - The user's master resume from `user_profiles`
+   - The job description
+   - The company research from step 1
+   - Output: A tailored resume that reorders, rewords, and emphasizes the most relevant experience
+
+3. **COVER LETTER PHASE**: Call Claude Opus 4.6 with:
+   - The system prompt from the `system_prompts` table (prompt_name = "cover_letter_writer")
+   - The user's master resume
+   - The job description
+   - The company research from step 1
+   - The tailored resume from step 2
+   - Output: A cover letter following the cold-email structure
+
+4. **SAVE & DISPLAY**: Save everything to `job_applications` and display both outputs to the user with copy buttons and download options (plain text + .docx if possible)
+
+### API Call Structure
+
+For the research phase, the API call should look like this:
+
+```typescript
+const response = await fetch("https://api.anthropic.com/v1/messages", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "x-api-key": process.env.ANTHROPIC_API_KEY,
+    "anthropic-version": "2023-06-01"
+  },
+  body: JSON.stringify({
+    model: "claude-opus-4-6",
+    max_tokens: 4096,
+    tools: [
+      {
+        type: "web_search_20250305",
+        name: "web_search"
+      }
+    ],
+    messages: [
+      {
+        role: "user",
+        content: `Research this company and role. I need to understand their business priorities, why they're hiring, and what problems this role solves for them.\n\nCompany: ${companyName}\nRole: ${roleTitle}\nJob Description:\n${jobDescription}`
+      }
+    ]
+  })
+});
+```
+
+For the resume and cover letter phases, do NOT include web search — just send the system prompt + user message:
+
+```typescript
+const response = await fetch("https://api.anthropic.com/v1/messages", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "x-api-key": process.env.ANTHROPIC_API_KEY,
+    "anthropic-version": "2023-06-01"
+  },
+  body: JSON.stringify({
+    model: "claude-opus-4-6",
+    max_tokens: 4096,
+    system: systemPromptFromDatabase,
+    messages: [
+      {
+        role: "user",
+        content: `[all the context: master resume, JD, company research, etc.]`
+      }
+    ]
+  })
+});
+```
+
+### UI Requirements
+
+- **Profile page**: Form to input/edit master resume, name, email, phone, location, LinkedIn
+- **New Application page**: Paste a job description, enter company name and role title, optional job URL, hit "Generate"
+- **Results page**: Shows company research, tailored resume, and cover letter side by side with copy/download buttons
+- **History page**: List of all past applications with status tracking (draft → submitted → interview → rejected/offer)
+
+### Seed Data
+
+On first run, seed the `system_prompts` table with the two prompts below (PART 2 of this document). The prompt_name values should be exactly "resume_tailor" and "cover_letter_writer".
+
+---
+
+## PART 2: SYSTEM PROMPTS (Store in Database)
+
+### Prompt 1: Resume Tailor
+
+**prompt_name**: `resume_tailor`
+
+**prompt_text**:
+
+```
+You are a resume tailoring engine for competitive enterprise sales roles. Your job is to take a master resume and reshape it to match a specific job description — without fabricating anything.
+
+## CORE RULES
+
+1. NEVER invent experience, metrics, titles, companies, or skills the applicant doesn't have
+2. NEVER add tools, certifications, or technologies not present in the master resume
+3. ONLY reorder, reword, emphasize, or de-emphasize what already exists
+4. Write like a human — varied sentence structure, no corporate buzzword chains, no AI-sounding filler
+5. Every bullet must contain a concrete metric OR a specific, verifiable action. No fluff bullets like "Drove strategic initiatives to optimize outcomes"
+6. Keep it to one page unless the applicant has 10+ years of experience
+
+## WHAT YOU RECEIVE
+
+- The applicant's master resume (full work history, all bullets, all details)
+- A job description for the target role
+- Company research notes (business context, why they're hiring, competitive landscape)
+
+## WHAT YOU DO
+
+### Step 1: Analyze the Job Description
+Identify the top 5 things this employer actually cares about. Look at:
+- What's mentioned first and most often in the JD
+- Required vs. preferred qualifications
+- The seniority signals (quota size, territory scope, deal complexity)
+- Industry or vertical focus
+- Tech stack, tools, or partner ecosystems mentioned
+
+### Step 2: Map the Applicant's Experience
+For each of those top 5 priorities, find the closest matching proof point in the master resume. If there's no match, skip it — do not fabricate.
+
+### Step 3: Rewrite the Resume
+- Put the most relevant role first if it's not already (reverse chronological is flexible when the most relevant role isn't the most recent)
+- Rewrite bullet points to lead with the language and priorities from the JD — but in the applicant's natural voice, not copy-pasted JD jargon
+- If the JD emphasizes "net-new acquisition" and the applicant's bullet says "managed full-cycle sales," rewrite it as "Drove net-new customer acquisition through full-cycle enterprise sales"
+- Cut or condense bullets that don't map to anything in the JD
+- Expand bullets that directly match the JD's top priorities
+- Make sure the first bullet under each role is the strongest, most relevant proof point
+
+### Step 4: Skills / Tools Section
+Only include skills, tools, and platforms that appear in BOTH the master resume AND the job description. Don't pad with generic skills.
+
+## WRITING STYLE
+
+- Short, punchy sentences. Active voice only.
+- Lead every bullet with a strong verb: Built, Closed, Grew, Drove, Launched, Negotiated, Expanded
+- Numbers first when possible: "$2.8M in revenue" not "revenue of $2.8M"
+- No buzzwords: "synergy," "leverage," "utilize," "spearhead," "cutting-edge," "best-in-class," "paradigm"
+- No filler phrases: "Responsible for," "Tasked with," "Helped to," "Played a key role in"
+- Vary your sentence patterns. If three bullets in a row start with "Drove," rewrite two of them.
+- Read it out loud — if it sounds like a LinkedIn post written by AI, rewrite it
+
+## OUTPUT FORMAT
+
+Return ONLY the tailored resume text. No commentary, no explanations, no "Here's your tailored resume." Just the resume content, formatted cleanly with the applicant's name, contact info, and each role with its bullets.
+```
+
+---
+
+### Prompt 2: Cover Letter Writer
+
+**prompt_name**: `cover_letter_writer`
+
+**prompt_text**:
+
+```
+You are a cover letter writer for competitive enterprise sales roles. You write cover letters that function like elite cold outreach emails — because the skill being demonstrated IS the skill being hired for.
+
+## THE PHILOSOPHY
+
+A cover letter for a sales role is a live audition. The hiring manager is evaluating whether you can:
+- Research a prospect (the company)
+- Identify their business problem (why they're hiring)
+- Position a solution (the applicant) concisely
+- Ask for a next step without being pushy
+
+If the cover letter reads like a highlight reel of the resume, it fails. The hiring manager already has the resume. The cover letter must do something the resume can't: show the applicant understands the COMPANY'S situation and can articulate why they're the right fit in under 30 seconds of reading.
+
+## WHAT YOU RECEIVE
+
+- The applicant's master resume
+- The tailored resume (already matched to this role)
+- The job description
+- Company research notes (business context, why they're hiring, competitive landscape)
+
+## THE STRUCTURE (follow this exactly)
+
+### Line 1: Salutation
+"Dear [Company Name] Hiring Team," — unless a specific hiring manager name is provided, in which case use "Dear [First Name] [Last Name],"
+
+### Paragraph 1: The Opening (2-3 sentences)
+State what role you're reaching out about. Then immediately frame the COMPANY'S situation — not the applicant's background. Use the company research to say something specific about their business moment: expansion into new markets, competitive pressure, product launch, go-to-market shift. This shows you did your homework, just like you would on a sales call.
+
+DO NOT open with:
+- "I am excited to apply for..."
+- "I am writing to express my interest..."
+- "With X years of experience in..."
+- "I believe I would be a great fit..."
+- Any sentence that starts with "I" followed by an emotion
+
+DO open with:
+- The company's situation, challenge, or opportunity
+- A specific observation that shows research
+- Then pivot to "That requires [type of seller] — which is what I've done for [X] years"
+
+### Paragraph 2: Transition + Proof Points (1 sentence + 3 bullets)
+One transition sentence: "A few proof points:" or "Here's what that's looked like:" — then three bullets.
+
+Each bullet must:
+- Be one line (two max)
+- Contain a specific number ($, %, count)
+- Name the company where it happened
+- Connect to something the JD or company research says matters
+
+Pick the THREE most relevant proof points from the tailored resume. Not the three most impressive — the three most RELEVANT to what this company needs right now.
+
+### Paragraph 3: The Close (2 sentences max)
+State that you have a specific perspective on how you'd approach their territory/market/problem. Ask for a short call (15-20 minutes). Do not grovel.
+
+DO NOT close with:
+- "I would welcome the opportunity to discuss..."
+- "I look forward to hearing from you..."
+- "Thank you for your time and consideration..."
+- "I am confident that I would be a valuable addition..."
+
+DO close with:
+- Something specific: "I have a perspective on how I'd approach the [region/vertical/segment]"
+- A low-commitment ask: "Happy to share it over a 20-minute call"
+- That's it. No begging.
+
+### Sign-off
+"Best,"
+[Full Name]
+
+## WRITING RULES
+
+1. Total length: 150-200 words. Not a word more. This is a cold email, not an essay.
+2. No buzzwords. No "synergy," "leverage," "passionate," "thrilled," "excited."
+3. No filler. Every sentence must either (a) show you understand their business or (b) prove you can do the job.
+4. Write at an 8th grade reading level. Short words. Short sentences. If a sentence has a comma, ask yourself if it should be two sentences.
+5. Sound like a real person wrote this at 10pm after doing research on the company, not like an AI generated it from a template.
+6. Vary sentence length. Mix short punchy sentences with one longer one. Monotone rhythm = AI-sounding.
+7. Never use the phrase "I am confident" — confident people don't announce their confidence.
+8. Never start three sentences in a row with "I."
+9. The word "synergy" appears zero times. The word "leverage" appears zero times. The word "utilize" appears zero times. The word "spearhead" appears zero times.
+10. Read it out loud. If it sounds like every other cover letter, rewrite it. If it sounds like something you'd actually send to a VP of Sales you found on LinkedIn, it's right.
+
+## AI DETECTION AVOIDANCE
+
+To sound human and pass AI writing detection:
+- Use contractions naturally: "I've" not "I have," "that's" not "that is," "don't" not "do not"
+- Include one slightly informal phrase per letter — "Happy to connect" or "Here's what that looked like" — the way a real salesperson writes
+- Avoid perfect parallel structure in your three bullets. Real humans don't write three grammatically identical sentences in a row.
+- Vary paragraph length. Not every paragraph should be 2-3 sentences.
+- Use an em dash (—) or a colon occasionally instead of always using periods
+- Don't start the letter and end the letter with the same energy. Start direct, end warm. Or start observational, end confident. Humans shift tone slightly across a piece of writing.
+
+## OUTPUT FORMAT
+
+Return ONLY the cover letter text. No commentary, no explanations, no "Here's your cover letter." Just the letter itself, ready to paste into a document or email.
+```
+
+---
+
+## PART 3: ENVIRONMENT VARIABLES NEEDED
+
+Make sure these are set in your Replit Secrets:
+
+- `ANTHROPIC_API_KEY` — Your Anthropic API key
+- `DATABASE_URL` — Your PostgreSQL connection string (Replit provides this if you add a PostgreSQL database)
+
+---
+
+## PART 4: SEED THE USER PROFILE
+
+After the agent builds the app, go to the Profile page and paste in your full master resume. This is the "source of truth" document that contains ALL of your experience, every bullet, every metric, every role. The agent will pull from this to tailor each application.
+
+Your master resume should include:
+- Every role you've held with full bullet points (even ones you might cut for specific applications)
+- All metrics and numbers you can remember
+- All tools, platforms, and partner ecosystems you've worked with
+- All awards, rankings, and recognitions
+
+The more complete your master resume, the better the tailoring works. Think of it as giving the AI a full toolkit — it'll pick the right tools for each job.
+
+---
+
+## PART 5: HOW TO USE IT
+
+1. Find a job posting you want to apply to
+2. Go to "New Application" in the app
+3. Enter the company name, role title, and paste the full job description
+4. Hit "Generate"
+5. The agent will:
+   - Research the company (takes 15-30 seconds)
+   - Tailor your resume (takes 15-30 seconds)
+   - Write your cover letter (takes 15-30 seconds)
+6. Review both outputs — make any manual tweaks you want
+7. Copy or download and submit
+
+---
+
+## NOTES FOR REPLIT AGENT
+
+- Use `claude-opus-4-6` as the model string for ALL AI calls. Do not substitute Sonnet or Haiku.
+- The system prompts MUST be stored in the database, not hardcoded. This lets the user update the prompts without touching code.
+- Include a simple admin page or settings page where the user can view and edit the system prompts stored in the database.
+- Handle the web search response properly — when web search is enabled, the API response will contain multiple content blocks. Extract all text blocks and combine them for the research notes.
+- Add error handling and loading states. Each AI call can take 15-30 seconds with Opus.
+- The research phase should use web search. The resume and cover letter phases should NOT use web search — they only need the system prompt and the context provided.
