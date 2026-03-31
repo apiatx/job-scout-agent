@@ -372,6 +372,68 @@ async function initDb(): Promise<void> {
       warning       TEXT,
       created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    -- Enhancement 1: API usage tracking
+    CREATE TABLE IF NOT EXISTS api_usage (
+      id           SERIAL PRIMARY KEY,
+      service      TEXT NOT NULL,
+      endpoint     TEXT,
+      credits_used INTEGER DEFAULT 1,
+      created_at   TIMESTAMP DEFAULT NOW()
+    );
+
+    -- Enhancement 3: LinkedIn connection request messages
+    CREATE TABLE IF NOT EXISTS linkedin_messages (
+      id                  SERIAL PRIMARY KEY,
+      hiring_manager_id   INTEGER REFERENCES hiring_managers(id) ON DELETE CASCADE,
+      job_id              INTEGER,
+      message_text        TEXT NOT NULL,
+      char_count          INTEGER NOT NULL,
+      version             INTEGER DEFAULT 1,
+      status              TEXT DEFAULT 'draft',
+      sent_at             TIMESTAMP,
+      created_at          TIMESTAMP DEFAULT NOW()
+    );
+
+    -- Enhancement 4: Identification accuracy feedback
+    CREATE TABLE IF NOT EXISTS identification_feedback (
+      id                  SERIAL PRIMARY KEY,
+      hiring_manager_id   INTEGER REFERENCES hiring_managers(id) ON DELETE CASCADE,
+      job_id              INTEGER,
+      original_name       TEXT,
+      original_title      TEXT,
+      original_confidence TEXT,
+      was_correct         BOOLEAN,
+      corrected_name      TEXT,
+      corrected_title     TEXT,
+      correction_reason   TEXT,
+      company_name        TEXT,
+      company_size        TEXT,
+      role_seniority      TEXT,
+      search_source       TEXT,
+      created_at          TIMESTAMP DEFAULT NOW()
+    );
+
+    -- Enhancement 5: Company leadership cache
+    CREATE TABLE IF NOT EXISTS company_leadership_cache (
+      id               SERIAL PRIMARY KEY,
+      company_name     TEXT NOT NULL,
+      company_domain   TEXT,
+      person_name      TEXT NOT NULL,
+      person_title     TEXT NOT NULL,
+      linkedin_url     TEXT,
+      department       TEXT,
+      region           TEXT,
+      seniority_level  TEXT,
+      source           TEXT,
+      still_active     BOOLEAN DEFAULT TRUE,
+      last_verified_at TIMESTAMP DEFAULT NOW(),
+      expires_at       TIMESTAMP DEFAULT (NOW() + INTERVAL '90 days'),
+      created_at       TIMESTAMP DEFAULT NOW(),
+      CONSTRAINT unique_company_person UNIQUE (company_name, person_name)
+    );
+    CREATE INDEX IF NOT EXISTS idx_company_cache_lookup
+      ON company_leadership_cache(company_name, department, seniority_level);
   `);
 
   await initPositioningDB(pool);
@@ -479,6 +541,16 @@ async function initDb(): Promise<void> {
   await safeAddColumn('jobs', 'user_action_at', 'TIMESTAMPTZ');
   await safeAddColumn('jobs', 'interview_prep_json', 'TEXT');
   await safeAddColumn('jobs', 'interview_prep_at', 'TIMESTAMPTZ');
+  // Enhancement 1: Apollo fields on hiring_managers
+  await safeAddColumn('hiring_managers', 'apollo_id', 'TEXT');
+  await safeAddColumn('hiring_managers', 'email', 'TEXT');
+  await safeAddColumn('hiring_managers', 'phone', 'TEXT');
+  await safeAddColumn('hiring_managers', 'company_domain', 'TEXT');
+  await safeAddColumn('hiring_managers', 'enrichment_source', 'TEXT');
+  // Enhancement 2: Hunter.io fields on hiring_managers
+  await safeAddColumn('hiring_managers', 'email_confidence', 'INTEGER');
+  await safeAddColumn('hiring_managers', 'email_verified', 'BOOLEAN DEFAULT FALSE');
+  await safeAddColumn('hiring_managers', 'email_source', 'TEXT');
 
   // Index for fast momentum lookups by company name
   try {
@@ -684,11 +756,64 @@ To sound human and pass AI writing detection:
 
 Return ONLY the cover letter text. No commentary, no explanations, no "Here's your cover letter." Just the letter itself, ready to paste into a document or email.`;
 
+  const LINKEDIN_CONNECTION_PROMPT = `You write LinkedIn connection request messages for job applicants reaching out to hiring managers. These messages must be under 300 characters — LinkedIn's hard limit.
+
+## THE RULES
+
+1. MUST be 300 characters or fewer. Count carefully. If it's 301, it won't send.
+2. No greeting ("Hi [Name]" or "Dear [Name]") — LinkedIn already shows who you are
+3. No "I'd love to connect" — that's what the button does
+4. No "I came across your profile" — everyone says this
+5. No "I'm passionate about" — nobody cares
+6. One specific thing about THEIR company or team. Not generic.
+7. One line about what YOU bring. Metric or proof point.
+8. One ask or statement of intent. "Exploring the [role title] opening" or "Would value a quick conversation about [specific thing]."
+9. Sound like a text message from a professional, not a cover letter
+10. Use contractions. Write like you talk.
+
+## WHAT YOU RECEIVE
+
+- Hiring manager's name and title
+- Company name
+- Role being applied for
+- Company research notes
+- Applicant's key proof points (from tailored resume)
+
+## STRUCTURE (3 sentences, that's it)
+
+Sentence 1: Something specific about their company/team/market that shows you did homework (NOT "I see you're hiring for X")
+Sentence 2: Your most relevant proof point — one number, one company
+Sentence 3: What you want — "Exploring the [role]" or "Would love 15 min to discuss"
+
+## EXAMPLES OF GOOD MESSAGES
+
+"Akamai's push into new verticals for cloud security is smart timing. Built $5M in net-new pipeline doing exactly that at ClearDATA, co-selling with AWS. Exploring the Southeast SAE role — happy to share perspective."
+
+"Noticed CoreWeave is scaling the sales org fast. Closed 34 net-new logos at Carbon Black at 137% quota — strong hunter background. Would value a quick chat about the enterprise AE opening."
+
+## EXAMPLES OF BAD MESSAGES
+
+"Hi Jane, I'm a passionate sales professional with 6+ years of experience in enterprise SaaS sales. I noticed Akamai is hiring and I believe my background aligns well with your team's needs. I'd love to connect and learn more about the opportunity."
+(Too long, generic, starts with "Hi", "passionate", "I believe", "I'd love to connect" — every red flag)
+
+## OUTPUT
+
+Return ONLY valid JSON:
+
+{
+  "message": "The connection request text",
+  "char_count": 187,
+  "alternative": "A second version with a slightly different angle",
+  "alt_char_count": 203
+}
+
+Both versions MUST be under 300 characters. Count carefully — include spaces and punctuation in the count.`;
+
   await pool.query(
     `INSERT INTO system_prompts (prompt_name, prompt_text, updated_at)
-     VALUES ('resume_tailor', $1, NOW()), ('cover_letter_writer', $2, NOW())
+     VALUES ('resume_tailor', $1, NOW()), ('cover_letter_writer', $2, NOW()), ('linkedin_connection_message', $3, NOW())
      ON CONFLICT (prompt_name) DO UPDATE SET prompt_text = EXCLUDED.prompt_text, updated_at = NOW()`,
-    [RESUME_TAILOR_PROMPT, COVER_LETTER_WRITER_PROMPT]
+    [RESUME_TAILOR_PROMPT, COVER_LETTER_WRITER_PROMPT, LINKEDIN_CONNECTION_PROMPT]
   );
 
   // Seed companies if none exist
@@ -1888,15 +2013,25 @@ app.get('/api/jobs/saved', async (_req, res: Response) => {
   try {
     const { rows } = await pool.query(`
       SELECT j.*,
-        hm.id       AS hm_id,
-        hm.full_name AS hm_name,
-        hm.title    AS hm_title,
-        hm.linkedin_url AS hm_linkedin_url,
-        hm.confidence   AS hm_confidence,
-        hm.source       AS hm_source,
-        hm.reasoning    AS hm_reasoning,
-        hm.alternative  AS hm_alternative,
-        hm.notes        AS hm_notes
+        hm.id              AS hm_id,
+        hm.full_name       AS hm_name,
+        hm.title           AS hm_title,
+        hm.linkedin_url    AS hm_linkedin_url,
+        hm.confidence      AS hm_confidence,
+        hm.source          AS hm_source,
+        hm.reasoning       AS hm_reasoning,
+        hm.alternative     AS hm_alternative,
+        hm.notes           AS hm_notes,
+        hm.email           AS hm_email,
+        hm.phone           AS hm_phone,
+        hm.enrichment_source AS hm_enrichment_source,
+        hm.email_confidence  AS hm_email_confidence,
+        hm.email_verified    AS hm_email_verified,
+        hm.email_source      AS hm_email_source,
+        hm.company_domain    AS hm_company_domain,
+        (SELECT lm.id FROM linkedin_messages lm WHERE lm.hiring_manager_id = hm.id ORDER BY lm.created_at DESC LIMIT 1) AS hm_li_msg_id,
+        (SELECT lm.status FROM linkedin_messages lm WHERE lm.hiring_manager_id = hm.id ORDER BY lm.created_at DESC LIMIT 1) AS hm_li_msg_status,
+        (SELECT lm.sent_at FROM linkedin_messages lm WHERE lm.hiring_manager_id = hm.id ORDER BY lm.created_at DESC LIMIT 1) AS hm_li_msg_sent_at
       FROM jobs j
       LEFT JOIN LATERAL (
         SELECT * FROM hiring_managers WHERE job_id = j.id ORDER BY created_at DESC LIMIT 1
@@ -2020,12 +2155,22 @@ app.get('/api/pipeline', async (_req, res: Response) => {
         td.resume_text AS tailored_resume,
         td.cover_letter AS tailored_cover_letter,
         (SELECT COUNT(*) FROM tailored_docs WHERE job_id = j.id) AS has_docs,
-        hm.id            AS hm_id,
-        hm.full_name     AS hm_name,
-        hm.title         AS hm_title,
-        hm.linkedin_url  AS hm_linkedin_url,
-        hm.confidence    AS hm_confidence,
-        hm.source        AS hm_source
+        hm.id              AS hm_id,
+        hm.full_name       AS hm_name,
+        hm.title           AS hm_title,
+        hm.linkedin_url    AS hm_linkedin_url,
+        hm.confidence      AS hm_confidence,
+        hm.source          AS hm_source,
+        hm.email           AS hm_email,
+        hm.phone           AS hm_phone,
+        hm.enrichment_source AS hm_enrichment_source,
+        hm.email_confidence  AS hm_email_confidence,
+        hm.email_verified    AS hm_email_verified,
+        hm.email_source      AS hm_email_source,
+        hm.company_domain    AS hm_company_domain,
+        (SELECT lm.id FROM linkedin_messages lm WHERE lm.hiring_manager_id = hm.id ORDER BY lm.created_at DESC LIMIT 1) AS hm_li_msg_id,
+        (SELECT lm.status FROM linkedin_messages lm WHERE lm.hiring_manager_id = hm.id ORDER BY lm.created_at DESC LIMIT 1) AS hm_li_msg_status,
+        (SELECT lm.sent_at FROM linkedin_messages lm WHERE lm.hiring_manager_id = hm.id ORDER BY lm.created_at DESC LIMIT 1) AS hm_li_msg_sent_at
       FROM jobs j
       LEFT JOIN tailored_docs td ON td.job_id = j.id
       LEFT JOIN LATERAL (
@@ -2057,6 +2202,63 @@ function cseIncrement(n: number) {
   const today = new Date().toDateString();
   if (_cseDailyDate !== today) { _cseDailyCount = 0; _cseDailyDate = today; }
   _cseDailyCount += n;
+}
+
+// ── API usage tracking helpers ─────────────────────────────────────────────
+async function trackUsage(service: string, endpoint: string, credits: number) {
+  try {
+    await pool.query('INSERT INTO api_usage (service, endpoint, credits_used) VALUES ($1, $2, $3)', [service, endpoint, credits]);
+  } catch (e) { console.error('[trackUsage] Failed:', e); }
+}
+async function getMonthlyUsage(service: string): Promise<number> {
+  const r = await pool.query(`SELECT COALESCE(SUM(credits_used),0) AS total FROM api_usage WHERE service=$1 AND created_at >= date_trunc('month',NOW())`, [service]);
+  return parseInt(r.rows[0].total) || 0;
+}
+async function getDailyUsage(service: string): Promise<number> {
+  const r = await pool.query(`SELECT COALESCE(SUM(credits_used),0) AS total FROM api_usage WHERE service=$1 AND created_at >= date_trunc('day',NOW())`, [service]);
+  return parseInt(r.rows[0].total) || 0;
+}
+
+// ── Apollo.io helpers ──────────────────────────────────────────────────────
+async function apolloSearchPeople(companyName: string, titleKeywords: string[], region?: string): Promise<any[]> {
+  const key = process.env.APOLLO_API_KEY || '';
+  if (!key) { console.warn('[Apollo] No APOLLO_API_KEY'); return []; }
+  try {
+    const body: any = { q_organization_name: companyName, person_titles: titleKeywords, per_page: 10, page: 1 };
+    if (region) body.person_locations = [region];
+    const r = await fetch('https://api.apollo.io/v1/mixed_people/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { console.warn('[Apollo] search-people HTTP', r.status); return []; }
+    const data = await r.json() as any;
+    return data.people || [];
+  } catch (e) { console.error('[Apollo] search-people error:', e); return []; }
+}
+
+async function apolloEnrichPerson(firstName: string, lastName: string, companyDomain: string): Promise<any | null> {
+  const key = process.env.APOLLO_API_KEY || '';
+  if (!key) return null;
+  try {
+    const r = await fetch('https://api.apollo.io/v1/people/match', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+      body: JSON.stringify({ first_name: firstName, last_name: lastName, organization_domain: companyDomain }),
+    });
+    if (!r.ok) { console.warn('[Apollo] enrich-person HTTP', r.status); return null; }
+    const data = await r.json() as any;
+    return data.person || null;
+  } catch (e) { console.error('[Apollo] enrich-person error:', e); return null; }
+}
+
+// ── Derive company domain from company name ────────────────────────────────
+function inferCompanyDomain(companyName: string): string {
+  return companyName.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+(inc|corp|llc|ltd|co|company|technologies|technology|systems|group|solutions|software|services|labs|ai)$/g, '')
+    .trim()
+    .replace(/\s+/g, '') + '.com';
 }
 
 // ── Hiring Manager — identify ──────────────────────────────────────────────
@@ -2119,51 +2321,105 @@ Rules:
       };
     }
 
-    // ── Step 2: Google Custom Search ────────────────────────────────────
+    const companyDomain = inferCompanyDomain(companyName);
+
+    // ── Step 1.5: Check company leadership cache (Enhancement 5) ─────────
+    let usedCache = false;
+    let cachedResultsText = '';
+    try {
+      const cachedLeaders = await pool.query(
+        `SELECT * FROM company_leadership_cache WHERE LOWER(company_name)=LOWER($1) AND still_active=true AND expires_at>NOW() ORDER BY seniority_level ASC, department ASC`,
+        [companyName]
+      );
+      if (cachedLeaders.rows.length >= 3) {
+        cachedResultsText = 'CACHED COMPANY LEADERSHIP DATA:\n' + cachedLeaders.rows.map((p: any) =>
+          `Cached Profile: ${p.person_name} - ${p.person_title} at ${companyName}. Department: ${p.department || 'Unknown'}. Region: ${p.region || 'Unknown'}. LinkedIn: ${p.linkedin_url || 'N/A'}`
+        ).join('\n');
+        usedCache = true;
+        console.log(`[HiringManager] Cache hit: ${cachedLeaders.rows.length} leaders for ${companyName}`);
+      }
+    } catch (cacheErr) { console.warn('[HiringManager] Cache check failed:', cacheErr); }
+
+    // ── Step 2: Google Custom Search (skip if cache hit) ─────────────────
     const CSE_KEY = process.env.GOOGLE_CSE_API_KEY || '';
     const CSE_ID  = process.env.GOOGLE_CSE_ID || '';
     const allResults: Array<{ title: string; snippet: string; link: string }> = [];
 
-    if (!CSE_KEY || !CSE_ID) {
-      console.warn('[HiringManager] Google CSE credentials missing — skipping search step');
-    } else if (cseUsage() >= 90) {
-      console.warn('[HiringManager] Daily Google CSE limit approaching — skipping search');
-    } else {
-      const kws: string[] = Array.isArray(analysis.manager_seniority_keywords) ? analysis.manager_seniority_keywords : [];
-      const searchQueries = [
-        `"${analysis.manager_likely_title || 'Director of Sales'}" site:linkedin.com/in ${companyName}`,
-        kws.length >= 2 ? `"${kws[0]}" OR "${kws[1]}" site:linkedin.com/in ${companyName}` : `${companyName} sales leadership site:linkedin.com/in`,
-        `${companyName} ${analysis.region || ''} sales leadership site:linkedin.com/in`.trim(),
-      ];
-      for (const query of searchQueries) {
-        try {
-          const gRes = await fetch(`https://www.googleapis.com/customsearch/v1?key=${CSE_KEY}&cx=${CSE_ID}&q=${encodeURIComponent(query)}&num=5`);
-          if (gRes.ok) {
-            const gData = await gRes.json() as any;
-            if (gData.items) allResults.push(...gData.items.map((i: any) => ({ title: i.title || '', snippet: i.snippet || '', link: i.link || '' })));
-          } else if (gRes.status === 429) {
-            console.warn('[HiringManager] Google CSE rate limit hit'); break;
+    if (!usedCache) {
+      if (!CSE_KEY || !CSE_ID) {
+        console.warn('[HiringManager] Google CSE credentials missing — skipping search step');
+      } else if (cseUsage() >= 90) {
+        console.warn('[HiringManager] Daily Google CSE limit approaching — skipping search');
+      } else {
+        const kws: string[] = Array.isArray(analysis.manager_seniority_keywords) ? analysis.manager_seniority_keywords : [];
+        const searchQueries = [
+          `"${analysis.manager_likely_title || 'Director of Sales'}" site:linkedin.com/in ${companyName}`,
+          kws.length >= 2 ? `"${kws[0]}" OR "${kws[1]}" site:linkedin.com/in ${companyName}` : `${companyName} sales leadership site:linkedin.com/in`,
+          `${companyName} ${analysis.region || ''} sales leadership site:linkedin.com/in`.trim(),
+        ];
+        for (const query of searchQueries) {
+          try {
+            const gRes = await fetch(`https://www.googleapis.com/customsearch/v1?key=${CSE_KEY}&cx=${CSE_ID}&q=${encodeURIComponent(query)}&num=5`);
+            if (gRes.ok) {
+              const gData = await gRes.json() as any;
+              if (gData.items) allResults.push(...gData.items.map((i: any) => ({ title: i.title || '', snippet: i.snippet || '', link: i.link || '' })));
+            } else if (gRes.status === 429) {
+              console.warn('[HiringManager] Google CSE rate limit hit'); break;
+            }
+          } catch (gErr) {
+            console.error('[HiringManager] Google CSE query failed:', gErr instanceof Error ? gErr.message : gErr);
           }
-        } catch (gErr) {
-          console.error('[HiringManager] Google CSE query failed:', gErr instanceof Error ? gErr.message : gErr);
+        }
+        cseIncrement(searchQueries.length);
+        await trackUsage('gemini_cse', 'custom_search', searchQueries.length);
+        console.log(`[HiringManager] Google CSE: ${allResults.length} results found | daily usage: ${cseUsage()}`);
+      }
+    }
+
+    // ── Step 2.5: Apollo fallback if CSE results thin (Enhancement 1) ────
+    let apolloResults: any[] = [];
+    let enrichmentSource = usedCache ? 'cache' : 'gemini';
+    if (!usedCache) {
+      const linkedinCount = allResults.filter(r => r.link && r.link.includes('linkedin.com/in')).length;
+      if (linkedinCount < 3) {
+        const apolloMonthly = await getMonthlyUsage('apollo');
+        if (apolloMonthly < 45) {
+          apolloResults = await apolloSearchPeople(companyName, Array.isArray(analysis.manager_seniority_keywords) ? analysis.manager_seniority_keywords : ['VP Sales', 'Director of Sales'], analysis.region || undefined);
+          if (apolloResults.length > 0) {
+            await trackUsage('apollo', 'people_search', 1);
+            enrichmentSource = allResults.length > 0 ? 'gemini+apollo' : 'apollo';
+            console.log(`[HiringManager] Apollo fallback: ${apolloResults.length} results`);
+          }
+        } else {
+          console.log('[HiringManager] Apollo monthly limit approaching, skipping');
         }
       }
-      cseIncrement(searchQueries.length);
-      console.log(`[HiringManager] Google CSE: ${allResults.length} results found | daily usage: ${cseUsage()}`);
+    }
+
+    // Build flattened results text for Claude
+    let flattenedResults = '';
+    if (usedCache) {
+      flattenedResults = cachedResultsText;
+    } else {
+      flattenedResults = allResults.length
+        ? allResults.map((r, i) => `Result ${i + 1}:\nTitle: ${r.title}\nSnippet: ${r.snippet}\nURL: ${r.link}`).join('\n\n')
+        : 'No Google search results available.';
+      if (apolloResults.length > 0) {
+        const apolloText = apolloResults.map((p: any) =>
+          `Apollo Result: ${p.first_name || ''} ${p.last_name || ''} - ${p.title || ''} at ${p.organization?.name || companyName}. Location: ${p.city || ''} ${p.state || ''}. LinkedIn: ${p.linkedin_url || 'N/A'}`
+        ).join('\n');
+        flattenedResults += '\n\n---\n\nAPOLLO PEOPLE SEARCH RESULTS:\n' + apolloText;
+      }
     }
 
     // ── Step 3: Claude identifies the hiring manager ─────────────────────
     let hmData: Record<string, any> = { full_name: null, title: null, linkedin_url: null, confidence: 'none', reasoning: 'No search results available', alternative: null };
 
-    const resultsText = allResults.length
-      ? allResults.map((r, i) => `Result ${i + 1}:\nTitle: ${r.title}\nSnippet: ${r.snippet}\nURL: ${r.link}`).join('\n\n')
-      : 'No Google search results available.';
-
     try {
       const step3 = await hmClaude.messages.create({
         model: 'claude-opus-4-6',
         max_tokens: 1024,
-        system: `You are a hiring manager identification engine. Given Google search results (mostly LinkedIn profiles) and context about a job opening, identify the single most likely hiring manager.
+        system: `You are a hiring manager identification engine. Given search results (LinkedIn profiles and/or Apollo data) and context about a job opening, identify the single most likely hiring manager.
 
 Rules:
 - The hiring manager is the person this role REPORTS TO, not the recruiter
@@ -2214,8 +2470,8 @@ Region: ${analysis.region || location || 'Not specified'}
 Vertical: ${analysis.vertical || 'Not specified'}
 Named People in JD: ${(analysis.named_people || []).join(', ') || 'None'}
 
-GOOGLE SEARCH RESULTS:
-${resultsText}`,
+SEARCH RESULTS:
+${flattenedResults}`,
         }],
       });
       const rawText3 = step3.content.filter(b => b.type === 'text').map(b => (b as any).text).join('').trim();
@@ -2225,10 +2481,38 @@ ${resultsText}`,
       console.error('[HiringManager] Step 3 Claude identification failed:', e instanceof Error ? e.message : e);
     }
 
+    // ── Step 3.5: Apollo enrichment for found HM (Enhancement 1) ─────────
+    let apolloEmail: string | null = null;
+    let apolloPhone: string | null = null;
+    let apolloId: string | null = null;
+    if (hmData.full_name && enrichmentSource !== 'cache') {
+      try {
+        const nameParts = hmData.full_name.trim().split(/\s+/);
+        const firstName = nameParts[0] || '';
+        const lastName = nameParts.slice(1).join(' ') || '';
+        if (firstName && lastName) {
+          const apolloMonthlyEnrich = await getMonthlyUsage('apollo');
+          if (apolloMonthlyEnrich < 45) {
+            const enriched = await apolloEnrichPerson(firstName, lastName, companyDomain);
+            if (enriched) {
+              apolloEmail = enriched.email || null;
+              apolloPhone = enriched.phone_number || null;
+              apolloId = enriched.id || null;
+              await trackUsage('apollo', 'people_match', 1);
+              if (apolloEmail) {
+                enrichmentSource = enrichmentSource === 'gemini' ? 'gemini+apollo' : enrichmentSource === 'apollo' ? 'apollo' : enrichmentSource + '+apollo';
+                console.log(`[HiringManager] Apollo enrichment: found email for ${hmData.full_name}`);
+              }
+            }
+          }
+        }
+      } catch (enrichErr) { console.warn('[HiringManager] Apollo enrichment failed:', enrichErr); }
+    }
+
     // ── Step 4: Save to DB ───────────────────────────────────────────────
     const { rows: saved } = await pool.query(
-      `INSERT INTO hiring_managers (job_id, full_name, title, linkedin_url, company, region, confidence, source, reasoning, alternative, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'auto', $8, $9, $10)
+      `INSERT INTO hiring_managers (job_id, full_name, title, linkedin_url, company, region, confidence, source, reasoning, alternative, notes, enrichment_source, apollo_id, email, phone, company_domain)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'auto',$8,$9,$10,$11,$12,$13,$14,$15)
        RETURNING *`,
       [
         job_id,
@@ -2240,31 +2524,405 @@ ${resultsText}`,
         hmData.confidence || 'none',
         hmData.reasoning || null,
         hmData.alternative ? JSON.stringify(hmData.alternative) : null,
-        allResults.length === 0 ? 'No search results found — add manually' : null,
+        (allResults.length === 0 && apolloResults.length === 0 && !usedCache) ? 'No search results found — add manually' : null,
+        enrichmentSource,
+        apolloId,
+        apolloEmail,
+        apolloPhone,
+        companyDomain,
       ]
     );
 
-    res.json({ success: true, hiring_manager: { ...hmData, id: saved[0].id }, cse_usage: cseUsage() });
+    // ── Step 4.5: Cache leadership profiles found (Enhancement 5) ────────
+    if (!usedCache && flattenedResults.length > 100) {
+      (async () => {
+        try {
+          const HMAnthropic2 = (await import('@anthropic-ai/sdk')).default;
+          const hmClaude2 = new HMAnthropic2({ apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '' });
+          const extractResp = await hmClaude2.messages.create({
+            model: 'claude-opus-4-6',
+            max_tokens: 2048,
+            system: `Extract all leadership profiles (Directors, VPs, Heads, C-suite) from the search results. Return ONLY a JSON array:
+[{"person_name":"First Last","person_title":"Their title","linkedin_url":"URL or null","department":"Sales/Marketing/Engineering/Product/Finance/People/Unknown","region":"region if mentioned or null","seniority_level":"C-Suite/SVP/VP/Director"}]
+Only include people who appear to currently work at ${companyName} in leadership roles. No recruiters, no ICs. Return ONLY the JSON array.`,
+            messages: [{ role: 'user', content: `Company: ${companyName}\n\nSearch Results:\n${flattenedResults.slice(0, 4000)}` }],
+          });
+          const cacheText = extractResp.content.filter((b: any) => b.type === 'text').map((b: any) => (b as any).text).join('').trim();
+          const cleanedCache = cacheText.replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
+          const leaders = JSON.parse(cleanedCache);
+          if (Array.isArray(leaders)) {
+            for (const l of leaders) {
+              await pool.query(
+                `INSERT INTO company_leadership_cache (company_name, company_domain, person_name, person_title, linkedin_url, department, seniority_level, region, source, last_verified_at, expires_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'gemini',NOW(),NOW()+INTERVAL '90 days')
+                 ON CONFLICT (company_name, person_name) DO UPDATE SET person_title=EXCLUDED.person_title, linkedin_url=EXCLUDED.linkedin_url, department=EXCLUDED.department, seniority_level=EXCLUDED.seniority_level, region=EXCLUDED.region, last_verified_at=NOW(), expires_at=NOW()+INTERVAL '90 days'`,
+                [companyName, companyDomain, l.person_name, l.person_title, l.linkedin_url || null, l.department || null, l.seniority_level || null, l.region || null]
+              ).catch(() => {});
+            }
+            console.log(`[HiringManager] Cached ${leaders.length} leadership profiles for ${companyName}`);
+          }
+        } catch (cacheWriteErr) { console.warn('[HiringManager] Cache write failed:', cacheWriteErr); }
+      })();
+    }
+
+    res.json({ success: true, hiring_manager: { ...hmData, id: saved[0].id, email: apolloEmail, phone: apolloPhone, enrichment_source: enrichmentSource }, cse_usage: cseUsage(), used_cache: usedCache });
   } catch (e) {
     console.error('[HiringManager] Identify endpoint error:', e instanceof Error ? e.message : e);
     res.status(500).json({ error: String(e) });
   }
 });
 
-// ── Hiring Manager — manual update ────────────────────────────────────────
+// ── Hiring Manager — manual update (with feedback logging) ────────────────
 app.put('/api/hiring-manager/update', async (req: Request, res: Response) => {
   try {
-    const { hiring_manager_id, full_name, title, linkedin_url } = req.body as any;
+    const { hiring_manager_id, full_name, title, linkedin_url, correction_reason, email, phone } = req.body as any;
     if (!hiring_manager_id) { res.status(400).json({ error: 'hiring_manager_id required' }); return; }
+    // Fetch original before update for feedback logging
+    const { rows: orig } = await pool.query('SELECT * FROM hiring_managers WHERE id=$1', [hiring_manager_id]);
+    if (!orig.length) { res.status(404).json({ error: 'Hiring manager not found' }); return; }
+    const original = orig[0];
+    const nameChanged = full_name && full_name !== original.full_name;
+    const titleChanged = title && title !== original.title;
+    if (nameChanged || titleChanged) {
+      // Log as a correction in feedback table
+      await pool.query(
+        `INSERT INTO identification_feedback (hiring_manager_id, job_id, original_name, original_title, original_confidence, was_correct, corrected_name, corrected_title, correction_reason, company_name, search_source)
+         VALUES ($1,$2,$3,$4,$5,false,$6,$7,$8,$9,$10)`,
+        [hiring_manager_id, original.job_id, original.full_name, original.title, original.confidence, full_name || null, title || null, correction_reason || null, original.company, original.enrichment_source || original.source]
+      ).catch((e: any) => console.warn('[Feedback] log failed:', e));
+      // If correction_reason is 'left_company', mark cache entry as inactive
+      if (correction_reason === 'left_company' && original.full_name && original.company) {
+        await pool.query(
+          `UPDATE company_leadership_cache SET still_active=false WHERE LOWER(company_name)=LOWER($1) AND LOWER(person_name)=LOWER($2)`,
+          [original.company, original.full_name]
+        ).catch(() => {});
+      }
+    }
     const { rows } = await pool.query(
-      `UPDATE hiring_managers SET full_name=$1, title=$2, linkedin_url=$3, source='manual', updated_at=NOW() WHERE id=$4 RETURNING *`,
-      [full_name || null, title || null, linkedin_url || null, hiring_manager_id]
+      `UPDATE hiring_managers SET full_name=$1, title=$2, linkedin_url=$3, source='manual', updated_at=NOW(), email=COALESCE($4,email), phone=COALESCE($5,phone) WHERE id=$6 RETURNING *`,
+      [full_name || null, title || null, linkedin_url || null, email || null, phone || null, hiring_manager_id]
     );
-    if (!rows.length) { res.status(404).json({ error: 'Hiring manager not found' }); return; }
     res.json({ success: true, hiring_manager: rows[0] });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
+});
+
+// ── Hiring Manager — confirm (Enhancement 4) ──────────────────────────────
+app.post('/api/hiring-manager/confirm', async (req: Request, res: Response) => {
+  try {
+    const { hiring_manager_id } = req.body as any;
+    if (!hiring_manager_id) { res.status(400).json({ error: 'hiring_manager_id required' }); return; }
+    const { rows } = await pool.query('SELECT * FROM hiring_managers WHERE id=$1', [hiring_manager_id]);
+    if (!rows.length) { res.status(404).json({ error: 'Not found' }); return; }
+    const hm = rows[0];
+    await pool.query(
+      `INSERT INTO identification_feedback (hiring_manager_id, job_id, original_name, original_title, original_confidence, was_correct, company_name, search_source)
+       VALUES ($1,$2,$3,$4,$5,true,$6,$7)`,
+      [hiring_manager_id, hm.job_id, hm.full_name, hm.title, hm.confidence, hm.company, hm.enrichment_source || hm.source]
+    );
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Apollo — search people ─────────────────────────────────────────────────
+app.post('/api/apollo/search-people', async (req: Request, res: Response) => {
+  try {
+    const { company_name, title_keywords, region } = req.body as any;
+    if (!company_name || !title_keywords) { res.status(400).json({ error: 'company_name and title_keywords required' }); return; }
+    const monthly = await getMonthlyUsage('apollo');
+    if (monthly >= 48) { res.status(429).json({ error: 'Apollo monthly limit reached', usage: monthly }); return; }
+    const people = await apolloSearchPeople(company_name, title_keywords, region);
+    if (people.length > 0) await trackUsage('apollo', 'people_search', 1);
+    res.json({ people, usage: monthly + 1 });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Apollo — enrich person ─────────────────────────────────────────────────
+app.post('/api/apollo/enrich-person', async (req: Request, res: Response) => {
+  try {
+    let { hiring_manager_id, first_name, last_name, company_domain } = req.body as any;
+    // If first/last name not provided, look up from HM record
+    if (hiring_manager_id && (!first_name || !last_name)) {
+      const { rows: hmRows } = await pool.query('SELECT full_name, company_domain FROM hiring_managers WHERE id=$1', [hiring_manager_id]);
+      if (hmRows[0]?.full_name) {
+        const parts = hmRows[0].full_name.trim().split(' ');
+        first_name = parts[0] || '';
+        last_name  = parts.slice(1).join(' ') || '';
+      }
+      if (!company_domain && hmRows[0]?.company_domain) company_domain = hmRows[0].company_domain;
+    }
+    if (!first_name || !last_name) { res.status(400).json({ error: 'first_name and last_name required' }); return; }
+    const monthly = await getMonthlyUsage('apollo');
+    if (monthly >= 48) { res.status(429).json({ error: 'Apollo monthly limit reached', usage: monthly }); return; }
+    const domain = company_domain || '';
+    const person = await apolloEnrichPerson(first_name, last_name, domain);
+    if (person) {
+      await trackUsage('apollo', 'people_match', 1);
+      if (hiring_manager_id && (person.email || person.phone_number)) {
+        const newSource = 'apollo';
+        await pool.query(
+          `UPDATE hiring_managers SET email=COALESCE($1,email), phone=COALESCE($2,phone), apollo_id=COALESCE($3,apollo_id), enrichment_source=$4, updated_at=NOW() WHERE id=$5`,
+          [person.email || null, person.phone_number || null, person.id || null, newSource, hiring_manager_id]
+        ).catch(() => {});
+      }
+    }
+    res.json({ person, usage: monthly + 1 });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Hunter.io — find email ─────────────────────────────────────────────────
+app.post('/api/hunter/find-email', async (req: Request, res: Response) => {
+  try {
+    let { hiring_manager_id, first_name, last_name, company_domain } = req.body as any;
+    // If domain/name missing, look up from HM record
+    if (hiring_manager_id && (!company_domain || !first_name || !last_name)) {
+      const { rows: hmRows } = await pool.query('SELECT full_name, company_domain, company FROM hiring_managers WHERE id=$1', [hiring_manager_id]);
+      if (hmRows[0]) {
+        if (!company_domain) {
+          company_domain = hmRows[0].company_domain || inferCompanyDomain(hmRows[0].company || '');
+        }
+        if (!first_name || !last_name) {
+          const parts = (hmRows[0].full_name || '').trim().split(' ');
+          first_name = parts[0] || first_name || '';
+          last_name  = parts.slice(1).join(' ') || last_name || '';
+        }
+      }
+    }
+    if (!first_name || !last_name || !company_domain) { res.status(400).json({ error: 'first_name, last_name, company_domain required' }); return; }
+    const KEY = process.env.HUNTER_API_KEY || '';
+    if (!KEY) { res.status(503).json({ error: 'HUNTER_API_KEY not configured' }); return; }
+    const finderRes = await fetch(`https://api.hunter.io/v2/email-finder?domain=${encodeURIComponent(company_domain)}&first_name=${encodeURIComponent(first_name)}&last_name=${encodeURIComponent(last_name)}&api_key=${KEY}`);
+    const finderData = await finderRes.json() as any;
+    await trackUsage('hunter', 'email_finder', 1);
+    if (!finderData.data?.email) {
+      res.json({ email: null, confidence: 0, verified: false, status: 'not_found' }); return;
+    }
+    const email = finderData.data.email;
+    const confidence = finderData.data.confidence || 0;
+    // Verify
+    const verifyRes = await fetch(`https://api.hunter.io/v2/email-verifier?email=${encodeURIComponent(email)}&api_key=${KEY}`);
+    const verifyData = await verifyRes.json() as any;
+    await trackUsage('hunter', 'email_verifier', 1);
+    const verified = verifyData.data?.status === 'valid';
+    const status = verifyData.data?.status || 'unknown';
+    // Save to HM record if provided
+    if (hiring_manager_id) {
+      await pool.query(
+        `UPDATE hiring_managers SET email=$1, email_confidence=$2, email_verified=$3, email_source='hunter', updated_at=NOW() WHERE id=$4`,
+        [email, confidence, verified, hiring_manager_id]
+      ).catch(() => {});
+    }
+    res.json({ email, confidence, verified, status });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Hunter.io — domain search ──────────────────────────────────────────────
+app.post('/api/hunter/domain-search', async (req: Request, res: Response) => {
+  try {
+    const { company_domain } = req.body as any;
+    if (!company_domain) { res.status(400).json({ error: 'company_domain required' }); return; }
+    const KEY = process.env.HUNTER_API_KEY || '';
+    if (!KEY) { res.status(503).json({ error: 'HUNTER_API_KEY not configured' }); return; }
+    const r = await fetch(`https://api.hunter.io/v2/domain-search?domain=${encodeURIComponent(company_domain)}&api_key=${KEY}&limit=5&type=personal`);
+    const data = await r.json() as any;
+    await trackUsage('hunter', 'domain_search', 1);
+    res.json({ pattern: data.data?.pattern, emails: data.data?.emails || [], domain: company_domain });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Hunter.io — bulk find emails ───────────────────────────────────────────
+app.post('/api/hunter/bulk-find-emails', async (req: Request, res: Response) => {
+  try {
+    const KEY = process.env.HUNTER_API_KEY || '';
+    if (!KEY) { res.status(503).json({ error: 'HUNTER_API_KEY not configured' }); return; }
+    // Get all HMs with a name but no email
+    const { rows: hms } = await pool.query(
+      `SELECT id, full_name, company, company_domain FROM hiring_managers WHERE full_name IS NOT NULL AND email IS NULL LIMIT 20`
+    );
+    let succeeded = 0; let failed = 0;
+    for (const hm of hms) {
+      const monthlyNow = await getMonthlyUsage('hunter');
+      if (monthlyNow >= 23) { console.log('[Hunter] Monthly limit approaching, stopping bulk'); break; }
+      const parts = (hm.full_name || '').trim().split(/\s+/);
+      const fn = parts[0] || ''; const ln = parts.slice(1).join(' ') || '';
+      if (!fn || !ln) { failed++; continue; }
+      const domain = hm.company_domain || inferCompanyDomain(hm.company || '');
+      try {
+        const fr = await fetch(`https://api.hunter.io/v2/email-finder?domain=${encodeURIComponent(domain)}&first_name=${encodeURIComponent(fn)}&last_name=${encodeURIComponent(ln)}&api_key=${KEY}`);
+        const fd = await fr.json() as any;
+        await trackUsage('hunter', 'email_finder', 1);
+        if (fd.data?.email) {
+          const vr = await fetch(`https://api.hunter.io/v2/email-verifier?email=${encodeURIComponent(fd.data.email)}&api_key=${KEY}`);
+          const vd = await vr.json() as any;
+          await trackUsage('hunter', 'email_verifier', 1);
+          await pool.query(
+            `UPDATE hiring_managers SET email=$1, email_confidence=$2, email_verified=$3, email_source='hunter', updated_at=NOW() WHERE id=$4`,
+            [fd.data.email, fd.data.confidence || 0, vd.data?.status === 'valid', hm.id]
+          );
+          succeeded++;
+        } else { failed++; }
+      } catch (e) { failed++; }
+      await new Promise(r => setTimeout(r, 1200));
+    }
+    res.json({ succeeded, failed, total: hms.length });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── LinkedIn message — generate (Enhancement 3) ───────────────────────────
+app.post('/api/linkedin-message/generate', async (req: Request, res: Response) => {
+  try {
+    const { hiring_manager_id, job_id } = req.body as any;
+    if (!hiring_manager_id || !job_id) { res.status(400).json({ error: 'hiring_manager_id and job_id required' }); return; }
+    const { rows: hmRows } = await pool.query('SELECT * FROM hiring_managers WHERE id=$1', [hiring_manager_id]);
+    if (!hmRows.length) { res.status(404).json({ error: 'Hiring manager not found' }); return; }
+    const hm = hmRows[0];
+    const { rows: jobRows } = await pool.query('SELECT * FROM jobs WHERE id=$1', [job_id]);
+    if (!jobRows.length) { res.status(404).json({ error: 'Job not found' }); return; }
+    const job = jobRows[0];
+    const { rows: resumeRows } = await pool.query(
+      'SELECT resume_text FROM tailored_resumes WHERE job_id=$1 ORDER BY created_at DESC LIMIT 1',
+      [job_id]
+    );
+    const { rows: spRows } = await pool.query("SELECT prompt_text FROM system_prompts WHERE prompt_name='linkedin_connection_message'");
+    const systemPrompt = spRows[0]?.prompt_text || '';
+    const HMAnthropic3 = (await import('@anthropic-ai/sdk')).default;
+    const hmClaude3 = new HMAnthropic3({ apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '' });
+    const step = await hmClaude3.messages.create({
+      model: 'claude-opus-4-6',
+      max_tokens: 512,
+      system: systemPrompt,
+      messages: [{
+        role: 'user',
+        content: `HIRING MANAGER:
+Name: ${hm.full_name}
+Title: ${hm.title || 'Unknown'}
+Company: ${hm.company}
+
+ROLE I'M APPLYING FOR:
+${job.title}
+
+COMPANY RESEARCH:
+No research available — use what you know about the company
+
+MY KEY PROOF POINTS (pick the single most relevant one):
+${resumeRows[0]?.resume_text?.slice(0, 2000) || job.description?.slice(0, 1000) || 'Enterprise sales professional with quota-carrying experience'}
+
+Generate the LinkedIn connection request message.`,
+      }],
+    });
+    const rawText = step.content.filter((b: any) => b.type === 'text').map((b: any) => (b as any).text).join('').trim();
+    const cleaned = rawText.replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
+    const parsed = JSON.parse(cleaned);
+    // Enforce 300 char limit
+    if (parsed.message && parsed.message.length > 300) {
+      parsed.message = parsed.message.slice(0, 297) + '...';
+    }
+    if (parsed.alternative && parsed.alternative.length > 300) {
+      parsed.alternative = parsed.alternative.slice(0, 297) + '...';
+    }
+    parsed.char_count = (parsed.message || '').length;
+    parsed.alt_char_count = (parsed.alternative || '').length;
+    // Save to DB — delete old drafts for same HM/job first
+    await pool.query('DELETE FROM linkedin_messages WHERE hiring_manager_id=$1 AND job_id=$2 AND status=\'draft\'', [hiring_manager_id, job_id]);
+    if (parsed.message) {
+      await pool.query('INSERT INTO linkedin_messages (hiring_manager_id, job_id, message_text, char_count, version) VALUES ($1,$2,$3,$4,1)', [hiring_manager_id, job_id, parsed.message, parsed.char_count]);
+    }
+    if (parsed.alternative) {
+      await pool.query('INSERT INTO linkedin_messages (hiring_manager_id, job_id, message_text, char_count, version) VALUES ($1,$2,$3,$4,2)', [hiring_manager_id, job_id, parsed.alternative, parsed.alt_char_count]);
+    }
+    await trackUsage('anthropic', 'linkedin_message', 1);
+    res.json(parsed);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── LinkedIn message — mark sent ──────────────────────────────────────────
+app.put('/api/linkedin-message/mark-sent', async (req: Request, res: Response) => {
+  try {
+    const { hiring_manager_id, job_id, status } = req.body as any;
+    const validStatus = ['draft', 'sent', 'accepted', 'no_response'];
+    if (!validStatus.includes(status)) { res.status(400).json({ error: 'Invalid status' }); return; }
+    await pool.query(
+      `UPDATE linkedin_messages SET status=$1, sent_at=CASE WHEN $1='sent' AND sent_at IS NULL THEN NOW() ELSE sent_at END WHERE hiring_manager_id=$2 AND job_id=$3`,
+      [status, hiring_manager_id, job_id]
+    );
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Accuracy stats (Enhancement 4) ───────────────────────────────────────
+app.get('/api/accuracy/stats', async (_req: Request, res: Response) => {
+  try {
+    const stats = await pool.query(`
+      SELECT
+        COUNT(*) AS total_identifications,
+        COUNT(*) FILTER (WHERE was_correct = true) AS correct,
+        COUNT(*) FILTER (WHERE was_correct = false) AS incorrect,
+        ROUND(COUNT(*) FILTER (WHERE was_correct=true)::decimal / NULLIF(COUNT(*),0)*100,1) AS accuracy_pct,
+        COUNT(*) FILTER (WHERE original_confidence='high' AND was_correct=true) AS high_conf_correct,
+        COUNT(*) FILTER (WHERE original_confidence='high') AS high_conf_total,
+        COUNT(*) FILTER (WHERE original_confidence='medium' AND was_correct=true) AS med_conf_correct,
+        COUNT(*) FILTER (WHERE original_confidence='medium') AS med_conf_total,
+        COUNT(*) FILTER (WHERE original_confidence='low' AND was_correct=true) AS low_conf_correct,
+        COUNT(*) FILTER (WHERE original_confidence='low') AS low_conf_total,
+        COUNT(*) FILTER (WHERE search_source='gemini' AND was_correct=true) AS gemini_correct,
+        COUNT(*) FILTER (WHERE search_source='gemini') AS gemini_total,
+        COUNT(*) FILTER (WHERE search_source LIKE '%apollo%' AND was_correct=true) AS apollo_correct,
+        COUNT(*) FILTER (WHERE search_source LIKE '%apollo%') AS apollo_total
+      FROM identification_feedback
+    `);
+    const reasons = await pool.query(`
+      SELECT correction_reason, COUNT(*) AS count FROM identification_feedback
+      WHERE was_correct=false AND correction_reason IS NOT NULL
+      GROUP BY correction_reason ORDER BY count DESC LIMIT 5
+    `);
+    res.json({ stats: stats.rows[0], top_correction_reasons: reasons.rows });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Cache stats + management (Enhancement 5) ─────────────────────────────
+app.get('/api/hiring-manager/cache-stats', async (_req: Request, res: Response) => {
+  try {
+    const stats = await pool.query(`
+      SELECT
+        COUNT(DISTINCT company_name) AS companies_cached,
+        COUNT(*) AS profiles_stored,
+        MIN(last_verified_at) AS oldest_entry,
+        MIN(company_name) AS oldest_company
+      FROM company_leadership_cache WHERE still_active=true AND expires_at>NOW()
+    `);
+    const apolloMonthly = await getMonthlyUsage('apollo');
+    const hunterMonthly = await getMonthlyUsage('hunter');
+    const geminiDaily = await getDailyUsage('gemini_cse');
+    const anthropicMonthly = await getMonthlyUsage('anthropic');
+    res.json({
+      cache: stats.rows[0],
+      api_usage: {
+        apollo_monthly: apolloMonthly, apollo_limit: 50,
+        hunter_monthly: hunterMonthly, hunter_limit: 25,
+        gemini_daily: geminiDaily, cse_daily: cseUsage(),
+        anthropic_monthly: anthropicMonthly,
+      }
+    });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/hiring-manager/cache-clear', async (_req: Request, res: Response) => {
+  try {
+    const { rowCount } = await pool.query('DELETE FROM company_leadership_cache');
+    res.json({ success: true, deleted: rowCount });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/hiring-manager/cache-refresh', async (req: Request, res: Response) => {
+  try {
+    const { company_name } = req.body as any;
+    if (!company_name) { res.status(400).json({ error: 'company_name required' }); return; }
+    const { rowCount } = await pool.query(
+      'UPDATE company_leadership_cache SET still_active=false WHERE LOWER(company_name)=LOWER($1)', [company_name]
+    );
+    res.json({ success: true, invalidated: rowCount });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 // ── Hiring Manager — bulk identify ────────────────────────────────────────
@@ -6836,6 +7494,12 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <button class="btn btn-gold" onclick="saveCriteria()">Save Settings</button>
     <span class="ok-msg" id="settings-msg" style="display:none">Saved!</span>
   </div>
+
+  <!-- API Usage & Intelligence -->
+  <div style="margin-top:28px">
+    <div class="sec-title" style="margin-bottom:12px">API Usage &amp; Intelligence</div>
+    <div id="api-usage-body" style="font-size:12px;color:var(--muted);line-height:1.8">Loading&hellip;</div>
+  </div>
 </div>
 
 <div class="panel" id="panel-positioning">
@@ -7266,10 +7930,55 @@ textarea:focus,input:focus{border-color:var(--gold)}
         <label style="font-size:12px;color:var(--muted);margin-bottom:4px;display:block">LinkedIn URL</label>
         <input type="text" id="hm-edit-url" class="input-text" placeholder="https://linkedin.com/in/..." style="width:100%;box-sizing:border-box">
       </div>
+      <div>
+        <label style="font-size:12px;color:var(--muted);margin-bottom:4px;display:block">Correction Reason <span style="font-size:10px">(optional — helps improve accuracy)</span></label>
+        <select id="hm-edit-reason" class="input-text" style="width:100%;box-sizing:border-box">
+          <option value="">Select reason (optional)</option>
+          <option value="wrong_person">Wrong person entirely</option>
+          <option value="wrong_level">Right person, wrong title (promoted / changed roles)</option>
+          <option value="left_company">Person left the company</option>
+          <option value="wrong_department">Wrong department (e.g. Marketing vs Sales)</option>
+          <option value="wrong_region">Wrong region / territory</option>
+          <option value="recruiter">This was a recruiter, not the hiring manager</option>
+        </select>
+      </div>
       <div id="hm-edit-error" style="color:#e55353;font-size:12px;display:none"></div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
         <button class="btn btn-ghost btn-sm" onclick="closeHMModal()">Cancel</button>
         <button class="btn btn-gold btn-sm" onclick="saveHMEdit()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- LinkedIn Message Modal -->
+<div class="modal-overlay" id="li-msg-modal" style="display:none" onclick="if(event.target===this)closeLIModal()">
+  <div class="modal" style="max-width:560px;width:100%">
+    <div class="modal-header">
+      <div style="font-weight:700;font-size:15px">&#x1F4AC; LinkedIn Connection Message</div>
+      <button class="modal-close" onclick="closeLIModal()">&times;</button>
+    </div>
+    <div style="padding:20px;display:flex;flex-direction:column;gap:14px">
+      <div id="li-msg-loading" style="text-align:center;padding:20px;color:var(--muted);font-size:13px">Drafting your message&hellip;</div>
+      <div id="li-msg-content" style="display:none">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Version 1 &mdash; <span id="li-v1-count" style="font-weight:600;color:var(--text)">0</span>&thinsp;/&thinsp;300 chars</div>
+        <textarea id="li-v1-text" rows="4" class="input-text" style="width:100%;box-sizing:border-box;resize:vertical;font-size:13px;line-height:1.5" oninput="updateLICount(this,'li-v1-count')"></textarea>
+        <div style="display:flex;gap:6px;margin-top:4px">
+          <button class="btn btn-ghost btn-sm" style="font-size:11px" onclick="copyLIMsg('li-v1-text')">Copy</button>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin:12px 0 6px">Version 2 &mdash; <span id="li-v2-count" style="font-weight:600;color:var(--text)">0</span>&thinsp;/&thinsp;300 chars</div>
+        <textarea id="li-v2-text" rows="4" class="input-text" style="width:100%;box-sizing:border-box;resize:vertical;font-size:13px;line-height:1.5" oninput="updateLICount(this,'li-v2-count')"></textarea>
+        <div style="display:flex;gap:6px;margin-top:4px">
+          <button class="btn btn-ghost btn-sm" style="font-size:11px" onclick="copyLIMsg('li-v2-text')">Copy</button>
+        </div>
+      </div>
+      <div id="li-msg-error" style="color:#e55353;font-size:12px;display:none"></div>
+      <div style="display:flex;gap:8px;justify-content:space-between;flex-wrap:wrap">
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost btn-sm" id="li-regen-btn" onclick="generateLinkedInMessage()" style="display:none;font-size:11px">Regenerate</button>
+          <button class="btn btn-ghost btn-sm" id="li-sent-btn" onclick="markLIMsgSent()" style="display:none;font-size:11px;color:#0a66c2">Mark as Sent</button>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="closeLIModal()">Close</button>
       </div>
     </div>
   </div>
@@ -7314,7 +8023,7 @@ function showTab(name) {
   if (name === 'companies') loadCompanies();
   if (name === 'resume')    loadResume();
   if (name === 'email')     { loadGmailStatus(); loadEmailPreview(); loadDigestTime(); }
-  if (name === 'settings')  loadCriteria();
+  if (name === 'settings')  { loadCriteria(); loadAPIUsage(); }
   if (name === 'intel')     loadCareerIntel();
   if (name === 'pulse')     loadJobMarketPulse();
   if (name === 'leaders')   loadIndustryLeaders();
@@ -7912,21 +8621,75 @@ function renderJobCard(j, opts) {
       var hmNameHtml = j.hm_linkedin_url
         ? '<a href="' + esc(j.hm_linkedin_url) + '" target="_blank" rel="noopener" style="color:var(--gold);text-decoration:none;font-weight:600">' + esc(j.hm_name) + '</a>'
         : '<span style="font-weight:600;color:var(--text)">' + esc(j.hm_name) + '</span>';
-      hmHtml = '<div style="margin:8px 0 4px;padding:8px 10px;background:rgba(245,200,66,.05);border:1px solid rgba(245,200,66,.15);border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">' +
-        '<div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">' +
-          '<span style="font-size:10px;color:var(--muted);white-space:nowrap">&#x1F464; HM</span>' +
-          '<div style="min-width:0">' +
-            '<div style="font-size:12px">' + hmNameHtml + '</div>' +
-            (j.hm_title ? '<div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(j.hm_title) + '</div>' : '') +
-          '</div>' +
-          '<span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600;background:' + hmConfColor + '22;color:' + hmConfColor + ';border:1px solid ' + hmConfColor + '44;white-space:nowrap">' + hmConfLabel + '</span>' +
-        '</div>' +
-        '<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px;white-space:nowrap" data-hmid="' + (j.hm_id || '') + '" data-hmname="' + esc(j.hm_name || '') + '" data-hmtitle="' + esc(j.hm_title || '') + '" data-hmurl="' + esc(j.hm_linkedin_url || '') + '" onclick="openHMModal(this.dataset.hmid,this.dataset.hmname,this.dataset.hmtitle,this.dataset.hmurl)">&#x270E; Edit</button>' +
-      '</div>';
+      // Email with verification badge
+      var hmEmailHtml = '';
+      if (j.hm_email) {
+        var emailBadge = j.hm_email_verified
+          ? '<span style="display:inline-block;padding:0 4px;border-radius:3px;font-size:9px;font-weight:600;background:#00c86e22;color:#00c86e;border:1px solid #00c86e44;margin-left:4px">&#x2713; Verified</span>'
+          : (j.hm_email_confidence && j.hm_email_confidence < 70
+            ? '<span style="display:inline-block;padding:0 4px;border-radius:3px;font-size:9px;font-weight:600;background:#f5c84222;color:#f5c842;border:1px solid #f5c84244;margin-left:4px">&#x26A0; Unverified</span>'
+            : '');
+        hmEmailHtml = '<div style="font-size:11px;margin-top:2px"><a href="mailto:' + esc(j.hm_email) + '" style="color:#7ec8f7;text-decoration:none">' + esc(j.hm_email) + '</a>' + emailBadge + '</div>';
+      }
+      var hmPhoneHtml = j.hm_phone ? '<div style="font-size:11px;color:var(--muted);margin-top:1px">' + esc(j.hm_phone) + '</div>' : '';
+      // Enrichment source tag
+      var hmSrcRaw = j.hm_enrichment_source || '';
+      var hmSrcLabel = hmSrcRaw === 'gemini+apollo' ? 'via Gemini+Apollo' : hmSrcRaw === 'apollo' ? 'via Apollo' : hmSrcRaw === 'gemini' ? 'via Gemini' : hmSrcRaw === 'cache' ? 'From cache' : (hmSrcRaw ? 'via ' + hmSrcRaw : '');
+      var hmSrcHtml = hmSrcLabel ? '<span style="display:inline-block;padding:0 5px;border-radius:3px;font-size:9px;color:var(--muted);border:1px solid #333">' + esc(hmSrcLabel) + '</span>' : '';
+      // LI message status badge
+      var liStatusBadge = '';
+      if (j.hm_li_msg_status === 'sent') {
+        var liSentDate = j.hm_li_msg_sent_at ? ' ' + new Date(j.hm_li_msg_sent_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
+        liStatusBadge = '<span style="display:inline-block;padding:0 5px;border-radius:3px;font-size:9px;font-weight:600;background:#0a66c222;color:#0a66c2;border:1px solid #0a66c244">LI Sent' + liSentDate + '</span>';
+      } else if (j.hm_li_msg_status === 'accepted') {
+        liStatusBadge = '<span style="display:inline-block;padding:0 5px;border-radius:3px;font-size:9px;font-weight:600;background:#00c86e22;color:#00c86e;border:1px solid #00c86e44">LI Connected</span>';
+      } else if (j.hm_li_msg_status === 'draft') {
+        liStatusBadge = '<span style="display:inline-block;padding:0 5px;border-radius:3px;font-size:9px;font-weight:600;background:#f5c84222;color:#f5c842;border:1px solid #f5c84244">LI Draft</span>';
+      }
+      // Action buttons (all use data-* to avoid inline escaping headaches)
+      var hmBtns = '<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 7px;white-space:nowrap;color:#00c86e" title="Confirm this is correct"'
+        + ' data-hmid="' + esc(j.hm_id || '') + '" data-jid="' + esc(j.id) + '" data-hmname="' + esc(j.hm_name || '') + '" data-hmtitle="' + esc(j.hm_title || '') + '" data-hmconf="' + esc(j.hm_confidence || '') + '" data-hmco="' + esc(j.company || '') + '" data-hmsrc="' + esc(j.hm_enrichment_source || ''  ) + '"'
+        + ' onclick="confirmHiringManager(this.dataset.hmid,this.dataset.jid,this.dataset.hmname,this.dataset.hmtitle,this.dataset.hmconf,this.dataset.hmco,this.dataset.hmsrc,this)">&#x2713;</button>';
+      hmBtns += '<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px;white-space:nowrap" title="Edit hiring manager"'
+        + ' data-hmid="' + esc(j.hm_id || '') + '" data-hmname="' + esc(j.hm_name || '') + '" data-hmtitle="' + esc(j.hm_title || '') + '" data-hmurl="' + esc(j.hm_linkedin_url || '') + '" data-jid="' + esc(j.id) + '" data-jco="' + esc(j.company || '') + '" data-hmsrc="' + esc(j.hm_enrichment_source || '') + '"'
+        + ' onclick="openHMModal(this.dataset.hmid,this.dataset.hmname,this.dataset.hmtitle,this.dataset.hmurl,this.dataset.jid,this.dataset.jco,this.dataset.hmsrc)">&#x270E;</button>';
+      if (!j.hm_email) {
+        hmBtns += '<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px;white-space:nowrap" title="Find email via Hunter.io"'
+          + ' data-hmid="' + esc(j.hm_id || '') + '" data-jid="' + esc(j.id) + '" data-hmname="' + esc(j.hm_name || '') + '" data-hmdomain="' + esc(j.hm_company_domain || '') + '"'
+          + ' onclick="findHMEmail(this.dataset.hmid,this.dataset.jid,this.dataset.hmname,this.dataset.hmdomain,this)">@ Email</button>';
+        if (!hmSrcRaw || hmSrcRaw === 'gemini') {
+          hmBtns += '<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px;white-space:nowrap" title="Enrich via Apollo.io"'
+            + ' data-hmid="' + esc(j.hm_id || '') + '" data-hmdomain="' + esc(j.hm_company_domain || '') + '"'
+            + ' onclick="enrichHiringManager(this.dataset.hmid,this.dataset.hmdomain,this)">&#x2728; Enrich</button>';
+        }
+      }
+      hmBtns += '<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px;white-space:nowrap;color:#0a66c2" title="Draft LinkedIn message"'
+        + ' data-hmid="' + esc(j.hm_id || '') + '" data-jid="' + esc(j.id) + '"'
+        + ' onclick="openLIModal(this.dataset.hmid,this.dataset.jid,this)">&#x1F4AC; LI</button>';
+
+      hmHtml = '<div style="margin:8px 0 4px;padding:8px 10px;background:rgba(245,200,66,.05);border:1px solid rgba(245,200,66,.15);border-radius:6px">'
+        + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap">'
+          + '<div style="flex:1;min-width:0">'
+            + '<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:1px">'
+              + '<span style="font-size:10px;color:var(--muted)">&#x1F464; HM</span>'
+              + '<div style="font-size:12px">' + hmNameHtml + '</div>'
+              + '<span style="display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;background:' + hmConfColor + '22;color:' + hmConfColor + ';border:1px solid ' + hmConfColor + '44">' + hmConfLabel + '</span>'
+              + hmSrcHtml
+              + liStatusBadge
+            + '</div>'
+            + (j.hm_title ? '<div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(j.hm_title) + '</div>' : '')
+            + hmEmailHtml
+            + hmPhoneHtml
+          + '</div>'
+          + '<div style="display:flex;gap:3px;flex-wrap:wrap;align-items:flex-start;flex-shrink:0">' + hmBtns + '</div>'
+        + '</div>'
+      + '</div>';
     } else {
-      hmHtml = '<div style="margin:8px 0 4px" id="hm-row-' + j.id + '">' +
-        '<button class="btn btn-ghost btn-sm" style="font-size:11px;width:100%" id="hm-btn-' + j.id + '" data-jid="' + j.id + '" data-jco="' + esc(j.company) + '" data-jtit="' + esc(j.title) + '" data-jloc="' + esc(j.location || '') + '" data-jdesc="' + esc((j.description || '').slice(0, 200)) + '" onclick="identifyHiringManager(this.dataset.jid,this.dataset.jco,this.dataset.jtit,this.dataset.jloc,this.dataset.jdesc)">&#x1F50D; Identify Hiring Manager</button>' +
-      '</div>';
+      hmHtml = '<div style="margin:8px 0 4px" id="hm-row-' + j.id + '">'
+        + '<button class="btn btn-ghost btn-sm" style="font-size:11px;width:100%" id="hm-btn-' + j.id + '"'
+        + ' data-jid="' + j.id + '" data-jco="' + esc(j.company) + '" data-jtit="' + esc(j.title) + '" data-jloc="' + esc(j.location || '') + '" data-jdesc="' + esc((j.description || '').slice(0, 200)) + '"'
+        + ' onclick="identifyHiringManager(this.dataset.jid,this.dataset.jco,this.dataset.jtit,this.dataset.jloc,this.dataset.jdesc)">&#x1F50D; Identify Hiring Manager</button>'
+      + '</div>';
     }
   }
 
@@ -8170,15 +8933,32 @@ function renderPipelineCard(j, stage) {
     var pcLink = j.hm_linkedin_url
       ? '<a href="' + esc(j.hm_linkedin_url) + '" target="_blank" rel="noopener" style="color:var(--gold);text-decoration:none">' + esc(j.hm_name) + '</a>'
       : esc(j.hm_name);
-    hmRow = '<div style="margin:5px 0;font-size:11px;color:var(--muted)">' +
-      '&#x1F464; <span style="color:var(--text)">' + pcLink + '</span>' +
-      (j.hm_title ? ' &middot; <span>' + esc(j.hm_title) + '</span>' : '') +
-      ' <span style="display:inline-block;padding:0 5px;border-radius:3px;font-size:10px;font-weight:600;background:' + pcColor + '22;color:' + pcColor + ';border:1px solid ' + pcColor + '44">' + pcConf + '</span>' +
-    '</div>';
+    var pcLiStatus = '';
+    if (j.hm_li_msg_status === 'sent') {
+      var pcSentDate = j.hm_li_msg_sent_at ? ' ' + new Date(j.hm_li_msg_sent_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
+      pcLiStatus = '<span style="background:#0a66c222;color:#0a66c2;border:1px solid #0a66c244;padding:0 4px;border-radius:3px;font-size:9px;margin-left:4px">LI Sent' + pcSentDate + '</span>';
+    } else if (j.hm_li_msg_status === 'accepted') {
+      pcLiStatus = '<span style="background:#00c86e22;color:#00c86e;border:1px solid #00c86e44;padding:0 4px;border-radius:3px;font-size:9px;margin-left:4px">LI Connected</span>';
+    } else if (j.hm_li_msg_status === 'draft') {
+      pcLiStatus = '<span style="background:#f5c84222;color:#f5c842;border:1px solid #f5c84244;padding:0 4px;border-radius:3px;font-size:9px;margin-left:4px">LI Draft</span>';
+    }
+    var pcEmailHtml = j.hm_email ? ' <span style="font-size:10px;color:#7ec8f7">&middot; ' + esc(j.hm_email) + '</span>' : '';
+    hmRow = '<div style="margin:5px 0;font-size:11px;color:var(--muted)">'
+      + '&#x1F464; <span style="color:var(--text)">' + pcLink + '</span>'
+      + (j.hm_title ? '<span style="font-size:10px"> &middot; ' + esc(j.hm_title) + '</span>' : '')
+      + ' <span style="display:inline-block;padding:0 4px;border-radius:3px;font-size:10px;font-weight:600;background:' + pcColor + '22;color:' + pcColor + ';border:1px solid ' + pcColor + '44">' + pcConf + '</span>'
+      + pcEmailHtml
+      + pcLiStatus
+      + ' <button class="btn btn-ghost btn-sm" style="font-size:9px;padding:1px 5px;margin-left:4px" title="Draft LinkedIn message"'
+        + ' data-hmid="' + esc(j.hm_id || '') + '" data-jid="' + esc(j.id) + '"'
+        + ' onclick="openLIModal(this.dataset.hmid,this.dataset.jid,this)">&#x1F4AC;</button>'
+    + '</div>';
   } else {
-    hmRow = '<div style="margin:5px 0" id="hm-pc-row-' + j.id + '">' +
-      '<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px" data-jid="' + j.id + '" data-jco="' + esc(j.company) + '" data-jtit="' + esc(j.title) + '" data-jloc="' + esc(j.location || '') + '" data-jdesc="" onclick="identifyHiringManager(this.dataset.jid,this.dataset.jco,this.dataset.jtit,this.dataset.jloc,this.dataset.jdesc)">&#x1F50D; Find HM</button>' +
-    '</div>';
+    hmRow = '<div style="margin:5px 0" id="hm-pc-row-' + j.id + '">'
+      + '<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px"'
+      + ' data-jid="' + j.id + '" data-jco="' + esc(j.company) + '" data-jtit="' + esc(j.title) + '" data-jloc="' + esc(j.location || '') + '" data-jdesc=""'
+      + ' onclick="identifyHiringManager(this.dataset.jid,this.dataset.jco,this.dataset.jtit,this.dataset.jloc,this.dataset.jdesc)">&#x1F50D; Find HM</button>'
+    + '</div>';
   }
 
   return '<div class="pipeline-card">' +
@@ -8435,7 +9215,9 @@ async function identifyHiringManager(jobId, company, title, location, descSnippe
       if (res.status === 429 || (data.error && data.error.includes('limit'))) {
         if (row) row.innerHTML = '<div style="font-size:11px;color:#e55353;padding:4px 0">Daily search limit reached. Add manually or try tomorrow.</div>';
       } else {
-        if (row) row.innerHTML = '<div style="font-size:11px;color:#e55353;padding:4px 0">Couldn\'t identify hiring manager. <button class="btn btn-ghost btn-sm" style="font-size:10px" onclick="identifyHiringManager(' + jobId + ',' + JSON.stringify(company) + ',' + JSON.stringify(title) + ',' + JSON.stringify(location) + ',\\'\\')">Retry</button></div>';
+        if (row) row.innerHTML = '<div style="font-size:11px;color:#e55353;padding:4px 0">Could not identify hiring manager. <button class="btn btn-ghost btn-sm" style="font-size:10px" id="hm-retry-' + jobId + '">Retry</button></div>';
+        var retryBtn = document.getElementById('hm-retry-' + jobId);
+        if (retryBtn) { retryBtn.addEventListener('click', function(){ identifyHiringManager(jobId, company, title, location, ''); }); }
       }
       return;
     }
@@ -8503,12 +9285,21 @@ async function bulkIdentifyHiringManagers() {
   }
 }
 
-var _hmEditCallback = null;
-function openHMModal(hmId, name, title, url) {
+// ── HM Edit Modal state ────────────────────────────────────────────────────
+var _hmModalJobId = null;
+var _hmModalJobCo = null;
+var _hmModalSrc   = null;
+
+function openHMModal(hmId, name, title, url, jobId, jobCo, src) {
+  _hmModalJobId = jobId || null;
+  _hmModalJobCo = jobCo || null;
+  _hmModalSrc   = src   || null;
   document.getElementById('hm-edit-id').value = hmId || '';
   document.getElementById('hm-edit-name').value = name || '';
   document.getElementById('hm-edit-title').value = title || '';
   document.getElementById('hm-edit-url').value = url || '';
+  var reasonEl = document.getElementById('hm-edit-reason');
+  if (reasonEl) reasonEl.value = '';
   document.getElementById('hm-edit-error').style.display = 'none';
   document.getElementById('hm-edit-modal').style.display = 'flex';
 }
@@ -8523,11 +9314,18 @@ async function saveHMEdit() {
   var name = document.getElementById('hm-edit-name').value.trim();
   var title = document.getElementById('hm-edit-title').value.trim();
   var url = document.getElementById('hm-edit-url').value.trim();
+  var reasonEl = document.getElementById('hm-edit-reason');
+  var correctionReason = reasonEl ? reasonEl.value : '';
   try {
+    var payload = { hiring_manager_id: Number(hmId), full_name: name, title: title, linkedin_url: url };
+    if (correctionReason) payload.correction_reason = correctionReason;
+    if (_hmModalJobId) payload.job_id = Number(_hmModalJobId);
+    if (_hmModalJobCo) payload.company_name = _hmModalJobCo;
+    if (_hmModalSrc) payload.enrichment_source = _hmModalSrc;
     var res = await fetch('/api/hiring-manager/update', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ hiring_manager_id: Number(hmId), full_name: name, title: title, linkedin_url: url }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) { var err = await res.json(); throw new Error(err.error || 'Update failed'); }
     closeHMModal();
@@ -8536,6 +9334,204 @@ async function saveHMEdit() {
   } catch(e) {
     document.getElementById('hm-edit-error').style.display = '';
     document.getElementById('hm-edit-error').textContent = e.message || 'Save failed. Try again.';
+  }
+}
+
+// ── HM Confirm ─────────────────────────────────────────────────────────────
+async function confirmHiringManager(hmId, jobId, name, title, confidence, company, src, btn) {
+  if (!hmId) return;
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = '...'; }
+    var res = await fetch('/api/hiring-manager/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hiring_manager_id: Number(hmId), job_id: Number(jobId), full_name: name, title: title, confidence: confidence, company_name: company, enrichment_source: src }),
+    });
+    if (res.ok) {
+      if (btn) { btn.disabled = false; btn.style.color = '#00c86e'; btn.style.background = '#00c86e22'; btn.textContent = '\\u2713 Confirmed'; btn.onclick = null; }
+    } else {
+      if (btn) { btn.disabled = false; btn.textContent = '\\u2713'; }
+    }
+  } catch(e) {
+    if (btn) { btn.disabled = false; btn.textContent = '\\u2713'; }
+    console.error('confirmHiringManager failed:', e);
+  }
+}
+
+// ── Enrich via Apollo ───────────────────────────────────────────────────────
+async function enrichHiringManager(hmId, domain, btn) {
+  if (!hmId) return;
+  var origText = btn ? btn.textContent : '';
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = 'Enriching...'; }
+    var res = await fetch('/api/apollo/enrich-person', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hiring_manager_id: Number(hmId), company_domain: domain || '' }),
+    });
+    var data = await res.json();
+    if (res.ok && data.person && (data.person.email || data.person.phone_number)) {
+      await loadSavedJobs();
+      if (document.getElementById('panel-pipeline').classList.contains('active')) await loadPipeline();
+    } else {
+      if (btn) { btn.disabled = false; btn.textContent = 'No data'; setTimeout(function(){ if (btn) { btn.disabled = false; btn.textContent = origText; } }, 2000); }
+    }
+  } catch(e) {
+    if (btn) { btn.disabled = false; btn.textContent = origText; }
+    console.error('enrichHiringManager failed:', e);
+  }
+}
+
+// ── Find Email via Hunter ───────────────────────────────────────────────────
+async function findHMEmail(hmId, jobId, hmName, domain, btn) {
+  if (!hmId) return;
+  var origText = btn ? btn.textContent : '';
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = 'Finding...'; }
+    var nameParts = (hmName || '').trim().split(' ');
+    var firstName = nameParts[0] || '';
+    var lastName  = nameParts.slice(1).join(' ') || '';
+    var res = await fetch('/api/hunter/find-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hiring_manager_id: Number(hmId), first_name: firstName, last_name: lastName, company_domain: domain || '' }),
+    });
+    var data = await res.json();
+    if (res.ok && data.email) {
+      await loadSavedJobs();
+      if (document.getElementById('panel-pipeline').classList.contains('active')) await loadPipeline();
+    } else {
+      if (btn) { btn.disabled = false; btn.textContent = 'Not found'; setTimeout(function(){ if (btn) { btn.disabled = false; btn.textContent = origText; } }, 2000); }
+    }
+  } catch(e) {
+    if (btn) { btn.disabled = false; btn.textContent = origText; }
+    console.error('findHMEmail failed:', e);
+  }
+}
+
+// ── LinkedIn Message Modal ─────────────────────────────────────────────────
+var _liHmId  = null;
+var _liJobId = null;
+var _liMsgId = null;
+
+async function openLIModal(hmId, jobId, btn) {
+  _liHmId  = hmId;
+  _liJobId = jobId;
+  _liMsgId = null;
+  document.getElementById('li-msg-modal').style.display = 'flex';
+  document.getElementById('li-msg-loading').style.display = '';
+  document.getElementById('li-msg-content').style.display = 'none';
+  document.getElementById('li-msg-error').style.display = 'none';
+  document.getElementById('li-regen-btn').style.display = 'none';
+  document.getElementById('li-sent-btn').style.display = 'none';
+  await generateLinkedInMessage();
+}
+
+function closeLIModal() {
+  document.getElementById('li-msg-modal').style.display = 'none';
+}
+
+async function generateLinkedInMessage() {
+  document.getElementById('li-msg-loading').style.display = '';
+  document.getElementById('li-msg-content').style.display = 'none';
+  document.getElementById('li-msg-error').style.display = 'none';
+  try {
+    var res = await fetch('/api/linkedin-message/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hiring_manager_id: Number(_liHmId), job_id: Number(_liJobId) }),
+    });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Generation failed');
+    var v1 = data.message || '';
+    var v2 = data.alternative || '';
+    var v1El = document.getElementById('li-v1-text');
+    var v2El = document.getElementById('li-v2-text');
+    if (v1El) { v1El.value = v1; updateLICount(v1El, 'li-v1-count'); }
+    if (v2El) { v2El.value = v2; updateLICount(v2El, 'li-v2-count'); }
+    _liMsgId = data.message_id || null;
+    document.getElementById('li-msg-loading').style.display = 'none';
+    document.getElementById('li-msg-content').style.display = '';
+    document.getElementById('li-regen-btn').style.display = '';
+    document.getElementById('li-sent-btn').style.display = '';
+  } catch(e) {
+    document.getElementById('li-msg-loading').style.display = 'none';
+    var errEl = document.getElementById('li-msg-error');
+    if (errEl) { errEl.style.display = ''; errEl.textContent = e.message || 'Failed to generate. Try again.'; }
+    document.getElementById('li-regen-btn').style.display = '';
+  }
+}
+
+function updateLICount(textarea, countId) {
+  var len = (textarea.value || '').length;
+  var el = document.getElementById(countId);
+  if (el) { el.textContent = len; el.style.color = len > 300 ? '#e55353' : len > 270 ? '#ff9f43' : 'var(--text)'; }
+}
+
+function copyLIMsg(textareaId) {
+  var el = document.getElementById(textareaId);
+  if (!el) return;
+  el.select();
+  document.execCommand('copy');
+  var origBg = el.style.background;
+  el.style.background = '#00c86e22';
+  setTimeout(function(){ el.style.background = origBg; }, 600);
+}
+
+async function markLIMsgSent() {
+  if (!_liMsgId && !_liHmId) return;
+  try {
+    var res = await fetch('/api/linkedin-message/mark-sent', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hiring_manager_id: Number(_liHmId), job_id: Number(_liJobId), status: 'sent' }),
+    });
+    if (res.ok) {
+      closeLIModal();
+      await loadSavedJobs();
+      if (document.getElementById('panel-pipeline').classList.contains('active')) await loadPipeline();
+    }
+  } catch(e) {
+    console.error('markLIMsgSent failed:', e);
+  }
+}
+
+// ── API Usage ───────────────────────────────────────────────────────────────
+async function loadAPIUsage() {
+  var el = document.getElementById('api-usage-body');
+  if (!el) return;
+  try {
+    var r1 = await fetch('/api/accuracy/stats');
+    var r2 = await fetch('/api/hiring-manager/cache-stats');
+    var stats = r1.ok ? await r1.json() : {};
+    var cache = r2.ok ? await r2.json() : {};
+    var s = stats.stats || {};
+    var html = '';
+    // Accuracy stats
+    if (s.total_identifications > 0) {
+      html += '<div style="margin-bottom:10px"><span style="color:var(--text);font-weight:600">HM Identification Accuracy</span><br>'
+        + 'Overall: <span style="color:' + (s.accuracy_pct >= 80 ? '#00c86e' : s.accuracy_pct >= 60 ? '#f5c842' : '#e55353') + '">' + (s.accuracy_pct || 0) + '%</span>'
+        + ' (' + (s.correct || 0) + ' of ' + (s.total_identifications || 0) + ' confirmed)'
+        + '<br><span style="font-size:11px;color:var(--muted)">High conf: ' + (s.high_conf_total > 0 ? Math.round(s.high_conf_correct * 100 / s.high_conf_total) + '%' : 'n/a')
+        + ' &middot; Medium: ' + (s.med_conf_total > 0 ? Math.round(s.med_conf_correct * 100 / s.med_conf_total) + '%' : 'n/a')
+        + ' &middot; Low: ' + (s.low_conf_total > 0 ? Math.round(s.low_conf_correct * 100 / s.low_conf_total) + '%' : 'n/a')
+        + '</span></div>';
+      if (stats.top_correction_reasons && stats.top_correction_reasons.length) {
+        html += '<div style="font-size:11px;color:var(--muted);margin-bottom:10px">Top corrections: '
+          + stats.top_correction_reasons.map(function(r){ return r.correction_reason + ' (' + r.count + ')'; }).join(', ')
+          + '</div>';
+      }
+    }
+    // Cache stats
+    if (cache.companies_cached > 0 || cache.total_profiles > 0) {
+      html += '<div style="margin-bottom:10px"><span style="color:var(--text);font-weight:600">Company Leadership Cache</span><br>'
+        + (cache.companies_cached || 0) + ' companies &middot; ' + (cache.total_profiles || 0) + ' profiles'
+        + '<br><span style="font-size:11px;color:var(--muted)">Hit rate: ' + (cache.hit_rate || 'n/a') + '</span></div>';
+    }
+    if (!html) html = '<span style="font-size:12px;color:var(--muted)">No data yet. Identify some hiring managers to start seeing stats.</span>';
+    el.innerHTML = html;
+  } catch(e) {
+    el.textContent = 'Failed to load usage data.';
   }
 }
 
