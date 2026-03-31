@@ -20,6 +20,7 @@ import {
 } from './deep_value.js';
 import { generateJobMarketPulse, buildStats } from './job_market_pulse.js';
 import type { JobMarketPulseResult, ScoutCompanyStat } from './job_market_pulse.js';
+import { refreshIndustryNews, getLatestNews } from './industry_news.js';
 import {
   initPositioningDB, getProfile, saveProfile, getStories, saveStory, deleteStory,
   getOutputs, generateOutputs, getObjections, generateObjections,
@@ -1552,6 +1553,33 @@ app.post('/api/deep-value/refresh', async (_req, res: Response) => {
   } catch (e) {
     console.error('[DeepValue] Refresh failed:', e);
     res.status(500).json({ error: String(e) });
+  }
+});
+
+// ── Industry News ──────────────────────────────────────────────────────────────
+let newsRefreshRunning = false;
+
+app.get('/api/industry-news', async (_req, res: Response) => {
+  try {
+    const { articles, meta } = await getLatestNews(pool, 80);
+    res.json({ articles, meta, stale: !meta || !articles.length });
+  } catch (e) {
+    console.error('[IndustryNews] GET failed:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+app.post('/api/industry-news/refresh', async (_req, res: Response) => {
+  if (newsRefreshRunning) { res.json({ queued: true, message: 'Refresh already in progress' }); return; }
+  newsRefreshRunning = true;
+  res.json({ started: true });
+  try {
+    const geminiKey = process.env.GEMINI_API_KEY ?? '';
+    await refreshIndustryNews(pool, geminiKey);
+  } catch (e) {
+    console.error('[IndustryNews] Refresh failed:', e);
+  } finally {
+    newsRefreshRunning = false;
   }
 });
 
@@ -5164,6 +5192,48 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .save-watchlist-btn:hover{background:rgba(200,169,110,.2)}
 .save-watchlist-btn.saved{background:rgba(74,222,128,.1);color:#4ade80;border-color:rgba(74,222,128,.25);cursor:default}
 @media(max-width:700px){.dv-grid{grid-template-columns:1fr}}
+/* ── Industry News ──────────────────────────────────────────────────────────── */
+.news-layout{display:flex;flex-direction:column;height:100%;padding:20px 24px;gap:0;overflow:hidden}
+.news-topbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px;flex-shrink:0}
+.news-title{font-size:17px;font-weight:800;color:var(--text);letter-spacing:-.01em}
+.news-subtitle{font-size:12px;color:var(--muted);margin-top:1px}
+.news-filter-bar{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;flex-shrink:0}
+.news-filter-btn{padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;transition:all .15s}
+.news-filter-btn:hover{border-color:var(--gold);color:var(--gold)}
+.news-filter-btn.active{background:rgba(200,169,110,.15);border-color:rgba(200,169,110,.4);color:var(--gold)}
+.news-signal-btn{padding:4px 12px;border-radius:20px;font-size:11px;font-weight:700;border:1px solid transparent;cursor:pointer;transition:all .15s}
+.news-signal-btn.hiring{background:rgba(74,222,128,.1);color:#4ade80;border-color:rgba(74,222,128,.3)}
+.news-signal-btn.hiring.active{background:#4ade8020;box-shadow:0 0 0 1px #4ade80}
+.news-signal-btn.funded{background:rgba(245,200,66,.1);color:var(--gold);border-color:rgba(245,200,66,.3)}
+.news-signal-btn.funded.active{background:#f5c84220;box-shadow:0 0 0 1px var(--gold)}
+.news-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px;overflow-y:auto;flex:1;padding-bottom:16px}
+.news-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:10px;transition:border-color .15s;position:relative}
+.news-card:hover{border-color:rgba(200,169,110,.35)}
+.news-card-top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.news-card-company{font-size:13px;font-weight:800;color:var(--text)}
+.news-card-source{font-size:10px;color:var(--muted);margin-top:2px}
+.news-card-score{font-size:11px;font-weight:800;padding:2px 7px;border-radius:5px;background:rgba(200,169,110,.12);color:var(--gold);flex-shrink:0;align-self:flex-start}
+.news-card-title{font-size:12px;color:var(--text);line-height:1.45;font-weight:600}
+.news-card-title a{color:inherit;text-decoration:none}
+.news-card-title a:hover{color:var(--gold)}
+.news-card-divider{border:none;border-top:1px solid var(--border);margin:0}
+.news-card-summary{font-size:12px;color:var(--text-secondary, #b0b0b0);line-height:1.5}
+.news-card-matters{font-size:11px;color:var(--muted);line-height:1.45;border-left:2px solid rgba(200,169,110,.3);padding-left:8px;font-style:italic}
+.news-meta-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.news-badge{padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+.news-badge-sector{background:rgba(124,141,255,.12);color:#7c8dff;border:1px solid rgba(124,141,255,.2)}
+.news-badge-hiring-strong{background:rgba(74,222,128,.1);color:#4ade80;border:1px solid rgba(74,222,128,.25)}
+.news-badge-hiring-moderate{background:rgba(245,200,66,.1);color:var(--gold);border:1px solid rgba(245,200,66,.25)}
+.news-badge-hiring-low,.news-badge-hiring-none,.news-badge-hiring-unknown{background:rgba(120,120,120,.1);color:var(--muted);border:1px solid var(--border)}
+.news-badge-funding{background:rgba(245,200,66,.08);color:#e0b840;border:1px solid rgba(245,200,66,.15)}
+.news-badge-territory{background:rgba(59,130,246,.1);color:#60a5fa;border:1px solid rgba(59,130,246,.2)}
+.news-card-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
+.news-card-age{font-size:10px;color:var(--muted);margin-left:auto}
+.news-empty{text-align:center;color:var(--muted);padding:60px 20px;grid-column:1/-1}
+.news-loading{text-align:center;color:var(--muted);padding:60px 20px;grid-column:1/-1}
+.news-footer{font-size:11px;color:var(--muted);text-align:center;padding-top:8px;flex-shrink:0}
+.news-status{font-size:12px;color:var(--muted);margin-top:2px}
+@media(max-width:700px){.news-grid{grid-template-columns:1fr}}
 /* ── Positioning Engine ────────────────────────────────────────────────────── */
 .pos-layout{display:flex;flex-direction:column;height:100%;padding:24px;gap:20px;max-width:1100px}
 .pos-steps{display:flex;gap:6px;flex-wrap:wrap}
@@ -5427,6 +5497,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="tab" id="tab-leaders" onclick="showTab('leaders')" data-tooltip="Claude-ranked top 5-10 sales-led companies per sector — SaaS, Cybersecurity, AI Infrastructure, Networking and more. The gold standard companies to target for your next move.">Industry Leaders</div>
     <div class="tab" id="tab-deepvalue" onclick="showTab('deepvalue')" data-tooltip="Gemini finds the cutting-edge infrastructure companies with the clearest 'why you need this' value prop — AI Infra, HPC, Semiconductors, Photonics, Networking, Data Center and more.">Deep Value</div>
     <div class="tab" id="tab-preipo" onclick="showTab('preipo')" data-tooltip="Explosive pre-IPO companies worth joining NOW. Series B is the sweet spot — proven PMF, scaling sales motion, meaningful equity. Ranked by momentum score using real funding data.">Pre-IPO</div>
+    <div class="tab" id="tab-news" onclick="showTab('news')" data-tooltip="Live B2B tech news feed — fresh articles from top sources analyzed by Gemini. See which companies are funding, hiring, or expanding sales teams right now.">Industry News</div>
     <div class="tab" id="tab-clawd" onclick="showTab('clawd')" data-tooltip="Embedded interview and career coaching tool.">DeathByClawd</div>
     <div class="tab" id="tab-email" onclick="showTab('email')" data-tooltip="Weekly Scout Report — sent every Monday morning. Top 10 ranked matches from the past week with a Claude-written briefing. Preview, test send, and manage your Gmail connection here.">Weekly Report</div>
   </div>
@@ -6442,6 +6513,40 @@ textarea:focus,input:focus{border-color:var(--gold)}
   </div>
 </div>
 
+<div class="panel" id="panel-news">
+  <div class="news-layout">
+    <div class="news-topbar">
+      <div>
+        <div class="news-title">&#x1F4F0; Industry News</div>
+        <div class="news-subtitle">Live B2B tech news &mdash; analyzed by Gemini for hiring signals, funding, and sales opportunity</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <div id="news-meta" class="news-status"></div>
+        <button class="btn btn-gold btn-sm" id="news-refresh-btn" onclick="refreshNews()">&#x21BB; Refresh Feed</button>
+      </div>
+    </div>
+
+    <div class="news-filter-bar" id="news-filter-bar">
+      <button class="news-filter-btn active" onclick="setNewsFilter('all',this)">All</button>
+      <button class="news-filter-btn" onclick="setNewsFilter('SaaS',this)">SaaS</button>
+      <button class="news-filter-btn" onclick="setNewsFilter('Cybersecurity',this)">Cybersecurity</button>
+      <button class="news-filter-btn" onclick="setNewsFilter('AI',this)">AI</button>
+      <button class="news-filter-btn" onclick="setNewsFilter('Infrastructure',this)">Infrastructure</button>
+      <button class="news-filter-btn" onclick="setNewsFilter('Hardware',this)">Hardware</button>
+      <button class="news-filter-btn" onclick="setNewsFilter('Fintech',this)">Fintech</button>
+      <button class="news-filter-btn" onclick="setNewsFilter('HealthTech',this)">HealthTech</button>
+      <button class="news-signal-btn hiring" onclick="toggleNewsSignal('hiring',this)">&#x2714; Hiring</button>
+      <button class="news-signal-btn funded" onclick="toggleNewsSignal('funded',this)">&#x1F4B0; Funded</button>
+    </div>
+
+    <div class="news-grid" id="news-grid">
+      <div class="news-loading">Loading news feed&hellip;</div>
+    </div>
+
+    <div id="news-footer" class="news-footer"></div>
+  </div>
+</div>
+
 <div class="panel" id="panel-clawd">
   <iframe class="clawd-frame" src="https://deathbyclawd.com/" allow="fullscreen" loading="lazy"></iframe>
 </div>
@@ -6631,7 +6736,7 @@ function sizeClawd() {
 window.addEventListener('resize', sizeClawd);
 
 // ── tabs ─────────────────────────────────────────────────────────────────
-var TABS = ['jobs','saved','pipeline','research','intel','pulse','leaders','deepvalue','preipo','companies','resume','email','runs','positioning','settings','clawd'];
+var TABS = ['jobs','saved','pipeline','research','intel','pulse','leaders','deepvalue','preipo','news','companies','resume','email','runs','positioning','settings','clawd'];
 function showTab(name) {
   TABS.forEach(function(t) {
     var tabEl = document.getElementById('tab-' + t);
@@ -6654,6 +6759,7 @@ function showTab(name) {
   if (name === 'leaders')   loadIndustryLeaders();
   if (name === 'deepvalue') loadDeepValue();
   if (name === 'preipo')    loadPreIpo();
+  if (name === 'news')      loadNews();
   if (name === 'positioning') loadPositioning();
 }
 
@@ -10176,6 +10282,185 @@ function toggleLeadersScanResults() {
   var toggleEl = document.getElementById('leaders-scan-toggle');
   if (jobsEl) jobsEl.style.display = _leadersScanCollapsed ? 'none' : '';
   if (toggleEl) toggleEl.textContent = _leadersScanCollapsed ? '\u25BC Expand' : '\u25B2 Collapse';
+}
+
+// ── Industry News ─────────────────────────────────────────────────────────────
+var _newsData = [];
+var _newsFilter = 'all';
+var _newsSignals = { hiring: false, funded: false };
+var _newsLoaded = false;
+
+function newsEl(id) { return document.getElementById(id); }
+
+async function loadNews(force) {
+  if (_newsLoaded && !force) return;
+  var grid = newsEl('news-grid');
+  if (grid) grid.innerHTML = '<div class="news-loading">Loading news feed\u2026</div>';
+  try {
+    var res = await fetch('/api/industry-news');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var json = await res.json();
+    _newsData = json.articles || [];
+    _newsLoaded = true;
+    renderNewsGrid();
+    var meta = json.meta;
+    var metaEl = newsEl('news-meta');
+    if (metaEl && meta) {
+      var ts = meta.generated_at ? new Date(meta.generated_at).toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' }) : '';
+      metaEl.textContent = ts ? 'Updated ' + ts : '';
+    }
+    var footerEl = newsEl('news-footer');
+    if (footerEl) {
+      if (!_newsData.length) {
+        footerEl.textContent = 'No articles yet \u2014 click Refresh Feed to pull fresh B2B news';
+      } else {
+        footerEl.textContent = _newsData.length + ' articles \u00B7 powered by Gemini + Google Search grounding';
+      }
+    }
+  } catch(e) {
+    if (grid) grid.innerHTML = '<div class="news-empty">Failed to load news: ' + esc(e.message) + '</div>';
+  }
+}
+
+function renderNewsGrid() {
+  var grid = newsEl('news-grid');
+  if (!grid) return;
+  var filtered = _newsData.filter(function(a) {
+    var sectorMatch = _newsFilter === 'all' || (a.sector || '').toLowerCase().includes(_newsFilter.toLowerCase());
+    var hiringMatch = !_newsSignals.hiring || ['STRONG','MODERATE'].includes((a.hiring_signal || '').split('\u2014')[0].trim().toUpperCase().split(' ')[0]);
+    var fundedMatch = !_newsSignals.funded || (a.funding_stage && a.funding_stage !== 'Unknown' && a.funding_stage !== '');
+    return sectorMatch && hiringMatch && fundedMatch;
+  });
+  if (!filtered.length) {
+    grid.innerHTML = '<div class="news-empty">No articles match this filter \u2014 try broadening your selection</div>';
+    return;
+  }
+  grid.innerHTML = filtered.map(renderNewsCard).join('');
+}
+
+function renderNewsCard(a) {
+  var hiringSignalRaw = (a.hiring_signal || '').split('\u2014')[0].split('—')[0].trim().toUpperCase().split(' ')[0];
+  var hiringClass = hiringSignalRaw === 'STRONG' ? 'news-badge-hiring-strong' :
+    hiringSignalRaw === 'MODERATE' ? 'news-badge-hiring-moderate' :
+    hiringSignalRaw === 'LOW' ? 'news-badge-hiring-low' :
+    hiringSignalRaw === 'NONE' ? 'news-badge-hiring-none' : 'news-badge-hiring-unknown';
+  var hiringLabel = hiringSignalRaw === 'STRONG' ? '\u2714 Actively Hiring' :
+    hiringSignalRaw === 'MODERATE' ? '\u2714 Some Hiring' :
+    hiringSignalRaw === 'LOW' ? 'Minimal Hiring' :
+    hiringSignalRaw === 'NONE' ? 'Not Hiring' : 'Hiring Unknown';
+
+  var score = a.relevance_score || 0;
+  var sector = a.sector || '';
+  var tags = (a.tags || []).slice(0, 4);
+  var pub = a.published_at ? new Date(a.published_at) : null;
+  var ageStr = '';
+  if (pub) {
+    var diffH = Math.round((Date.now() - pub.getTime()) / 3600000);
+    ageStr = diffH < 1 ? 'Just now' : diffH < 24 ? diffH + 'h ago' : Math.floor(diffH/24) + 'd ago';
+  }
+
+  var tagsHtml = tags.map(function(t) { return '<span class="news-badge news-badge-sector">' + esc(t) + '</span>'; }).join('');
+  var fundingHtml = a.funding_stage && a.funding_stage !== 'Unknown'
+    ? '<span class="news-badge news-badge-funding">' + esc(a.funding_stage) + '</span>' : '';
+  var territoryHtml = a.sales_territory && a.sales_territory !== 'Unknown'
+    ? '<span class="news-badge news-badge-territory">' + esc(a.sales_territory) + '</span>' : '';
+
+  return '<div class="news-card">' +
+    '<div class="news-card-top">' +
+      '<div>' +
+        '<div class="news-card-company">' + esc(a.company_name || 'Unknown') + '</div>' +
+        '<div class="news-card-source">' + esc(a.source_name || '') + (ageStr ? ' \u00B7 ' + ageStr : '') + '</div>' +
+      '</div>' +
+      (score ? '<div class="news-card-score">' + score + '</div>' : '') +
+    '</div>' +
+
+    '<div class="news-card-title"><a href="' + esc(a.article_url) + '" target="_blank" rel="noopener">' + esc(a.title) + '</a></div>' +
+
+    '<hr class="news-card-divider">' +
+
+    (a.summary ? '<div class="news-card-summary">' + esc(a.summary) + '</div>' : '') +
+    (a.why_it_matters ? '<div class="news-card-matters">' + esc(a.why_it_matters) + '</div>' : '') +
+
+    '<div class="news-meta-row">' +
+      (sector ? '<span class="news-badge news-badge-sector">' + esc(sector) + '</span>' : '') +
+      '<span class="news-badge ' + hiringClass + '">' + hiringLabel + '</span>' +
+      fundingHtml +
+      territoryHtml +
+    '</div>' +
+
+    (tagsHtml ? '<div class="news-meta-row">' + tagsHtml + '</div>' : '') +
+
+    (a.employee_count_est && a.employee_count_est !== 'Unknown'
+      ? '<div style="font-size:10px;color:var(--muted)">\uD83D\uDC65 ' + esc(a.employee_count_est) + ' employees</div>' : '') +
+
+    '<div class="news-card-actions">' +
+      '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(a.company_name || '') + ',null,this)">\u2605 Save Company</button>' +
+      '<a href="' + esc(a.article_url) + '" target="_blank" rel="noopener" class="btn btn-ghost btn-sm" style="font-size:11px">Read \u2192</a>' +
+    '</div>' +
+  '</div>';
+}
+
+function setNewsFilter(sector, btn) {
+  _newsFilter = sector;
+  document.querySelectorAll('.news-filter-btn').forEach(function(b) { b.classList.remove('active'); });
+  if (btn) btn.classList.add('active');
+  renderNewsGrid();
+}
+
+function toggleNewsSignal(signal, btn) {
+  _newsSignals[signal] = !_newsSignals[signal];
+  if (btn) btn.classList.toggle('active', _newsSignals[signal]);
+  renderNewsGrid();
+}
+
+async function refreshNews() {
+  var btn = newsEl('news-refresh-btn');
+  var metaEl = newsEl('news-meta');
+  if (btn) { btn.disabled = true; btn.textContent = 'Fetching\u2026'; }
+  if (metaEl) metaEl.textContent = 'Pulling RSS feeds and analyzing with Gemini\u2026';
+  var grid = newsEl('news-grid');
+  if (grid) grid.innerHTML = '<div class="news-loading">\uD83E\uDD16 Gemini is reading the news\u2026 (30-60 seconds)</div>';
+  try {
+    var startRes = await fetch('/api/industry-news/refresh', { method: 'POST' });
+    var startData = await startRes.json();
+    if (!startData.started) {
+      if (metaEl) metaEl.textContent = startData.message || 'Could not start refresh';
+      if (btn) { btn.disabled = false; btn.textContent = '\u21BB Refresh Feed'; }
+      return;
+    }
+    // Poll until new data appears
+    var attempts = 0;
+    var poll = setInterval(async function() {
+      attempts++;
+      if (attempts > 40) {
+        clearInterval(poll);
+        if (btn) { btn.disabled = false; btn.textContent = '\u21BB Refresh Feed'; }
+        await loadNews(true);
+        return;
+      }
+      try {
+        var checkRes = await fetch('/api/industry-news');
+        var checkData = await checkRes.json();
+        if (checkData.articles && checkData.articles.length > (_newsData.length || 0)) {
+          clearInterval(poll);
+          _newsData = checkData.articles;
+          _newsLoaded = true;
+          renderNewsGrid();
+          var meta = checkData.meta;
+          if (metaEl && meta) {
+            var ts = meta.generated_at ? new Date(meta.generated_at).toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' }) : '';
+            metaEl.textContent = ts ? 'Updated ' + ts : '';
+          }
+          var footerEl = newsEl('news-footer');
+          if (footerEl) footerEl.textContent = _newsData.length + ' articles \u00B7 powered by Gemini + Google Search grounding';
+          if (btn) { btn.disabled = false; btn.textContent = '\u21BB Refresh Feed'; }
+        }
+      } catch { /* keep polling */ }
+    }, 5000);
+  } catch(e) {
+    if (metaEl) metaEl.textContent = 'Refresh failed: ' + e.message;
+    if (btn) { btn.disabled = false; btn.textContent = '\u21BB Refresh Feed'; }
+  }
 }
 
 // ── Deep Value ──────────────────────────────────────────────────────────────
