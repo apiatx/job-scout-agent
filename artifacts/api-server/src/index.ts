@@ -2360,6 +2360,8 @@ app.post('/api/hiring-manager/identify', async (req: Request, res: Response) => 
     if (!job_id || !company_name || !role_title) {
       res.status(400).json({ error: 'job_id, company_name, and role_title are required' }); return;
     }
+    // Remove stale null-name records so a re-search always starts clean
+    await pool.query(`DELETE FROM hiring_managers WHERE job_id=$1 AND (full_name IS NULL OR full_name='')`, [job_id]);
 
     const companyName: string = company_name;
     const roleTitle: string = role_title;
@@ -2488,20 +2490,58 @@ Rules:
       }
     }
 
+    // ── Step 2.7: Gemini web search (fires when CSE/Apollo are unavailable) ─
+    let geminiWebSearchText = '';
+    const geminiHMKey = process.env.GEMINI_API_KEY?.trim();
+    if (!usedCache && geminiHMKey && allResults.length === 0 && apolloResults.length === 0) {
+      try {
+        const { GoogleGenAI } = await import('@google/genai');
+        const hmGenAI = new GoogleGenAI({ apiKey: geminiHMKey });
+        const kwArr = Array.isArray(analysis.manager_seniority_keywords)
+          ? analysis.manager_seniority_keywords.slice(0, 4)
+          : ['VP Sales', 'Director of Sales', 'Head of Sales'];
+        const regionStr = analysis.region ? ` in the ${analysis.region} region` : '';
+        const geminiHMPrompt = [
+          `I need to find the hiring manager for a "${roleTitle}" position at ${companyName}${regionStr}.`,
+          `The hiring manager would have a title similar to: ${kwArr.join(', ')}.`,
+          `Please search for people currently working at ${companyName} in sales leadership roles${regionStr}.`,
+          `For each person you find, provide their full name, title, and LinkedIn profile URL.`,
+          `Also check the ${companyName} company website, LinkedIn company page, and any press releases that mention their sales leadership.`,
+          `Focus only on people who are currently at ${companyName} — not former employees.`,
+        ].join(' ');
+
+        const hmSearchResp = await hmGenAI.models.generateContent({
+          model: 'gemini-2.5-flash-preview',
+          contents: geminiHMPrompt,
+          config: { tools: [{ googleSearch: {} }] },
+        });
+
+        const rawText = (hmSearchResp as any).text || '';
+        if (rawText.length > 80) {
+          geminiWebSearchText = rawText;
+          enrichmentSource = 'gemini';
+          console.log(`[HiringManager] Gemini web search: ${rawText.length} chars of web-grounded results`);
+        }
+      } catch (geminiHMErr) {
+        console.warn('[HiringManager] Gemini web search failed:', geminiHMErr instanceof Error ? geminiHMErr.message : geminiHMErr);
+      }
+    }
+
     // Build flattened results text for Claude
     let flattenedResults = '';
     if (usedCache) {
       flattenedResults = cachedResultsText;
     } else {
-      flattenedResults = allResults.length
+      const cseText = allResults.length
         ? allResults.map((r, i) => `Result ${i + 1}:\nTitle: ${r.title}\nSnippet: ${r.snippet}\nURL: ${r.link}`).join('\n\n')
-        : 'No Google search results available.';
-      if (apolloResults.length > 0) {
-        const apolloText = apolloResults.map((p: any) =>
+        : '';
+      const apolloText = apolloResults.length > 0
+        ? 'APOLLO PEOPLE SEARCH RESULTS:\n' + apolloResults.map((p: any) =>
           `Apollo Result: ${p.first_name || ''} ${p.last_name || ''} - ${p.title || ''} at ${p.organization?.name || companyName}. Location: ${p.city || ''} ${p.state || ''}. LinkedIn: ${p.linkedin_url || 'N/A'}`
-        ).join('\n');
-        flattenedResults += '\n\n---\n\nAPOLLO PEOPLE SEARCH RESULTS:\n' + apolloText;
-      }
+        ).join('\n')
+        : '';
+      const parts = [cseText, apolloText, geminiWebSearchText ? 'WEB SEARCH RESULTS (via Gemini):\n' + geminiWebSearchText : ''].filter(Boolean);
+      flattenedResults = parts.length > 0 ? parts.join('\n\n---\n\n') : 'No search results available.';
     }
 
     // ── Step 3: Claude identifies the hiring manager ─────────────────────
@@ -2616,7 +2656,7 @@ ${flattenedResults}`,
         hmData.confidence || 'none',
         hmData.reasoning || null,
         hmData.alternative ? JSON.stringify(hmData.alternative) : null,
-        (allResults.length === 0 && apolloResults.length === 0 && !usedCache) ? 'No search results found — add manually' : null,
+        (allResults.length === 0 && apolloResults.length === 0 && !geminiWebSearchText && !usedCache) ? 'No search results found — add manually' : null,
         enrichmentSource,
         apolloId,
         apolloEmail,
@@ -8123,6 +8163,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;padding-top:12px;border-top:1px solid rgba(255,255,255,.08)">
         <button id="hmd-li-msg-btn" class="btn btn-ghost btn-sm" style="font-size:11px;color:#0a66c2" onclick="openLIModalFromDetails()">&#x1F4AC; Draft LinkedIn Message</button>
         <button id="hmd-edit-btn" class="btn btn-ghost btn-sm" style="font-size:11px" onclick="openHMEditFromDetails()">&#x270E; Edit</button>
+        <button id="hmd-rerun-btn" class="btn btn-ghost btn-sm" style="font-size:11px;color:#f5c842;display:none" onclick="_rerunHMSearch()">&#x1F50D; Re-run Search</button>
       </div>
     </div>
   </div>
@@ -9675,7 +9716,22 @@ async function openHMDetailsModal(hmId, jobId, name, title, url, email, phone, d
     _fetchHMPhoneForModal(hmId, domain);
   }
 
+  // Show/hide Re-run Search button based on whether name was found
+  var rerunBtn = document.getElementById('hmd-rerun-btn');
+  if (rerunBtn) { rerunBtn.style.display = name ? 'none' : ''; }
+
   document.getElementById('hm-details-modal').style.display = 'flex';
+}
+
+function _rerunHMSearch() {
+  document.getElementById('hm-details-modal').style.display = 'none';
+  var jobId  = _hmdJobId;
+  var company = _hmdHmCo;
+  var job = _jobsById && _jobsById[jobId];
+  var title    = job ? (job.title || '') : '';
+  var location = job ? (job.location || '') : '';
+  var desc     = job ? ((job.description || '').slice(0, 200)) : '';
+  identifyHiringManager(jobId, company, title, location, desc);
 }
 
 async function _fetchHMEmailForModal(hmId, name, domain) {
