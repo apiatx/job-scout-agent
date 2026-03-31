@@ -1,0 +1,388 @@
+# Hiring Manager Identifier — Replit Agent Implementation Prompt
+
+## OVERVIEW
+
+Add a "Hiring Manager Identifier" capability to the existing Job Scout Agent. This feature automatically identifies the most likely hiring manager for any saved job, and displays that information on both the **Saved Jobs** page and the **My Pipeline** page. It uses Google Custom Search API to find LinkedIn profiles, then Claude Opus 4.6 to analyze results and pick the right person.
+
+---
+
+## PART 1: PASTE THIS INTO REPLIT AGENT
+
+---
+
+I need you to add a Hiring Manager Identifier feature to my existing app. Here's exactly what to build:
+
+### New Database Table
+
+Create a new table called `hiring_managers`:
+
+```sql
+CREATE TABLE hiring_managers (
+  id SERIAL PRIMARY KEY,
+  job_id INTEGER REFERENCES saved_jobs(id),       -- adjust FK to match your actual saved jobs table name
+  full_name TEXT,
+  title TEXT,
+  linkedin_url TEXT,
+  company TEXT,
+  region TEXT,
+  confidence TEXT DEFAULT 'medium',                -- 'high', 'medium', 'low'
+  source TEXT DEFAULT 'auto',                      -- 'auto' (AI-identified) or 'manual' (user-corrected)
+  notes TEXT,                                      -- optional notes from AI or user
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+**IMPORTANT**: Check what my saved jobs table is actually called (it might be `saved_jobs`, `jobs`, `scout_jobs`, etc.) and adjust the foreign key accordingly. Also check my pipeline/applications table and add a column there too:
+
+```sql
+ALTER TABLE pipeline_jobs ADD COLUMN hiring_manager_id INTEGER REFERENCES hiring_managers(id);
+-- Again, adjust "pipeline_jobs" to whatever my pipeline/applications table is actually called
+```
+
+### New API Endpoint: `/api/hiring-manager/identify`
+
+**Method**: POST
+
+**Request body**:
+```json
+{
+  "job_id": 123,
+  "company_name": "Akamai",
+  "role_title": "Strategic Account Executive - Southeast",
+  "job_description": "...(full JD text)...",
+  "location": "Southeast US"
+}
+```
+
+**What this endpoint does (3-step process):**
+
+#### Step 1: Claude Analyzes the Job Description
+
+Call Claude Opus 4.6 (model: `claude-opus-4-6`) WITHOUT web search to extract structured info from the JD.
+
+```typescript
+const analysisResponse = await fetch("https://api.anthropic.com/v1/messages", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "x-api-key": process.env.ANTHROPIC_API_KEY,
+    "anthropic-version": "2023-06-01"
+  },
+  body: JSON.stringify({
+    model: "claude-opus-4-6",
+    max_tokens: 1024,
+    system: `You analyze job descriptions to determine who the hiring manager likely is. Given a job description, extract the following and return ONLY valid JSON with no other text:
+
+{
+  "department": "the department this role sits in (e.g., Enterprise Sales, Security Sales, Channel Sales, Cloud Sales)",
+  "role_seniority": "the seniority of the OPEN role (e.g., AE, Senior AE, Director)",
+  "manager_likely_title": "the title of the person this role most likely reports to (e.g., if the role is AE, the manager is likely VP Sales, Director of Sales, or Regional Sales Director)",
+  "manager_seniority_keywords": ["array of 3-5 title keywords to search for, e.g., 'VP Sales', 'Director Enterprise Sales', 'Head of Sales', 'Regional Sales Director', 'AVP Sales'"],
+  "region": "the geographic region or territory mentioned",
+  "vertical": "any industry vertical mentioned (e.g., healthcare, financial services, technology)",
+  "named_people": ["any names explicitly mentioned in the JD, usually recruiters"]
+}
+
+Rules:
+- If the role is an AE or Account Executive, the hiring manager is typically a Director, VP, or Regional Director of Sales
+- If the role is a Director, the hiring manager is typically a VP or SVP
+- If the role is a Sales Manager, the hiring manager is typically a Director or VP
+- Be specific about the sales segment: "Enterprise Sales" not just "Sales"
+- Include the region in your manager title keywords when a region is specified
+- Return ONLY the JSON. No markdown, no explanation, no backticks.`,
+    messages: [
+      {
+        role: "user",
+        content: `Company: ${companyName}\nRole: ${roleTitle}\n\nJob Description:\n${jobDescription}`
+      }
+    ]
+  })
+});
+```
+
+Parse the JSON response. If parsing fails, try stripping markdown backticks and re-parsing.
+
+#### Step 2: Google Custom Search
+
+Using the `manager_seniority_keywords` from Step 1, run 2-3 Google Custom Search queries. Use the Google Custom Search JSON API:
+
+```typescript
+// Build 2-3 search queries from the analysis
+const searchQueries = [
+  `"${analysis.manager_likely_title}" site:linkedin.com/in ${companyName}`,
+  `"${analysis.manager_seniority_keywords[0]}" OR "${analysis.manager_seniority_keywords[1]}" site:linkedin.com/in ${companyName}`,
+  `${companyName} ${analysis.region || ''} sales leadership site:linkedin.com/in`
+];
+
+// Run each query against Google Custom Search API
+for (const query of searchQueries) {
+  const googleResponse = await fetch(
+    `https://www.googleapis.com/customsearch/v1?key=${process.env.GOOGLE_CSE_API_KEY}&cx=${process.env.GOOGLE_CSE_ID}&q=${encodeURIComponent(query)}&num=5`
+  );
+  const googleData = await googleResponse.json();
+  // Collect all results into an array
+  allResults.push(...(googleData.items || []));
+}
+```
+
+**IMPORTANT**: You need TWO environment variables for Google Custom Search:
+- `GOOGLE_CSE_API_KEY` — the API key (user already has this)
+- `GOOGLE_CSE_ID` — the Custom Search Engine ID (user already has this)
+
+Collect all Google results (titles, snippets, URLs) into a single text block.
+
+#### Step 3: Claude Identifies the Hiring Manager
+
+Send the Google results + the JD analysis to Claude Opus 4.6 to pick the most likely hiring manager:
+
+```typescript
+const identifyResponse = await fetch("https://api.anthropic.com/v1/messages", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "x-api-key": process.env.ANTHROPIC_API_KEY,
+    "anthropic-version": "2023-06-01"
+  },
+  body: JSON.stringify({
+    model: "claude-opus-4-6",
+    max_tokens: 1024,
+    system: `You are a hiring manager identification engine. Given Google search results (mostly LinkedIn profiles) and context about a job opening, identify the single most likely hiring manager.
+
+Rules:
+- The hiring manager is the person this role REPORTS TO, not the recruiter
+- Ignore recruiters, talent acquisition, HR people — they post the job but don't manage the role
+- Ignore people with the SAME title as the open role — they'd be peers, not managers
+- Look for someone one level ABOVE the open role in the same department and region
+- If the role is "Account Executive - Southeast", look for a "Director of Sales" or "VP Sales" who covers Southeast or is based in a Southeast city
+- If multiple candidates match, pick the one whose title and region most closely align
+- If no strong match exists, say so honestly — don't guess
+
+Return ONLY valid JSON with no other text:
+
+{
+  "full_name": "First Last",
+  "title": "Their current title at the company",
+  "linkedin_url": "https://linkedin.com/in/their-profile",
+  "confidence": "high/medium/low",
+  "reasoning": "One sentence explaining why you picked this person",
+  "alternative": {
+    "full_name": "Second choice name or null",
+    "title": "Second choice title or null",
+    "linkedin_url": "URL or null"
+  }
+}
+
+Confidence levels:
+- HIGH: Title is clearly one level above the open role, same department, same region, currently at the company
+- MEDIUM: Title matches but region is unclear, or the person might be lateral, or the profile snippet is ambiguous
+- LOW: Best guess from limited data — might be wrong
+
+If you truly cannot identify anyone from the results, return:
+{
+  "full_name": null,
+  "title": null,
+  "linkedin_url": null,
+  "confidence": "none",
+  "reasoning": "Explanation of why no match was found",
+  "alternative": null
+}`,
+    messages: [
+      {
+        role: "user",
+        content: `OPEN ROLE CONTEXT:
+Company: ${companyName}
+Open Role: ${roleTitle}
+Department: ${analysis.department}
+Role Seniority: ${analysis.role_seniority}
+Expected Manager Title: ${analysis.manager_likely_title}
+Region: ${analysis.region || 'Not specified'}
+Vertical: ${analysis.vertical || 'Not specified'}
+Named People in JD: ${analysis.named_people?.join(', ') || 'None'}
+
+GOOGLE SEARCH RESULTS:
+${allResults.map((r, i) => `Result ${i + 1}:\nTitle: ${r.title}\nSnippet: ${r.snippet}\nURL: ${r.link}`).join('\n\n')}`
+      }
+    ]
+  })
+});
+```
+
+#### Step 4: Save to Database
+
+Parse the response and save to the `hiring_managers` table. Link it to the job via `job_id`.
+
+#### Response:
+Return the hiring manager data to the frontend:
+```json
+{
+  "success": true,
+  "hiring_manager": {
+    "full_name": "Jane Smith",
+    "title": "VP Enterprise Sales, Southeast",
+    "linkedin_url": "https://linkedin.com/in/janesmith",
+    "confidence": "high",
+    "reasoning": "Title is one level above AE, covers Southeast region, currently at Akamai",
+    "alternative": {
+      "full_name": "Bob Johnson",
+      "title": "Director of Sales",
+      "linkedin_url": "https://linkedin.com/in/bobjohnson"
+    }
+  }
+}
+```
+
+### New API Endpoint: `/api/hiring-manager/update`
+
+**Method**: PUT
+
+For manual corrections by the user:
+```json
+{
+  "hiring_manager_id": 1,
+  "full_name": "Corrected Name",
+  "title": "Corrected Title",
+  "linkedin_url": "https://linkedin.com/in/corrected",
+  "source": "manual"
+}
+```
+
+### New API Endpoint: `/api/hiring-manager/bulk-identify`
+
+**Method**: POST
+
+For running identification on multiple jobs at once (from the Saved Jobs page):
+```json
+{
+  "job_ids": [1, 2, 3, 4, 5]
+}
+```
+
+This should process them sequentially (NOT in parallel — respect API rate limits) with a 2-second delay between each job. Return progress updates if possible.
+
+### Frontend Changes — Saved Jobs Page
+
+On the Saved Jobs page, add the following for each saved job card:
+
+1. **A "Hiring Manager" section** on each job card that shows:
+   - Name (clickable link to LinkedIn if URL exists)
+   - Title
+   - Confidence badge (green for high, yellow for medium, red for low, gray for not yet identified)
+   - Small "Edit" icon button to manually correct
+
+2. **An "Identify Hiring Manager" button** on each card if no hiring manager has been identified yet. When clicked:
+   - Show a loading spinner with text "Researching..."
+   - Call `/api/hiring-manager/identify`
+   - Display the result when done
+
+3. **A bulk action button** at the top of the page: "Identify All Hiring Managers" that runs the bulk endpoint on all jobs that don't have a hiring manager yet. Show a progress indicator (e.g., "Identifying 3 of 7...")
+
+4. **Edit modal**: When the user clicks "Edit" on a hiring manager, show a simple modal with:
+   - Name (text input)
+   - Title (text input)
+   - LinkedIn URL (text input)
+   - Save / Cancel buttons
+
+### Frontend Changes — My Pipeline Page
+
+On the Pipeline page (the kanban/stage board with Interested → Applied → Interviewing → Rejected), add:
+
+1. **Hiring Manager info on each pipeline card**:
+   - Show name + title below the job title on each card
+   - Name is a clickable LinkedIn link
+   - Confidence badge (same color coding as Saved Jobs)
+   - If no hiring manager identified yet, show a small "Find HM" button
+
+2. **In the "Today's Top 3 Actions" section**, when generating recommendations, include hiring manager context. For example:
+   - "Reach out to [Hiring Manager Name], [Title] at [Company] on LinkedIn before applying"
+   - "Follow up with [Hiring Manager Name] — you applied 5 days ago"
+
+3. When a job moves from Saved Jobs to Pipeline (e.g., status changes to "Applied"), carry over the `hiring_manager_id` reference.
+
+### Error Handling
+
+- If Google Custom Search returns no results, still save the attempt with `confidence: "none"` and a note explaining no results were found
+- If the Anthropic API call fails, show a user-friendly error: "Couldn't identify hiring manager right now. Try again or add manually."
+- If Google CSE daily limit is hit (100/day), show: "Daily search limit reached. You can add hiring managers manually or try again tomorrow."
+- Add a retry button on failed attempts
+
+### Rate Limiting
+
+- Add a 2-second delay between consecutive API calls when bulk-identifying
+- Track daily Google CSE usage in a simple counter table or in-memory variable, warn the user when they're approaching 100 searches
+- Each job identification uses 2-3 Google searches, so the user can identify ~33-50 jobs per day
+
+---
+
+## PART 2: ENVIRONMENT VARIABLES
+
+Make sure these are in your Replit Secrets (you said you already have the Google ones):
+
+- `ANTHROPIC_API_KEY` — your Anthropic API key
+- `GOOGLE_CSE_API_KEY` — your Google Custom Search API key
+- `GOOGLE_CSE_ID` — your Google Custom Search Engine ID
+
+### Google CSE Configuration Note
+
+Your Google Custom Search Engine should be configured to search the entire web (not restricted to specific sites). The `site:linkedin.com/in` restriction is applied in the search query itself, not in the CSE config. This way the same CSE can also search for company info, news, etc.
+
+If your CSE is currently restricted to specific sites, go to https://programmablesearchengine.google.com and change "Search the entire web" to ON.
+
+---
+
+## PART 3: HOW IT WORKS END-TO-END
+
+Here's what happens when you click "Identify Hiring Manager" on a saved job:
+
+```
+1. You click the button
+   ↓
+2. Frontend sends job_id, company, role, JD to /api/hiring-manager/identify
+   ↓
+3. Backend sends JD to Claude Opus 4.6 → Claude returns structured analysis:
+   "This AE role reports to a VP/Director of Enterprise Sales in the Southeast"
+   ↓
+4. Backend builds 2-3 Google search queries using Claude's analysis:
+   → '"VP Enterprise Sales" site:linkedin.com/in Akamai'
+   → '"Director Sales" Southeast site:linkedin.com/in Akamai'
+   ↓
+5. Google returns LinkedIn profile snippets (names, titles, URLs)
+   ↓
+6. Backend sends Google results + JD context to Claude Opus 4.6
+   → Claude picks the most likely hiring manager and explains why
+   ↓
+7. Backend saves to database, returns to frontend
+   ↓
+8. Card updates to show: "Jane Smith — VP Enterprise Sales, Southeast"
+   with a green "High Confidence" badge and a LinkedIn link
+```
+
+---
+
+## PART 4: ACCURACY TIPS
+
+This system won't be 100% accurate. Here's what to expect:
+
+**High accuracy scenarios (80-90%)**:
+- Large public companies (Akamai, Dell, Cisco) with lots of LinkedIn profiles
+- Sales roles where the management hierarchy is standard (AE → Director → VP)
+- US-based roles with clear region/territory in the title
+
+**Lower accuracy scenarios (50-60%)**:
+- Small startups where the CEO might be the hiring manager
+- Roles that could report to multiple departments (e.g., Sales Engineer could report to Sales VP or Engineering VP)
+- Companies where everyone has inflated titles
+- International roles
+
+**Why manual override matters**: The "Edit" button isn't a fallback — it's a core feature. Even when the AI gets it wrong, it usually narrows it down to 2-3 candidates. The user picks the right one and saves it. Over time, the confirmed data in your database becomes a valuable asset.
+
+---
+
+## PART 5: FUTURE ENHANCEMENTS (Don't build now, just notes)
+
+Things to potentially add later:
+- **Apollo.io API integration**: Use as a secondary data source when Google results are thin. Free tier = 50 lookups/month.
+- **Email finder**: Once you have the hiring manager's name + company, tools like Hunter.io (free tier) can find their email pattern.
+- **LinkedIn message drafts**: Auto-generate a personalized LinkedIn connection request using the hiring manager's title + company research. Same cold-email philosophy as the cover letter.
+- **Confidence improvement loop**: Track which identifications the user corrects vs. confirms. Use that data to tune the prompts over time.
+- **Cache company org charts**: If you apply to multiple roles at the same company, cache the leadership profiles so you don't burn Google searches on the same company twice.

@@ -261,6 +261,24 @@ async function initDb(): Promise<void> {
       updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS hiring_managers (
+      id           SERIAL PRIMARY KEY,
+      job_id       INTEGER REFERENCES jobs(id) ON DELETE CASCADE,
+      full_name    TEXT,
+      title        TEXT,
+      linkedin_url TEXT,
+      company      TEXT,
+      region       TEXT,
+      confidence   TEXT DEFAULT 'medium',
+      source       TEXT DEFAULT 'auto',
+      notes        TEXT,
+      reasoning    TEXT,
+      alternative  JSONB,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS hiring_managers_job_id_idx ON hiring_managers(job_id);
+
     CREATE TABLE IF NOT EXISTS tailored_docs (
       id           SERIAL PRIMARY KEY,
       job_id       INT     REFERENCES jobs(id),
@@ -1868,9 +1886,24 @@ app.post('/api/positioning/draft-narrative', async (_req, res: Response) => {
 
 app.get('/api/jobs/saved', async (_req, res: Response) => {
   try {
-    const { rows } = await pool.query(
-      'SELECT * FROM jobs WHERE saved_at IS NOT NULL ORDER BY saved_at DESC LIMIT 200'
-    );
+    const { rows } = await pool.query(`
+      SELECT j.*,
+        hm.id       AS hm_id,
+        hm.full_name AS hm_name,
+        hm.title    AS hm_title,
+        hm.linkedin_url AS hm_linkedin_url,
+        hm.confidence   AS hm_confidence,
+        hm.source       AS hm_source,
+        hm.reasoning    AS hm_reasoning,
+        hm.alternative  AS hm_alternative,
+        hm.notes        AS hm_notes
+      FROM jobs j
+      LEFT JOIN LATERAL (
+        SELECT * FROM hiring_managers WHERE job_id = j.id ORDER BY created_at DESC LIMIT 1
+      ) hm ON true
+      WHERE j.saved_at IS NOT NULL
+      ORDER BY j.saved_at DESC LIMIT 200
+    `);
     // Attach salary estimates for jobs missing salary
     for (const j of rows) {
       if (!j.salary || j.salary === 'Unknown' || j.salary === 'N/A' || j.salary.trim() === '') {
@@ -1986,9 +2019,18 @@ app.get('/api/pipeline', async (_req, res: Response) => {
         EXTRACT(EPOCH FROM (NOW() - j.user_action_at)) / 86400 AS days_in_stage,
         td.resume_text AS tailored_resume,
         td.cover_letter AS tailored_cover_letter,
-        (SELECT COUNT(*) FROM tailored_docs WHERE job_id = j.id) AS has_docs
+        (SELECT COUNT(*) FROM tailored_docs WHERE job_id = j.id) AS has_docs,
+        hm.id            AS hm_id,
+        hm.full_name     AS hm_name,
+        hm.title         AS hm_title,
+        hm.linkedin_url  AS hm_linkedin_url,
+        hm.confidence    AS hm_confidence,
+        hm.source        AS hm_source
       FROM jobs j
       LEFT JOIN tailored_docs td ON td.job_id = j.id
+      LEFT JOIN LATERAL (
+        SELECT * FROM hiring_managers WHERE job_id = j.id ORDER BY created_at DESC LIMIT 1
+      ) hm ON true
       WHERE j.user_action IS NOT NULL AND j.user_action NOT IN ('none','skipped')
       ORDER BY j.user_action_at DESC
     `);
@@ -2001,6 +2043,291 @@ app.get('/api/pipeline', async (_req, res: Response) => {
     }
     res.json(grouped);
   } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Hiring Manager — in-memory daily CSE usage counter ────────────────────
+let _cseDailyCount = 0;
+let _cseDailyDate = new Date().toDateString();
+function cseUsage() {
+  const today = new Date().toDateString();
+  if (_cseDailyDate !== today) { _cseDailyCount = 0; _cseDailyDate = today; }
+  return _cseDailyCount;
+}
+function cseIncrement(n: number) {
+  const today = new Date().toDateString();
+  if (_cseDailyDate !== today) { _cseDailyCount = 0; _cseDailyDate = today; }
+  _cseDailyCount += n;
+}
+
+// ── Hiring Manager — identify ──────────────────────────────────────────────
+app.post('/api/hiring-manager/identify', async (req: Request, res: Response) => {
+  try {
+    const { job_id, company_name, role_title, job_description, location } = req.body as any;
+    if (!job_id || !company_name || !role_title) {
+      res.status(400).json({ error: 'job_id, company_name, and role_title are required' }); return;
+    }
+
+    const companyName: string = company_name;
+    const roleTitle: string = role_title;
+    const jobDescription: string = job_description || '';
+
+    // ── Step 1: Claude analyzes JD to extract structured context ─────────
+    const HMAnthropic = (await import('@anthropic-ai/sdk')).default;
+    const hmClaude = new HMAnthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '',
+    });
+
+    let analysis: Record<string, any> = {};
+    try {
+      const step1 = await hmClaude.messages.create({
+        model: 'claude-opus-4-6',
+        max_tokens: 1024,
+        system: `You analyze job descriptions to determine who the hiring manager likely is. Given a job description, extract the following and return ONLY valid JSON with no other text:
+
+{
+  "department": "the department this role sits in (e.g., Enterprise Sales, Security Sales, Channel Sales, Cloud Sales)",
+  "role_seniority": "the seniority of the OPEN role (e.g., AE, Senior AE, Director)",
+  "manager_likely_title": "the title of the person this role most likely reports to (e.g., if the role is AE, the manager is likely VP Sales, Director of Sales, or Regional Sales Director)",
+  "manager_seniority_keywords": ["array of 3-5 title keywords to search for, e.g., VP Sales, Director Enterprise Sales, Head of Sales, Regional Sales Director, AVP Sales"],
+  "region": "the geographic region or territory mentioned",
+  "vertical": "any industry vertical mentioned (e.g., healthcare, financial services, technology)",
+  "named_people": ["any names explicitly mentioned in the JD, usually recruiters"]
+}
+
+Rules:
+- If the role is an AE or Account Executive, the hiring manager is typically a Director, VP, or Regional Director of Sales
+- If the role is a Director, the hiring manager is typically a VP or SVP
+- If the role is a Sales Manager, the hiring manager is typically a Director or VP
+- Be specific about the sales segment: "Enterprise Sales" not just "Sales"
+- Include the region in your manager title keywords when a region is specified
+- Return ONLY the JSON. No markdown, no explanation, no backticks.`,
+        messages: [{ role: 'user', content: `Company: ${companyName}\nRole: ${roleTitle}\n\nJob Description:\n${jobDescription.slice(0, 3000)}` }],
+      });
+      const rawText = step1.content.filter(b => b.type === 'text').map(b => (b as any).text).join('').trim();
+      const cleaned = rawText.replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
+      analysis = JSON.parse(cleaned);
+    } catch (e) {
+      console.error('[HiringManager] Step 1 Claude analysis failed:', e instanceof Error ? e.message : e);
+      analysis = {
+        department: 'Sales',
+        role_seniority: 'AE',
+        manager_likely_title: 'Director of Sales',
+        manager_seniority_keywords: ['VP Sales', 'Director of Sales', 'Head of Sales', 'Regional Sales Director'],
+        region: location || '',
+        vertical: '',
+        named_people: [],
+      };
+    }
+
+    // ── Step 2: Google Custom Search ────────────────────────────────────
+    const CSE_KEY = process.env.GOOGLE_CSE_API_KEY || '';
+    const CSE_ID  = process.env.GOOGLE_CSE_ID || '';
+    const allResults: Array<{ title: string; snippet: string; link: string }> = [];
+
+    if (!CSE_KEY || !CSE_ID) {
+      console.warn('[HiringManager] Google CSE credentials missing — skipping search step');
+    } else if (cseUsage() >= 90) {
+      console.warn('[HiringManager] Daily Google CSE limit approaching — skipping search');
+    } else {
+      const kws: string[] = Array.isArray(analysis.manager_seniority_keywords) ? analysis.manager_seniority_keywords : [];
+      const searchQueries = [
+        `"${analysis.manager_likely_title || 'Director of Sales'}" site:linkedin.com/in ${companyName}`,
+        kws.length >= 2 ? `"${kws[0]}" OR "${kws[1]}" site:linkedin.com/in ${companyName}` : `${companyName} sales leadership site:linkedin.com/in`,
+        `${companyName} ${analysis.region || ''} sales leadership site:linkedin.com/in`.trim(),
+      ];
+      for (const query of searchQueries) {
+        try {
+          const gRes = await fetch(`https://www.googleapis.com/customsearch/v1?key=${CSE_KEY}&cx=${CSE_ID}&q=${encodeURIComponent(query)}&num=5`);
+          if (gRes.ok) {
+            const gData = await gRes.json() as any;
+            if (gData.items) allResults.push(...gData.items.map((i: any) => ({ title: i.title || '', snippet: i.snippet || '', link: i.link || '' })));
+          } else if (gRes.status === 429) {
+            console.warn('[HiringManager] Google CSE rate limit hit'); break;
+          }
+        } catch (gErr) {
+          console.error('[HiringManager] Google CSE query failed:', gErr instanceof Error ? gErr.message : gErr);
+        }
+      }
+      cseIncrement(searchQueries.length);
+      console.log(`[HiringManager] Google CSE: ${allResults.length} results found | daily usage: ${cseUsage()}`);
+    }
+
+    // ── Step 3: Claude identifies the hiring manager ─────────────────────
+    let hmData: Record<string, any> = { full_name: null, title: null, linkedin_url: null, confidence: 'none', reasoning: 'No search results available', alternative: null };
+
+    const resultsText = allResults.length
+      ? allResults.map((r, i) => `Result ${i + 1}:\nTitle: ${r.title}\nSnippet: ${r.snippet}\nURL: ${r.link}`).join('\n\n')
+      : 'No Google search results available.';
+
+    try {
+      const step3 = await hmClaude.messages.create({
+        model: 'claude-opus-4-6',
+        max_tokens: 1024,
+        system: `You are a hiring manager identification engine. Given Google search results (mostly LinkedIn profiles) and context about a job opening, identify the single most likely hiring manager.
+
+Rules:
+- The hiring manager is the person this role REPORTS TO, not the recruiter
+- Ignore recruiters, talent acquisition, HR people — they post the job but don't manage the role
+- Ignore people with the SAME title as the open role — they'd be peers, not managers
+- Look for someone one level ABOVE the open role in the same department and region
+- If multiple candidates match, pick the one whose title and region most closely align
+- If no strong match exists, say so honestly — don't guess
+
+Return ONLY valid JSON with no other text:
+
+{
+  "full_name": "First Last",
+  "title": "Their current title at the company",
+  "linkedin_url": "https://linkedin.com/in/their-profile",
+  "confidence": "high or medium or low",
+  "reasoning": "One sentence explaining why you picked this person",
+  "alternative": {
+    "full_name": "Second choice name or null",
+    "title": "Second choice title or null",
+    "linkedin_url": "URL or null"
+  }
+}
+
+Confidence levels:
+- high: Title is clearly one level above the open role, same department, same region, currently at the company
+- medium: Title matches but region is unclear, or the person might be lateral, or the profile snippet is ambiguous
+- low: Best guess from limited data — might be wrong
+
+If you truly cannot identify anyone from the results, return:
+{
+  "full_name": null,
+  "title": null,
+  "linkedin_url": null,
+  "confidence": "none",
+  "reasoning": "Explanation of why no match was found",
+  "alternative": null
+}`,
+        messages: [{
+          role: 'user',
+          content: `OPEN ROLE CONTEXT:
+Company: ${companyName}
+Open Role: ${roleTitle}
+Department: ${analysis.department || 'Sales'}
+Role Seniority: ${analysis.role_seniority || 'AE'}
+Expected Manager Title: ${analysis.manager_likely_title || 'Director of Sales'}
+Region: ${analysis.region || location || 'Not specified'}
+Vertical: ${analysis.vertical || 'Not specified'}
+Named People in JD: ${(analysis.named_people || []).join(', ') || 'None'}
+
+GOOGLE SEARCH RESULTS:
+${resultsText}`,
+        }],
+      });
+      const rawText3 = step3.content.filter(b => b.type === 'text').map(b => (b as any).text).join('').trim();
+      const cleaned3 = rawText3.replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
+      hmData = JSON.parse(cleaned3);
+    } catch (e) {
+      console.error('[HiringManager] Step 3 Claude identification failed:', e instanceof Error ? e.message : e);
+    }
+
+    // ── Step 4: Save to DB ───────────────────────────────────────────────
+    const { rows: saved } = await pool.query(
+      `INSERT INTO hiring_managers (job_id, full_name, title, linkedin_url, company, region, confidence, source, reasoning, alternative, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'auto', $8, $9, $10)
+       RETURNING *`,
+      [
+        job_id,
+        hmData.full_name || null,
+        hmData.title || null,
+        hmData.linkedin_url || null,
+        companyName,
+        analysis.region || location || null,
+        hmData.confidence || 'none',
+        hmData.reasoning || null,
+        hmData.alternative ? JSON.stringify(hmData.alternative) : null,
+        allResults.length === 0 ? 'No search results found — add manually' : null,
+      ]
+    );
+
+    res.json({ success: true, hiring_manager: { ...hmData, id: saved[0].id }, cse_usage: cseUsage() });
+  } catch (e) {
+    console.error('[HiringManager] Identify endpoint error:', e instanceof Error ? e.message : e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// ── Hiring Manager — manual update ────────────────────────────────────────
+app.put('/api/hiring-manager/update', async (req: Request, res: Response) => {
+  try {
+    const { hiring_manager_id, full_name, title, linkedin_url } = req.body as any;
+    if (!hiring_manager_id) { res.status(400).json({ error: 'hiring_manager_id required' }); return; }
+    const { rows } = await pool.query(
+      `UPDATE hiring_managers SET full_name=$1, title=$2, linkedin_url=$3, source='manual', updated_at=NOW() WHERE id=$4 RETURNING *`,
+      [full_name || null, title || null, linkedin_url || null, hiring_manager_id]
+    );
+    if (!rows.length) { res.status(404).json({ error: 'Hiring manager not found' }); return; }
+    res.json({ success: true, hiring_manager: rows[0] });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// ── Hiring Manager — bulk identify ────────────────────────────────────────
+app.post('/api/hiring-manager/bulk-identify', async (req: Request, res: Response) => {
+  try {
+    const { job_ids } = req.body as any;
+    if (!Array.isArray(job_ids) || !job_ids.length) {
+      res.status(400).json({ error: 'job_ids array required' }); return;
+    }
+
+    const results: Array<{ job_id: number; success: boolean; name?: string; error?: string }> = [];
+
+    for (let i = 0; i < job_ids.length; i++) {
+      const jobId = job_ids[i];
+      try {
+        // Skip if already has a hiring manager identified
+        const { rows: existing } = await pool.query(
+          'SELECT id FROM hiring_managers WHERE job_id=$1 AND full_name IS NOT NULL LIMIT 1',
+          [jobId]
+        );
+        if (existing.length) { results.push({ job_id: jobId, success: true, name: 'already_identified' }); continue; }
+
+        // Check CSE limit
+        if (cseUsage() >= 90) {
+          results.push({ job_id: jobId, success: false, error: 'Daily search limit reached' });
+          continue;
+        }
+
+        const { rows: jobRows } = await pool.query('SELECT title, company, description, location FROM jobs WHERE id=$1', [jobId]);
+        if (!jobRows.length) { results.push({ job_id: jobId, success: false, error: 'Job not found' }); continue; }
+
+        const job = jobRows[0];
+        // Call identify via internal logic (reuse the same flow by making internal fetch)
+        const identRes = await fetch(`http://localhost:${process.env.PORT || 8080}/api/hiring-manager/identify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job_id: jobId,
+            company_name: job.company,
+            role_title: job.title,
+            job_description: job.description,
+            location: job.location,
+          }),
+        });
+        const identData = await identRes.json() as any;
+        results.push({ job_id: jobId, success: identData.success || false, name: identData.hiring_manager?.full_name || null });
+
+        // 2-second delay between jobs to respect rate limits
+        if (i < job_ids.length - 1) await new Promise(r => setTimeout(r, 2000));
+      } catch (e) {
+        results.push({ job_id: jobId, success: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
+    res.json({ results, total: job_ids.length, succeeded: results.filter(r => r.success).length, cse_usage: cseUsage() });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// ── Hiring Manager — CSE usage status ─────────────────────────────────────
+app.get('/api/hiring-manager/cse-status', (_req, res: Response) => {
+  res.json({ usage: cseUsage(), limit: 100, date: _cseDailyDate });
 });
 
 // ── Pipeline daily actions — Claude recommends top 3 moves ────────────────
@@ -5748,7 +6075,13 @@ textarea:focus,input:focus{border-color:var(--gold)}
 </div>
 
 <div class="panel" id="panel-saved">
-  <div class="sec-title" id="saved-count">Loading saved jobs&hellip;</div>
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+    <div class="sec-title" id="saved-count" style="margin:0">Loading saved jobs&hellip;</div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span id="hm-bulk-progress" style="font-size:11px;color:var(--muted);display:none"></span>
+      <button class="btn btn-ghost btn-sm" id="hm-bulk-btn" onclick="bulkIdentifyHiringManagers()" style="font-size:11px">&#x1F50D; Identify All HMs</button>
+    </div>
+  </div>
   <div class="jobs-grid" id="saved-grid"></div>
 </div>
 
@@ -6912,6 +7245,36 @@ textarea:focus,input:focus{border-color:var(--gold)}
   </div>
 </div>
 
+<!-- Hiring Manager Edit Modal -->
+<div class="modal-overlay" id="hm-edit-modal" style="display:none" onclick="if(event.target===this)closeHMModal()">
+  <div class="modal" style="max-width:440px;width:100%">
+    <div class="modal-header">
+      <div style="font-weight:700;font-size:15px">Edit Hiring Manager</div>
+      <button class="modal-close" onclick="closeHMModal()">&times;</button>
+    </div>
+    <div style="padding:20px;display:flex;flex-direction:column;gap:14px">
+      <input type="hidden" id="hm-edit-id" value="">
+      <div>
+        <label style="font-size:12px;color:var(--muted);margin-bottom:4px;display:block">Full Name</label>
+        <input type="text" id="hm-edit-name" class="input-text" placeholder="Jane Smith" style="width:100%;box-sizing:border-box">
+      </div>
+      <div>
+        <label style="font-size:12px;color:var(--muted);margin-bottom:4px;display:block">Title</label>
+        <input type="text" id="hm-edit-title" class="input-text" placeholder="VP Enterprise Sales" style="width:100%;box-sizing:border-box">
+      </div>
+      <div>
+        <label style="font-size:12px;color:var(--muted);margin-bottom:4px;display:block">LinkedIn URL</label>
+        <input type="text" id="hm-edit-url" class="input-text" placeholder="https://linkedin.com/in/..." style="width:100%;box-sizing:border-box">
+      </div>
+      <div id="hm-edit-error" style="color:#e55353;font-size:12px;display:none"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn btn-ghost btn-sm" onclick="closeHMModal()">Cancel</button>
+        <button class="btn btn-gold btn-sm" onclick="saveHMEdit()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 // ── helpers ──────────────────────────────────────────────────────────────
 function esc(s) {
@@ -7539,6 +7902,34 @@ function renderJobCard(j, opts) {
 
   var tierClass = tierCssClass(j);
 
+  // ── Hiring Manager section (only on Saved Jobs cards)
+  var hmHtml = '';
+  if (opts.showSavedDate) {
+    if (j.hm_name) {
+      var hmConf = j.hm_confidence || 'medium';
+      var hmConfColor = hmConf === 'high' ? '#00c86e' : hmConf === 'medium' ? '#f5c842' : hmConf === 'low' ? '#ff9f43' : '#888';
+      var hmConfLabel = hmConf === 'high' ? 'High' : hmConf === 'medium' ? 'Medium' : hmConf === 'low' ? 'Low' : '?';
+      var hmNameHtml = j.hm_linkedin_url
+        ? '<a href="' + esc(j.hm_linkedin_url) + '" target="_blank" rel="noopener" style="color:var(--gold);text-decoration:none;font-weight:600">' + esc(j.hm_name) + '</a>'
+        : '<span style="font-weight:600;color:var(--text)">' + esc(j.hm_name) + '</span>';
+      hmHtml = '<div style="margin:8px 0 4px;padding:8px 10px;background:rgba(245,200,66,.05);border:1px solid rgba(245,200,66,.15);border-radius:6px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">' +
+        '<div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">' +
+          '<span style="font-size:10px;color:var(--muted);white-space:nowrap">&#x1F464; HM</span>' +
+          '<div style="min-width:0">' +
+            '<div style="font-size:12px">' + hmNameHtml + '</div>' +
+            (j.hm_title ? '<div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(j.hm_title) + '</div>' : '') +
+          '</div>' +
+          '<span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600;background:' + hmConfColor + '22;color:' + hmConfColor + ';border:1px solid ' + hmConfColor + '44;white-space:nowrap">' + hmConfLabel + '</span>' +
+        '</div>' +
+        '<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px;white-space:nowrap" data-hmid="' + (j.hm_id || '') + '" data-hmname="' + esc(j.hm_name || '') + '" data-hmtitle="' + esc(j.hm_title || '') + '" data-hmurl="' + esc(j.hm_linkedin_url || '') + '" onclick="openHMModal(this.dataset.hmid,this.dataset.hmname,this.dataset.hmtitle,this.dataset.hmurl)">&#x270E; Edit</button>' +
+      '</div>';
+    } else {
+      hmHtml = '<div style="margin:8px 0 4px" id="hm-row-' + j.id + '">' +
+        '<button class="btn btn-ghost btn-sm" style="font-size:11px;width:100%" id="hm-btn-' + j.id + '" data-jid="' + j.id + '" data-jco="' + esc(j.company) + '" data-jtit="' + esc(j.title) + '" data-jloc="' + esc(j.location || '') + '" data-jdesc="' + esc((j.description || '').slice(0, 200)) + '" onclick="identifyHiringManager(this.dataset.jid,this.dataset.jco,this.dataset.jtit,this.dataset.jloc,this.dataset.jdesc)">&#x1F50D; Identify Hiring Manager</button>' +
+      '</div>';
+    }
+  }
+
   return '<div class="card ' + tierClass + '">' +
     // ── Tier row: badge + score chip
     '<div class="card-tier-row">' +
@@ -7554,6 +7945,8 @@ function renderJobCard(j, opts) {
     (j.why_good_fit ? '<div class="card-signal"><div class="signal-label">\uD83C\uDFAF Why this fits you</div><div class="signal-text">' + esc(j.why_good_fit) + '</div></div>' : '') +
     // ── Scorecard mini indicators (4 key dimensions, compact)
     scorecardMiniHtml(j) +
+    // ── Hiring Manager section
+    hmHtml +
     // ── Meta strip: salary, risk, momentum, territory, source, freshness, action
     '<div class="card-meta-strip">' +
       salaryHtml +
@@ -7768,9 +8161,30 @@ function renderPipelineCard(j, stage) {
     : '';
   var viewJobsBtn = '<button class="btn btn-ghost btn-sm" style="font-size:11px" onclick="filterToCompany(' + JSON.stringify(j.company) + ')">All ' + esc(j.company) + ' jobs</button>';
   var applyBtn = '<a href="' + esc(j.canonical_url || j.apply_url || '#') + '" target="_blank" class="btn btn-sm" style="background:rgba(245,200,66,.1);color:var(--gold);border:1px solid rgba(245,200,66,.3);font-size:11px">Apply &rarr;</a>';
+
+  // Hiring Manager row
+  var hmRow = '';
+  if (j.hm_name) {
+    var pcConf = j.hm_confidence || 'medium';
+    var pcColor = pcConf === 'high' ? '#00c86e' : pcConf === 'medium' ? '#f5c842' : '#ff9f43';
+    var pcLink = j.hm_linkedin_url
+      ? '<a href="' + esc(j.hm_linkedin_url) + '" target="_blank" rel="noopener" style="color:var(--gold);text-decoration:none">' + esc(j.hm_name) + '</a>'
+      : esc(j.hm_name);
+    hmRow = '<div style="margin:5px 0;font-size:11px;color:var(--muted)">' +
+      '&#x1F464; <span style="color:var(--text)">' + pcLink + '</span>' +
+      (j.hm_title ? ' &middot; <span>' + esc(j.hm_title) + '</span>' : '') +
+      ' <span style="display:inline-block;padding:0 5px;border-radius:3px;font-size:10px;font-weight:600;background:' + pcColor + '22;color:' + pcColor + ';border:1px solid ' + pcColor + '44">' + pcConf + '</span>' +
+    '</div>';
+  } else {
+    hmRow = '<div style="margin:5px 0" id="hm-pc-row-' + j.id + '">' +
+      '<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 6px" data-jid="' + j.id + '" data-jco="' + esc(j.company) + '" data-jtit="' + esc(j.title) + '" data-jloc="' + esc(j.location || '') + '" data-jdesc="" onclick="identifyHiringManager(this.dataset.jid,this.dataset.jco,this.dataset.jtit,this.dataset.jloc,this.dataset.jdesc)">&#x1F50D; Find HM</button>' +
+    '</div>';
+  }
+
   return '<div class="pipeline-card">' +
     '<div class="pipeline-card-title">' + esc(j.title) + '</div>' +
     '<div class="pipeline-card-co">' + esc(j.company) + '</div>' +
+    hmRow +
     '<div class="pipeline-card-meta">' +
       '<span>&#x1F552; ' + esc(daysLabel) + '</span>' +
       (scoreHtml ? '<span>' + scoreHtml + '/100</span>' : '') +
@@ -7993,6 +8407,135 @@ async function loadSavedJobs() {
   } catch(e) {
     console.error('loadSavedJobs failed:', e);
     document.getElementById('saved-count').textContent = 'Failed to load saved jobs';
+  }
+}
+
+// ── Hiring Manager JS ──────────────────────────────────────────────────────
+
+async function identifyHiringManager(jobId, company, title, location, descSnippet) {
+  var btn = document.getElementById('hm-btn-' + jobId);
+  var row = document.getElementById('hm-row-' + jobId);
+  // Also handle pipeline card buttons
+  var pcRow = document.getElementById('hm-pc-row-' + jobId);
+  if (btn) { btn.disabled = true; btn.textContent = 'Researching...'; }
+  if (pcRow) { pcRow.querySelector('button') && (pcRow.querySelector('button').disabled = true); }
+
+  try {
+    // Fetch full description from job cache or just use snippet
+    var fullDesc = descSnippet || '';
+    if (_jobsById[jobId] && _jobsById[jobId].description) fullDesc = _jobsById[jobId].description;
+
+    var res = await fetch('/api/hiring-manager/identify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: Number(jobId), company_name: company, role_title: title, job_description: fullDesc, location: location }),
+    });
+    var data = await res.json();
+    if (!res.ok) {
+      if (res.status === 429 || (data.error && data.error.includes('limit'))) {
+        if (row) row.innerHTML = '<div style="font-size:11px;color:#e55353;padding:4px 0">Daily search limit reached. Add manually or try tomorrow.</div>';
+      } else {
+        if (row) row.innerHTML = '<div style="font-size:11px;color:#e55353;padding:4px 0">Couldn\'t identify hiring manager. <button class="btn btn-ghost btn-sm" style="font-size:10px" onclick="identifyHiringManager(' + jobId + ',' + JSON.stringify(company) + ',' + JSON.stringify(title) + ',' + JSON.stringify(location) + ',\\'\\')">Retry</button></div>';
+      }
+      return;
+    }
+    // Reload saved jobs to reflect new HM data
+    await loadSavedJobs();
+    // Update pipeline if visible
+    if (document.getElementById('panel-pipeline').classList.contains('active')) {
+      await loadPipeline();
+    }
+    // Show CSE usage warning if approaching limit
+    if (data.cse_usage >= 80) {
+      var prog = document.getElementById('hm-bulk-progress');
+      if (prog) { prog.style.display = ''; prog.style.color = '#ff9f43'; prog.textContent = data.cse_usage + '/100 Google searches used today'; }
+    }
+  } catch(e) {
+    console.error('identifyHiringManager failed:', e);
+    if (row) row.innerHTML = '<div style="font-size:11px;color:#e55353;padding:4px 0">Error identifying HM. Try again.</div>';
+  }
+}
+
+async function bulkIdentifyHiringManagers() {
+  var btn = document.getElementById('hm-bulk-btn');
+  var prog = document.getElementById('hm-bulk-progress');
+  if (btn) { btn.disabled = true; btn.textContent = 'Running...'; }
+
+  try {
+    // Get all saved jobs without a hiring manager
+    var res = await fetch('/api/jobs/saved');
+    var jobs = await res.json();
+    var needsHM = jobs.filter(function(j) { return !j.hm_name; });
+    if (!needsHM.length) {
+      if (prog) { prog.style.display = ''; prog.style.color = '#00c86e'; prog.textContent = 'All jobs already have a hiring manager identified!'; }
+      if (btn) { btn.disabled = false; btn.textContent = '\\u1F50D Identify All HMs'; }
+      return;
+    }
+
+    var jobIds = needsHM.map(function(j) { return j.id; });
+    if (prog) { prog.style.display = ''; prog.style.color = 'var(--muted)'; prog.textContent = 'Identifying 0 of ' + jobIds.length + '...'; }
+
+    // Use bulk endpoint (server handles sequential + rate limiting)
+    var bulkRes = await fetch('/api/hiring-manager/bulk-identify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_ids: jobIds }),
+    });
+    var bulkData = await bulkRes.json();
+
+    var succeeded = bulkData.succeeded || 0;
+    var total = bulkData.total || jobIds.length;
+    if (prog) {
+      prog.style.color = succeeded === total ? '#00c86e' : '#f5c842';
+      prog.textContent = 'Done: ' + succeeded + '/' + total + ' identified' + (bulkData.cse_usage >= 80 ? ' | ' + bulkData.cse_usage + '/100 searches used' : '');
+    }
+
+    // Reload to show results
+    await loadSavedJobs();
+    if (document.getElementById('panel-pipeline').classList.contains('active')) {
+      await loadPipeline();
+    }
+  } catch(e) {
+    console.error('bulkIdentifyHiringManagers failed:', e);
+    if (prog) { prog.style.display = ''; prog.style.color = '#e55353'; prog.textContent = 'Bulk identification failed. Try again.'; }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Identify All HMs'; }
+  }
+}
+
+var _hmEditCallback = null;
+function openHMModal(hmId, name, title, url) {
+  document.getElementById('hm-edit-id').value = hmId || '';
+  document.getElementById('hm-edit-name').value = name || '';
+  document.getElementById('hm-edit-title').value = title || '';
+  document.getElementById('hm-edit-url').value = url || '';
+  document.getElementById('hm-edit-error').style.display = 'none';
+  document.getElementById('hm-edit-modal').style.display = 'flex';
+}
+
+function closeHMModal() {
+  document.getElementById('hm-edit-modal').style.display = 'none';
+}
+
+async function saveHMEdit() {
+  var hmId = document.getElementById('hm-edit-id').value;
+  if (!hmId) { document.getElementById('hm-edit-error').style.display = ''; document.getElementById('hm-edit-error').textContent = 'No hiring manager ID found.'; return; }
+  var name = document.getElementById('hm-edit-name').value.trim();
+  var title = document.getElementById('hm-edit-title').value.trim();
+  var url = document.getElementById('hm-edit-url').value.trim();
+  try {
+    var res = await fetch('/api/hiring-manager/update', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hiring_manager_id: Number(hmId), full_name: name, title: title, linkedin_url: url }),
+    });
+    if (!res.ok) { var err = await res.json(); throw new Error(err.error || 'Update failed'); }
+    closeHMModal();
+    await loadSavedJobs();
+    if (document.getElementById('panel-pipeline').classList.contains('active')) await loadPipeline();
+  } catch(e) {
+    document.getElementById('hm-edit-error').style.display = '';
+    document.getElementById('hm-edit-error').textContent = e.message || 'Save failed. Try again.';
   }
 }
 
