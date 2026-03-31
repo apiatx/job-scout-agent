@@ -2367,52 +2367,64 @@ app.post('/api/hiring-manager/identify', async (req: Request, res: Response) => 
     const roleTitle: string = role_title;
     const jobDescription: string = job_description || '';
 
-    // ── Step 1: Claude analyzes JD to extract structured context ─────────
+    // ── Step 0: Local role analysis (zero-AI, always succeeds) ────────────
+    function localRoleAnalysis(rt: string, loc: string, jd: string): Record<string, any> {
+      const t = rt.toLowerCase(); const j = jd.toLowerCase().slice(0, 1500);
+      let seniority = 'AE';
+      if (t.includes('senior director') || t.includes('sr. director')) seniority = 'Senior Director';
+      else if (t.includes('director')) seniority = 'Director';
+      else if (t.includes('vice president') || / vp /i.test(t) || t.startsWith('vp ') || t.endsWith(' vp')) seniority = 'VP';
+      else if (t.includes('account manager') || t.includes(' am ')) seniority = 'AM';
+      else if (t.includes('manager')) seniority = 'Manager';
+      else if (t.includes('senior') || t.includes('principal')) seniority = 'Senior AE';
+      const managerMap: Record<string, { title: string; keywords: string[] }> = {
+        'VP':            { title: 'SVP of Sales or CRO',              keywords: ['SVP Sales', 'CRO', 'Chief Revenue Officer', 'EVP Sales'] },
+        'Senior Director': { title: 'VP of Sales',                   keywords: ['VP Sales', 'SVP Sales', 'VP Enterprise Sales'] },
+        'Director':      { title: 'VP of Sales',                      keywords: ['VP Sales', 'VP Enterprise Sales', 'SVP Sales', 'Area VP Sales'] },
+        'Manager':       { title: 'Director of Sales',                keywords: ['Director of Sales', 'VP Sales', 'Regional Director', 'Head of Sales'] },
+        'AM':            { title: 'Director of Customer Success or VP Sales', keywords: ['Director Customer Success', 'VP Sales', 'Director of Sales', 'Head of Sales'] },
+        'Senior AE':     { title: 'Director of Sales or Regional VP', keywords: ['VP Sales', 'Director of Sales', 'Regional Sales Director', 'Area VP', 'RVP Sales'] },
+        'AE':            { title: 'Director of Sales or VP of Sales', keywords: ['VP Sales', 'Director of Sales', 'Regional Sales Director', 'Area VP Sales', 'RVP Sales', 'Head of Sales'] },
+      };
+      const m = managerMap[seniority] || managerMap['AE'];
+      const regionMap: Record<string, string> = { 'southeast': 'Southeast', 'southwest': 'Southwest', 'northeast': 'Northeast', 'northwest': 'Northwest', 'midwest': 'Midwest', 'west coast': 'West Coast', 'east coast': 'East Coast', 'pacific northwest': 'Pacific Northwest', 'central': 'Central', 'mountain': 'Mountain West', 'new england': 'New England', 'mid-atlantic': 'Mid-Atlantic', 'great lakes': 'Great Lakes' };
+      let region = loc || '';
+      for (const [kw, lbl] of Object.entries(regionMap)) { if (t.includes(kw) || j.includes(kw)) { region = lbl; break; } }
+      const deptMap: Record<string, string> = { 'enterprise': 'Enterprise Sales', 'commercial': 'Commercial Sales', 'mid-market': 'Mid-Market Sales', 'midmarket': 'Mid-Market Sales', 'smb': 'SMB Sales', 'channel': 'Channel Sales', 'partner': 'Partner Sales', 'federal': 'Federal Sales', 'healthcare': 'Healthcare Sales', 'financial': 'Financial Services Sales', 'security': 'Security Sales', 'cloud': 'Cloud Sales', 'strategic': 'Strategic Sales', 'global': 'Global Sales', 'corporate': 'Corporate Sales' };
+      let dept = 'Sales';
+      for (const [kw, lbl] of Object.entries(deptMap)) { if (t.includes(kw)) { dept = lbl; break; } }
+      const verticals = ['healthcare', 'fintech', 'cybersecurity', 'security', 'manufacturing', 'retail', 'education', 'government', 'life sciences', 'financial services'];
+      let vertical = '';
+      for (const v of verticals) { if (t.includes(v) || j.includes(v)) { vertical = v; break; } }
+      return { department: dept, role_seniority: seniority, manager_likely_title: m.title, manager_seniority_keywords: m.keywords, region, vertical, named_people: [] };
+    }
+
+    // Always start with local analysis (guaranteed data, no API dependency)
+    let analysis: Record<string, any> = localRoleAnalysis(roleTitle, location, jobDescription);
+
+    // ── Step 1: Claude enhances analysis if available (optional, haiku for speed) ──
     const HMAnthropic = (await import('@anthropic-ai/sdk')).default;
     const hmClaude = new HMAnthropic({
       apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '',
     });
 
-    let analysis: Record<string, any> = {};
     try {
       const step1 = await hmClaude.messages.create({
-        model: 'claude-opus-4-6',
-        max_tokens: 1024,
-        system: `You analyze job descriptions to determine who the hiring manager likely is. Given a job description, extract the following and return ONLY valid JSON with no other text:
-
-{
-  "department": "the department this role sits in (e.g., Enterprise Sales, Security Sales, Channel Sales, Cloud Sales)",
-  "role_seniority": "the seniority of the OPEN role (e.g., AE, Senior AE, Director)",
-  "manager_likely_title": "the title of the person this role most likely reports to (e.g., if the role is AE, the manager is likely VP Sales, Director of Sales, or Regional Sales Director)",
-  "manager_seniority_keywords": ["array of 3-5 title keywords to search for, e.g., VP Sales, Director Enterprise Sales, Head of Sales, Regional Sales Director, AVP Sales"],
-  "region": "the geographic region or territory mentioned",
-  "vertical": "any industry vertical mentioned (e.g., healthcare, financial services, technology)",
-  "named_people": ["any names explicitly mentioned in the JD, usually recruiters"]
-}
-
-Rules:
-- If the role is an AE or Account Executive, the hiring manager is typically a Director, VP, or Regional Director of Sales
-- If the role is a Director, the hiring manager is typically a VP or SVP
-- If the role is a Sales Manager, the hiring manager is typically a Director or VP
-- Be specific about the sales segment: "Enterprise Sales" not just "Sales"
-- Include the region in your manager title keywords when a region is specified
-- Return ONLY the JSON. No markdown, no explanation, no backticks.`,
-        messages: [{ role: 'user', content: `Company: ${companyName}\nRole: ${roleTitle}\n\nJob Description:\n${jobDescription.slice(0, 3000)}` }],
+        model: 'claude-haiku-4-5',
+        max_tokens: 512,
+        system: `Extract hiring manager context from this job description. Return ONLY valid JSON:
+{"department":"e.g. Enterprise Sales","role_seniority":"AE/Manager/Director/VP","manager_likely_title":"who this role reports to","manager_seniority_keywords":["3-5 title keywords"],"region":"territory/region mentioned","vertical":"industry vertical","named_people":["names in JD"]}
+Rules: AE reports to Director/VP; Director reports to VP/SVP; Manager reports to Director/VP. Be specific about sales segment. Return ONLY the JSON.`,
+        messages: [{ role: 'user', content: `Company: ${companyName}\nRole: ${roleTitle}\n\nJD:\n${jobDescription.slice(0, 2000)}` }],
       });
       const rawText = step1.content.filter(b => b.type === 'text').map(b => (b as any).text).join('').trim();
       const cleaned = rawText.replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
-      analysis = JSON.parse(cleaned);
+      const claudeAnalysis = JSON.parse(cleaned);
+      // Merge: Claude overrides local, but keep local region if Claude has none
+      analysis = { ...analysis, ...claudeAnalysis, region: claudeAnalysis.region || analysis.region };
+      console.log(`[HiringManager] Step 1 Claude enhanced analysis: ${analysis.manager_likely_title}, region=${analysis.region}`);
     } catch (e) {
-      console.error('[HiringManager] Step 1 Claude analysis failed:', e instanceof Error ? e.message : e);
-      analysis = {
-        department: 'Sales',
-        role_seniority: 'AE',
-        manager_likely_title: 'Director of Sales',
-        manager_seniority_keywords: ['VP Sales', 'Director of Sales', 'Head of Sales', 'Regional Sales Director'],
-        region: location || '',
-        vertical: '',
-        named_people: [],
-      };
+      console.warn('[HiringManager] Step 1 Claude unavailable, using local analysis:', e instanceof Error ? e.message.slice(0, 80) : e);
     }
 
     const companyDomain = inferCompanyDomain(companyName);
@@ -2493,43 +2505,50 @@ Rules:
     // ── Step 2.7: Gemini web search (fires when CSE/Apollo are unavailable) ─
     let geminiWebSearchText = '';
     const geminiHMKey = process.env.GEMINI_API_KEY?.trim();
-    if (!usedCache && geminiHMKey && allResults.length === 0 && apolloResults.length === 0) {
+    if (!usedCache && geminiHMKey) {
       try {
         const { GoogleGenAI } = await import('@google/genai');
         const hmGenAI = new GoogleGenAI({ apiKey: geminiHMKey });
-        const kwArr = Array.isArray(analysis.manager_seniority_keywords)
+        const kwArr = Array.isArray(analysis.manager_seniority_keywords) && analysis.manager_seniority_keywords.length > 0
           ? analysis.manager_seniority_keywords.slice(0, 4)
-          : ['VP Sales', 'Director of Sales', 'Head of Sales'];
-        const regionStr = analysis.region ? ` in the ${analysis.region} region` : '';
-        const geminiHMPrompt = [
-          `I need to find the hiring manager for a "${roleTitle}" position at ${companyName}${regionStr}.`,
-          `The hiring manager would have a title similar to: ${kwArr.join(', ')}.`,
-          `Please search for people currently working at ${companyName} in sales leadership roles${regionStr}.`,
-          `For each person you find, provide their full name, title, and LinkedIn profile URL.`,
-          `Also check the ${companyName} company website, LinkedIn company page, and any press releases that mention their sales leadership.`,
-          `Focus only on people who are currently at ${companyName} — not former employees.`,
-        ].join(' ');
+          : ['VP Sales', 'Director of Sales', 'Regional Sales Director', 'Head of Sales'];
+        const regionStr = analysis.region ? ` ${analysis.region}` : (location ? ` ${location}` : '');
+        const managerTitle = analysis.manager_likely_title || 'VP Sales or Director of Sales';
+
+        // Two targeted prompts run in parallel for more coverage
+        const prompt1 = `Find the hiring manager for a ${roleTitle} position at ${companyName}. ` +
+          `Specifically search for: who is the current ${managerTitle} at ${companyName}${regionStr ? ' covering the' + regionStr + ' territory' : ''}? ` +
+          `Search LinkedIn profiles at ${companyName} for people with titles like: ${kwArr.join(', ')}. ` +
+          `For EVERY person you find at ${companyName} in a sales leadership role, give me their FULL NAME, exact current TITLE, and LinkedIn profile URL. ` +
+          `Be specific — I need real names of real people currently at ${companyName}.`;
+
+        const prompt2 = `Search for ${companyName} sales leadership team. ` +
+          `Find people at ${companyName} with the following titles: ${kwArr.join(', ')}${regionStr ? ' in ' + regionStr : ''}. ` +
+          `Also search: "${companyName} ${kwArr[0]} LinkedIn" and "${companyName} ${kwArr[1] || 'Director of Sales'} site:linkedin.com". ` +
+          `List each person's full name, title, and LinkedIn URL. ` +
+          `Also check ${companyName}'s website leadership/team page and any recent press releases that name their sales executives.`;
 
         const hmModels = ['gemini-3-flash-preview', 'gemini-flash-latest', 'gemini-pro-latest'];
         for (const hmModel of hmModels) {
           try {
-            const hmSearchResp = await hmGenAI.models.generateContent({
-              model: hmModel,
-              contents: geminiHMPrompt,
-              config: { tools: [{ googleSearch: {} }] },
-            });
-            const rawText = (hmSearchResp as any).text || '';
-            if (rawText.length > 80) {
-              geminiWebSearchText = rawText;
+            const [r1, r2] = await Promise.allSettled([
+              hmGenAI.models.generateContent({ model: hmModel, contents: prompt1, config: { tools: [{ googleSearch: {} }] } }),
+              hmGenAI.models.generateContent({ model: hmModel, contents: prompt2, config: { tools: [{ googleSearch: {} }] } }),
+            ]);
+            const texts = ([r1, r2] as any[])
+              .filter(r => r.status === 'fulfilled' && r.value?.text)
+              .map((r, i) => `SEARCH ${i + 1}:\n${r.value.text}`);
+            if (texts.length > 0) {
+              geminiWebSearchText = texts.join('\n\n---\n\n');
               enrichmentSource = 'gemini';
-              console.log(`[HiringManager] Gemini web search (${hmModel}): ${rawText.length} chars`);
+              console.log(`[HiringManager] Gemini web search (${hmModel}): ${geminiWebSearchText.length} chars from ${texts.length}/2 queries`);
             }
-            break; // success — stop waterfall
+            break;
           } catch (hmModelErr: any) {
             const msg = hmModelErr instanceof Error ? hmModelErr.message : String(hmModelErr);
             const isUnavail = msg.includes('not found') || msg.includes('404') || msg.includes('deprecated') || msg.includes('not available');
             console.warn(`[HiringManager] Gemini model ${hmModel} failed: ${msg.slice(0, 120)}`);
-            if (!isUnavail) break; // non-model error — don't try next model
+            if (!isUnavail) break;
           }
         }
       } catch (geminiHMErr) {
@@ -2557,66 +2576,95 @@ Rules:
     // ── Step 3: Claude identifies the hiring manager ─────────────────────
     let hmData: Record<string, any> = { full_name: null, title: null, linkedin_url: null, confidence: 'none', reasoning: 'No search results available', alternative: null };
 
-    try {
-      const step3 = await hmClaude.messages.create({
-        model: 'claude-opus-4-6',
-        max_tokens: 1024,
-        system: `You are a hiring manager identification engine. Your job is to ALWAYS return the most likely hiring manager — never return null names unless the company is completely fictional or unknown.
+    const step3System = `You are a hiring manager identification engine. ALWAYS return the most likely hiring manager — never return a null name unless the company is completely fictional.
 
-Priority order for identification:
-1. SEARCH RESULTS (highest confidence): Use any LinkedIn profiles, Apollo data, or web search results provided. Extract real names, titles, and LinkedIn URLs.
-2. YOUR TRAINING KNOWLEDGE (medium confidence): You know the leadership teams of thousands of companies. Draw on that. If you know who the VP of Sales or Director of Enterprise Sales is at this company, use that knowledge.
-3. REASONED INFERENCE (low confidence): If you have no specific knowledge, reason about what title the hiring manager would have given the role, department, region, and company size/type. Make a specific educated guess — a likely name from your knowledge or the most plausible person.
+Priority:
+1. SEARCH RESULTS (high confidence): Extract real names/titles/LinkedIn URLs from provided search results.
+2. TRAINING KNOWLEDGE (medium confidence): You know thousands of companies' leadership teams. Use it.
+3. REASONED INFERENCE (low confidence): Infer from role type, company, region. Give a specific plausible person.
 
 Rules:
-- The hiring manager is the person this role REPORTS TO, not the recruiter
-- Ignore recruiters, talent acquisition, HR people
-- Ignore people with the SAME title as the open role — they'd be peers
-- Look one level ABOVE the open role in the same department and region
-- ALWAYS return a real person name. Only set full_name to null if the company is completely made-up or you have zero information whatsoever.
+- Hiring manager = person this role REPORTS TO (one level above)
+- Ignore recruiters, HR, talent acquisition
+- Ignore peers (same title as the open role)
+- Look for VP/Director/RVP/Area VP in the same department + region
+- ALWAYS return a real name. null only if company is completely unknown/fictional.
 
-Return ONLY valid JSON with no other text:
+Return ONLY valid JSON:
+{"full_name":"First Last","title":"Their title","linkedin_url":"URL or null","confidence":"high/medium/low","reasoning":"one sentence","alternative":{"full_name":"Second choice or null","title":"title or null","linkedin_url":"URL or null"}}
 
-{
-  "full_name": "First Last",
-  "title": "Their current title at the company",
-  "linkedin_url": "URL only if confirmed in search results or from training data — otherwise null",
-  "confidence": "high or medium or low",
-  "reasoning": "One sentence: what source did you use and why this person",
-  "alternative": {
-    "full_name": "Second choice name or null",
-    "title": "Second choice title or null",
-    "linkedin_url": "URL or null"
-  }
-}
+Confidence: high=confirmed in search results, medium=from training knowledge, low=reasoned inference.
+Never fabricate a LinkedIn URL — only include one found in search results or certain from training.`;
 
-Confidence levels:
-- high: Confirmed from live search results — specific person, title matches, currently at company
-- medium: From your training knowledge of this company's leadership (may be slightly dated)
-- low: Educated inference — most plausible candidate given company/role/region context
-
-Important: Never fabricate a LinkedIn URL. Only include one if you found it in the search results or are certain of it from training data.`,
-        messages: [{
-          role: 'user',
-          content: `OPEN ROLE CONTEXT:
+    const step3User = `OPEN ROLE:
 Company: ${companyName}
-Open Role: ${roleTitle}
+Role: ${roleTitle}
 Department: ${analysis.department || 'Sales'}
-Role Seniority: ${analysis.role_seniority || 'AE'}
+Seniority: ${analysis.role_seniority || 'AE'}
 Expected Manager Title: ${analysis.manager_likely_title || 'Director of Sales'}
 Region: ${analysis.region || location || 'Not specified'}
 Vertical: ${analysis.vertical || 'Not specified'}
-Named People in JD: ${(analysis.named_people || []).join(', ') || 'None'}
+People named in JD: ${(analysis.named_people || []).join(', ') || 'None'}
 
 SEARCH RESULTS:
-${flattenedResults}`,
-        }],
-      });
-      const rawText3 = step3.content.filter(b => b.type === 'text').map(b => (b as any).text).join('').trim();
-      const cleaned3 = rawText3.replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
-      hmData = JSON.parse(cleaned3);
-    } catch (e) {
-      console.error('[HiringManager] Step 3 Claude identification failed:', e instanceof Error ? e.message : e);
+${flattenedResults}`;
+
+    // Try claude-haiku-4-5 first (faster, less likely to be overloaded)
+    let claudeStep3Success = false;
+    for (const claudeModel of ['claude-haiku-4-5', 'claude-opus-4-5']) {
+      try {
+        const step3 = await hmClaude.messages.create({
+          model: claudeModel,
+          max_tokens: 512,
+          system: step3System,
+          messages: [{ role: 'user', content: step3User }],
+        });
+        const rawText3 = step3.content.filter(b => b.type === 'text').map(b => (b as any).text).join('').trim();
+        const cleaned3 = rawText3.replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
+        hmData = JSON.parse(cleaned3);
+        claudeStep3Success = true;
+        console.log(`[HiringManager] Step 3 Claude (${claudeModel}) identified: ${hmData.full_name || 'null'} [${hmData.confidence}]`);
+        break;
+      } catch (e: any) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const isOverload = msg.includes('529') || msg.includes('overload') || msg.includes('529');
+        console.warn(`[HiringManager] Step 3 Claude (${claudeModel}) failed: ${msg.slice(0, 100)}`);
+        if (!isOverload) break; // non-overload error — don't retry different model
+      }
+    }
+
+    // ── Step 3.5: Gemini fallback identification when Claude is down ──────
+    if (!claudeStep3Success && geminiHMKey && geminiWebSearchText) {
+      try {
+        const { GoogleGenAI } = await import('@google/genai');
+        const fallbackGenAI = new GoogleGenAI({ apiKey: geminiHMKey });
+        const fallbackPrompt = `Based on the following web search results, identify the most likely hiring manager for a ${roleTitle} position at ${companyName}${analysis.region ? ' in ' + analysis.region : ''}.
+
+The hiring manager is the person this role REPORTS TO — typically a ${analysis.manager_likely_title || 'Director or VP of Sales'}.
+
+Search results:
+${geminiWebSearchText.slice(0, 6000)}
+
+Return ONLY this JSON (no other text):
+{"full_name":"First Last or null","title":"their title or null","linkedin_url":"URL or null","confidence":"high/medium/low","reasoning":"one sentence"}`;
+
+        const fbResp = await fallbackGenAI.models.generateContent({
+          model: 'gemini-3-flash-preview',
+          contents: fallbackPrompt,
+        });
+        const fbText = ((fbResp as any).text || '').trim();
+        const fbMatch = fbText.match(/\{[\s\S]*\}/);
+        if (fbMatch) {
+          const fbData = JSON.parse(fbMatch[0]);
+          if (fbData.full_name) {
+            hmData = { ...fbData, alternative: null };
+            enrichmentSource = enrichmentSource === 'gemini' ? 'gemini' : 'gemini-fallback';
+            console.log(`[HiringManager] Step 3 Gemini fallback identified: ${hmData.full_name} [${hmData.confidence}]`);
+          }
+        }
+      } catch (fbErr) {
+        console.warn('[HiringManager] Step 3 Gemini fallback failed:', fbErr instanceof Error ? fbErr.message.slice(0, 80) : fbErr);
+      }
     }
 
     // ── Step 3.5: Apollo enrichment for found HM (Enhancement 1) ─────────
