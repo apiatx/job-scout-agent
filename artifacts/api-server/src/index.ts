@@ -5141,7 +5141,28 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .cw-role-badge:hover{background:#00c86e22}
 .cw-no-roles-badge{font-size:11px;color:var(--muted)}
 .cw-scan-status{font-size:11px;color:var(--muted);margin-top:2px}
-.cw-scan-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px;padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px}
+.cw-scan-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:20px;padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px}
+/* Company Watchlist cards */
+.cw-cards-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;margin-bottom:24px}
+.cw-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;gap:10px;transition:border-color .15s}
+.cw-card:hover{border-color:rgba(200,169,110,.3)}
+.cw-card-header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.cw-card-name{font-size:14px;font-weight:700;color:var(--text)}
+.cw-card-url{font-size:11px;color:var(--muted);text-decoration:none;display:block;margin-top:2px}
+.cw-card-url:hover{color:var(--gold)}
+.cw-card-status-verified{color:#4ade80;font-size:11px;font-weight:700}
+.cw-card-status-pending{color:#fbbf24;font-size:11px;font-weight:700}
+.cw-card-status-failed{color:#ef4444;font-size:11px;font-weight:700}
+.cw-card-status-manual{color:var(--muted);font-size:11px;font-weight:600}
+.cw-card-careers{display:flex;flex-direction:column;gap:3px;padding:8px 10px;background:#0a0a0a;border-radius:6px;border:1px solid var(--border)}
+.cw-card-careers-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.cw-card-careers-url{font-size:12px;color:var(--text);word-break:break-all}
+.cw-card-jobs{border-top:1px solid var(--border);padding-top:8px}
+.cw-card-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+/* Universal Save-to-Watchlist button */
+.save-watchlist-btn{padding:3px 10px;border-radius:5px;font-size:11px;font-weight:700;background:rgba(200,169,110,.1);color:var(--gold);border:1px solid rgba(200,169,110,.25);cursor:pointer;white-space:nowrap;transition:background .15s}
+.save-watchlist-btn:hover{background:rgba(200,169,110,.2)}
+.save-watchlist-btn.saved{background:rgba(74,222,128,.1);color:#4ade80;border-color:rgba(74,222,128,.25);cursor:default}
 @media(max-width:700px){.dv-grid{grid-template-columns:1fr}}
 /* ── Positioning Engine ────────────────────────────────────────────────────── */
 .pos-layout{display:flex;flex-direction:column;height:100%;padding:24px;gap:20px;max-width:1100px}
@@ -5971,7 +5992,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <button class="btn btn-ghost btn-sm" id="cw-scan-btn" onclick="runWatchlistScan()">&#x1F50D; Scan Now</button>
   </div>
 
-  <div class="company-list" id="company-list"></div>
+  <div id="company-list" class="cw-cards-grid"></div>
   <div class="sec-title" style="margin-bottom:12px;margin-top:8px">Add Company</div>
   <div style="font-size:12px;color:var(--muted);margin-bottom:14px">Type a company name — AI will automatically detect the job board and verify it&rsquo;s working.</div>
   <div class="add-form" style="align-items:flex-end">
@@ -8290,7 +8311,7 @@ async function loadCompanies() {
   var res = await fetch('/api/companies');
   var cos = await res.json();
   var list = document.getElementById('company-list');
-  if (!cos.length) { list.innerHTML = '<div class="empty">No companies yet — add one below.</div>'; return; }
+  if (!cos.length) { list.innerHTML = '<div class="empty" style="grid-column:1/-1">No companies yet — add one below.</div>'; return; }
   // Count open roles per company from in-memory jobs (if loaded)
   var jobCountsByCompany = {};
   if (_allJobs && _allJobs.length) {
@@ -8300,21 +8321,27 @@ async function loadCompanies() {
       jobCountsByCompany[key] = (jobCountsByCompany[key] || 0) + 1;
     });
   }
-  var html = '';
-  cos.forEach(function(c) {
-    var detail = c.ats_slug || c.careers_url || '';
+  var cards = cos.map(function(c) {
     var status = c.detect_status || 'manual';
-    var statusColor = status === 'detected' ? 'var(--green)' : status === 'pending' ? '#f5a623' : status === 'failed' ? 'var(--red)' : 'var(--muted)';
-    var statusLabel = status === 'detected' ? '\u2713 verified' : status === 'pending' ? '\u23F3 pending' : status === 'failed' ? '\u2717 failed' : '';
-    var atsLabel = c.ats_type ? c.ats_type.charAt(0).toUpperCase() + c.ats_type.slice(1) : '';
+    var statusCls = status === 'detected' ? 'cw-card-status-verified' : status === 'pending' ? 'cw-card-status-pending' : status === 'failed' ? 'cw-card-status-failed' : 'cw-card-status-manual';
+    var statusLabel = status === 'detected' ? '\u2713 Verified' : status === 'pending' ? '\u23F3 Pending' : status === 'failed' ? '\u2717 Failed' : '\u270E Manual';
+    var atsLabel = c.ats_type ? c.ats_type.charAt(0).toUpperCase() + c.ats_type.slice(1) : 'Unknown';
+    var careersDetail = c.careers_url || (c.ats_slug ? atsLabel + ' / ' + c.ats_slug : '');
+    var careersHtml = careersDetail
+      ? '<div class="cw-card-careers">' +
+          '<div class="cw-card-careers-label">Careers / ATS</div>' +
+          (c.careers_url
+            ? '<a class="cw-card-url" href="' + esc(c.careers_url) + '" target="_blank" rel="noopener">' + esc(c.careers_url.replace(/^https?:\\/\\//, '')) + '</a>'
+            : '<div class="cw-card-careers-url">' + esc(careersDetail) + '</div>') +
+        '</div>'
+      : '<div class="cw-card-careers"><div class="cw-card-careers-label">Careers / ATS</div><div style="font-size:12px;color:var(--muted);font-style:italic">Not yet detected</div></div>';
     var errorHtml = (status === 'failed' || status === 'pending') && c.last_scan_error
-      ? '<div style="font-size:11px;color:var(--muted);margin-top:3px;white-space:normal">' + esc(c.last_scan_error.slice(0, 120)) + (c.last_scan_error.length > 120 ? '\u2026' : '') + '</div>'
+      ? '<div style="font-size:11px;color:#ef444499;padding:4px 0">' + esc(c.last_scan_error.slice(0, 100)) + (c.last_scan_error.length > 100 ? '\u2026' : '') + '</div>'
       : '';
     var jobCount = jobCountsByCompany[c.name.toLowerCase()] || 0;
-    var jobCountBadge = jobCount > 0
-      ? '<button class="btn btn-sm" style="background:rgba(245,200,66,.1);color:var(--gold);border:1px solid rgba(245,200,66,.25);font-size:11px;margin-left:4px" onclick="filterToCompany(' + JSON.stringify(c.name) + ')">' + jobCount + ' open role' + (jobCount !== 1 ? 's' : '') + ' \u2192</button>'
-      : '<span style="font-size:11px;color:var(--muted);margin-left:4px">0 roles found</span>';
-    // Watchlist job scan results
+    var jobCountHtml = jobCount > 0
+      ? '<button class="btn btn-sm" style="background:rgba(245,200,66,.1);color:var(--gold);border:1px solid rgba(245,200,66,.25);font-size:11px" onclick="filterToCompany(' + JSON.stringify(c.name) + ')">' + jobCount + ' job' + (jobCount !== 1 ? 's' : '') + ' in Scout \u2192</button>'
+      : '';
     var scanEntry = _cwJobStatus[c.name.toLowerCase()];
     var scanHtml = '';
     if (scanEntry) {
@@ -8325,27 +8352,29 @@ async function loadCompanies() {
           return '<a class="cw-role-badge" href="' + esc(href) + '" target="_blank" rel="noopener">\u2713 ' + esc(j.title) + (j.location ? ' \u2014 ' + esc(j.location) : '') + '</a>';
         }).join('');
         var moreCount = scanEntry.jobs.length - 3;
-        scanHtml = '<div class="cw-job-status">' + roleLinks + (moreCount > 0 ? '<span style="font-size:11px;color:var(--muted)">+' + moreCount + ' more</span>' : '') + '</div>' +
-          '<div class="cw-scan-status">Last scanned: ' + scannedAt + '</div>';
+        scanHtml = '<div class="cw-card-jobs"><div class="cw-job-status">' + roleLinks + (moreCount > 0 ? '<span style="font-size:11px;color:var(--muted)">+' + moreCount + ' more</span>' : '') + '</div><div class="cw-scan-status">Deep Scan: ' + scannedAt + '</div></div>';
       } else {
-        scanHtml = '<div class="cw-job-status"><span class="cw-no-roles-badge">\u26A0\uFE0F No jobs currently that fit your criteria</span></div>' +
-          '<div class="cw-scan-status">Last scanned: ' + scannedAt + '</div>';
+        scanHtml = '<div class="cw-card-jobs"><div class="cw-job-status"><span class="cw-no-roles-badge">\u26A0\uFE0F No matching roles found by deep scan</span></div><div class="cw-scan-status">Deep Scan: ' + scannedAt + '</div></div>';
       }
     }
-    html +=
-      '<div class="company-row" style="flex-wrap:wrap;gap:4px">' +
-        '<span class="company-name" style="flex:1;min-width:120px">' + esc(c.name) + '</span>' +
-        jobCountBadge +
-        '<span class="source-badge">' + esc(atsLabel) + '</span>' +
-        (detail ? '<span class="company-meta" style="font-size:11px">' + esc(detail) + '</span>' : '') +
-        (statusLabel ? '<span style="font-size:11px;color:' + statusColor + ';font-weight:600">' + statusLabel + '</span>' : '') +
-        '<button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="retryDetect(' + c.id + ',' + JSON.stringify(c.name) + ')" title="Re-run auto-detection">\u21BB</button>' +
-        '<button class="btn btn-ghost btn-sm" onclick="deleteCompany(' + c.id + ')">Remove</button>' +
-        (errorHtml ? '<div style="width:100%;padding-left:4px">' + errorHtml + '</div>' : '') +
-        (scanHtml ? '<div style="width:100%;margin-top:6px;padding-top:8px;border-top:1px solid var(--border)">' + scanHtml + '</div>' : '') +
-      '</div>';
+    return '<div class="cw-card">' +
+      '<div class="cw-card-header">' +
+        '<div>' +
+          '<div class="cw-card-name">' + esc(c.name) + '</div>' +
+          '<span class="' + statusCls + '">' + statusLabel + ' \u00B7 ' + esc(atsLabel) + '</span>' +
+        '</div>' +
+        '<div style="display:flex;gap:4px">' +
+          '<button class="btn btn-ghost btn-sm" onclick="rescanCareersPage(' + c.id + ',' + JSON.stringify(c.name) + ',this)" title="Re-detect careers page" style="font-size:11px">\u21BB Rescan</button>' +
+          '<button class="btn btn-ghost btn-sm" onclick="deleteCompany(' + c.id + ')" style="font-size:11px;color:#ef4444">Remove</button>' +
+        '</div>' +
+      '</div>' +
+      careersHtml +
+      errorHtml +
+      (jobCountHtml ? '<div>' + jobCountHtml + '</div>' : '') +
+      scanHtml +
+    '</div>';
   });
-  list.innerHTML = html;
+  list.innerHTML = cards.join('');
 }
 async function addCompanyAuto() {
   var name = document.getElementById('co-name').value.trim();
@@ -8392,6 +8421,38 @@ async function retryDetect(id, name) {
 async function deleteCompany(id) {
   await fetch('/api/companies/' + id, { method:'DELETE' });
   loadCompanies();
+}
+
+async function rescanCareersPage(id, name, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '\u21BB\u2026'; }
+  await fetch('/api/companies/' + id, { method: 'DELETE' });
+  document.getElementById('co-name').value = name;
+  await addCompanyAuto();
+  if (btn) { btn.disabled = false; btn.textContent = '\u21BB Rescan'; }
+}
+
+// ── Unified Save-to-Watchlist (used by all intel pages) ───────────────────
+var _watchlistAdded = {};
+
+async function saveToWatchlist(name, website, btn) {
+  if (!name) return;
+  var key = name.toLowerCase();
+  if (_watchlistAdded[key]) return;
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving\u2026'; }
+    var res = await fetch('/api/companies/detect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, website: website || undefined })
+    });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed');
+    _watchlistAdded[key] = true;
+    if (btn) { btn.textContent = '\u2713 Saved'; btn.classList.add('saved'); btn.disabled = true; }
+  } catch(e) {
+    if (btn) { btn.textContent = 'Retry?'; btn.disabled = false; }
+    console.error('saveToWatchlist failed:', e);
+  }
 }
 
 // ── run scout ─────────────────────────────────────────────────────────────
@@ -9435,6 +9496,10 @@ function renderCareerIntel(data, generatedAt, stale) {
       riskHtml +
 
       (citations ? '<div class="intel-card-section"><div class="intel-card-label">Sources</div><div class="intel-citations">' + citations + '</div></div>' : '') +
+
+      '<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:2px">' +
+        '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(c.company_name) + ',' + JSON.stringify(c.company_url || '') + ',this)">\u2605 Save Company Profile</button>' +
+      '</div>' +
     '</div>';
   }).join('');
 
@@ -9693,6 +9758,9 @@ function buildPreIpoCard(c) {
 
     (cites ? '<div class="preipo-card-section"><div class="preipo-lbl">Sources</div><div class="preipo-cites">' + cites + '</div></div>' : '') +
 
+    '<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:4px">' +
+      '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(c.company_name) + ',' + JSON.stringify(c.company_url || '') + ',this)">\u2605 Save Company Profile</button>' +
+    '</div>' +
   '</div>';
 }
 
@@ -9839,6 +9907,9 @@ function renderLeaderCard(c) {
     '<div><div class="leaders-lbl">Growth Signal</div><div class="leaders-signal">' + esc(c.growth_signal) + '</div></div>' +
     (c.ote_range ? '<div><div class="leaders-lbl">Rep OTE Range</div><div class="leaders-ote">' + esc(c.ote_range) + '</div></div>' : '') +
     '<div><div class="leaders-lbl">Rep Profile</div><div class="leaders-val">' + esc(c.rep_quality) + '</div></div>' +
+    '<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:8px">' +
+      '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(c.name) + ',' + JSON.stringify(websiteUrl || '') + ',this)">\u2605 Save Company Profile</button>' +
+    '</div>' +
   '</div>';
 }
 
@@ -10021,6 +10092,9 @@ function renderPulseCard(c) {
     '</div>' +
     (c.hiring_driver ? '<div><div class="pulse-section-label">Hiring Driver</div><div class="pulse-section-value" style="color:var(--muted)">' + esc(c.hiring_driver) + '</div></div>' : '') +
     (citationsHtml ? citationsHtml : '') +
+    '<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:6px">' +
+      '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(c.company_name) + ',' + JSON.stringify(c.company_url || '') + ',this)">\u2605 Save Company Profile</button>' +
+    '</div>' +
   '</div>';
 }
 
@@ -10125,14 +10199,9 @@ function renderDvRolesSection(c) {
         }).join('') +
       '</div>';
   }
-  var added = _dvWatchlistAdded[c.name];
-  var btnLabel = added ? '\u2713 On Watchlist' : '\u2605 Add to Watchlist';
-  var btnClass = 'dv-watchlist-btn' + (added ? ' added' : '');
-  var btnAttr = added ? 'disabled' : ('onclick="addDvCompanyToWatchlist(' + JSON.stringify(c.name) + ',' + JSON.stringify(c.website || '') + ',this)"');
   return '<div class="dv-divider"></div>' +
     '<div class="dv-no-roles">' +
       '<span class="dv-no-roles-text">\u26A0\uFE0F No open matching roles found right now</span>' +
-      '<button class="' + btnClass + '" ' + btnAttr + '>' + btnLabel + '</button>' +
     '</div>';
 }
 
@@ -10164,6 +10233,9 @@ function renderDvCard(c) {
       '<div class="dv-cites">' + c.source_citations.slice(0, 2).map(function(s) {
         return '<a class="dv-cite" href="' + esc(s.url) + '" target="_blank" rel="noopener">\uD83D\uDD17 ' + esc(s.title) + '</a>';
       }).join('') + '</div>' : '') +
+    '<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:8px">' +
+      '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(c.name) + ',' + JSON.stringify(websiteUrl || '') + ',this)">\u2605 Save Company Profile</button>' +
+    '</div>' +
   '</div>';
 }
 
