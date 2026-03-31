@@ -8791,7 +8791,7 @@ function renderJobCard(j, opts) {
   // ── Hiring Manager section (only on Saved Jobs cards)
   var hmHtml = '';
   if (opts.showSavedDate) {
-    if (j.hm_name) {
+    if (j.hm_id) {
       var hmConf = j.hm_confidence || 'medium';
       var hmConfColor = hmConf === 'high' ? '#00c86e' : hmConf === 'medium' ? '#f5c842' : hmConf === 'low' ? '#ff9f43' : '#888';
       var hmConfLabel = hmConf === 'high' ? 'High' : hmConf === 'medium' ? 'Medium' : hmConf === 'low' ? 'Low' : '?';
@@ -8844,10 +8844,11 @@ function renderJobCard(j, opts) {
         + ' data-hmid="' + esc(j.hm_id || '') + '" data-jid="' + esc(j.id) + '"'
         + ' onclick="openLIModal(this.dataset.hmid,this.dataset.jid,this)">&#x1F4AC; LI</button>';
 
+      var hmBtnLabel = j.hm_name ? '&#x1F464; View Hiring Manager Details' : '&#x270E; No Name Found — Add Details';
       hmHtml = '<div style="margin:8px 0 4px" id="hm-row-' + j.id + '">'
         + '<button class="btn btn-ghost btn-sm" style="font-size:11px;width:100%;background:rgba(245,200,66,.06);border:1px solid rgba(245,200,66,.2);color:var(--gold)"'
         + ' data-hmid="' + esc(String(j.hm_id || '')) + '" data-jid="' + esc(String(j.id)) + '" data-hmname="' + esc(j.hm_name || '') + '" data-hmtitle="' + esc(j.hm_title || '') + '" data-hmurl="' + esc(j.hm_linkedin_url || '') + '" data-hmemail="' + esc(j.hm_email || '') + '" data-hmphone="' + esc(j.hm_phone || '') + '" data-hmdomain="' + esc(j.hm_company_domain || '') + '" data-jco="' + esc(j.company || '') + '" data-hmsrc="' + esc(j.hm_enrichment_source || '') + '"'
-        + ' onclick="openHMDetailsModal(this.dataset.hmid,this.dataset.jid,this.dataset.hmname,this.dataset.hmtitle,this.dataset.hmurl,this.dataset.hmemail,this.dataset.hmphone,this.dataset.hmdomain,this.dataset.jco,this.dataset.hmsrc)">&#x1F464; View Hiring Manager Details</button>'
+        + ' onclick="openHMDetailsModal(this.dataset.hmid,this.dataset.jid,this.dataset.hmname,this.dataset.hmtitle,this.dataset.hmurl,this.dataset.hmemail,this.dataset.hmphone,this.dataset.hmdomain,this.dataset.jco,this.dataset.hmsrc)">' + hmBtnLabel + '</button>'
       + '</div>';
     } else {
       hmHtml = '<div style="margin:8px 0 4px" id="hm-row-' + j.id + '">'
@@ -9098,7 +9099,7 @@ function renderPipelineCard(j, stage) {
 
   // Hiring Manager row
   var hmRow = '';
-  if (j.hm_name) {
+  if (j.hm_id) {
     var pcConf = j.hm_confidence || 'medium';
     var pcColor = pcConf === 'high' ? '#00c86e' : pcConf === 'medium' ? '#f5c842' : '#ff9f43';
     var pcLink = j.hm_linkedin_url
@@ -9113,10 +9114,11 @@ function renderPipelineCard(j, stage) {
     } else if (j.hm_li_msg_status === 'draft') {
       pcLiStatus = '<span style="background:#f5c84222;color:#f5c842;border:1px solid #f5c84244;padding:0 4px;border-radius:3px;font-size:9px;margin-left:4px">LI Draft</span>';
     }
+    var pcHmBtnLabel = j.hm_name ? '&#x1F464; View Hiring Manager Details' : '&#x270E; No Name Found — Add Details';
     hmRow = '<div style="margin:5px 0" id="hm-pc-row-' + j.id + '">'
       + '<button class="btn btn-ghost btn-sm" style="font-size:10px;padding:2px 8px;background:rgba(245,200,66,.06);border:1px solid rgba(245,200,66,.2);color:var(--gold)"'
       + ' data-hmid="' + esc(String(j.hm_id || '')) + '" data-jid="' + esc(String(j.id)) + '" data-hmname="' + esc(j.hm_name || '') + '" data-hmtitle="' + esc(j.hm_title || '') + '" data-hmurl="' + esc(j.hm_linkedin_url || '') + '" data-hmemail="' + esc(j.hm_email || '') + '" data-hmphone="' + esc(j.hm_phone || '') + '" data-hmdomain="' + esc(j.hm_company_domain || '') + '" data-jco="' + esc(j.company || '') + '" data-hmsrc="' + esc(j.hm_enrichment_source || '') + '"'
-      + ' onclick="openHMDetailsModal(this.dataset.hmid,this.dataset.jid,this.dataset.hmname,this.dataset.hmtitle,this.dataset.hmurl,this.dataset.hmemail,this.dataset.hmphone,this.dataset.hmdomain,this.dataset.jco,this.dataset.hmsrc)">&#x1F464; View Hiring Manager Details</button>'
+      + ' onclick="openHMDetailsModal(this.dataset.hmid,this.dataset.jid,this.dataset.hmname,this.dataset.hmtitle,this.dataset.hmurl,this.dataset.hmemail,this.dataset.hmphone,this.dataset.hmdomain,this.dataset.jco,this.dataset.hmsrc)">' + pcHmBtnLabel + '</button>'
     + '</div>';
   } else {
     hmRow = '<div style="margin:5px 0" id="hm-pc-row-' + j.id + '">'
@@ -9505,6 +9507,22 @@ async function identifyHiringManager(jobId, company, title, location, descSnippe
       var prog = document.getElementById('hm-bulk-progress');
       if (prog) { prog.style.display = ''; prog.style.color = '#ff9f43'; prog.textContent = data.cse_usage + '/100 Google searches used today'; }
     }
+    // Auto-open HM details modal immediately with returned data
+    var hm = data.hiring_manager;
+    if (hm) {
+      openHMDetailsModal(
+        String(hm.id || ''),
+        String(jobId),
+        hm.full_name || '',
+        hm.title || '',
+        hm.linkedin_url || '',
+        hm.email || '',
+        hm.phone || '',
+        hm.company_domain || '',
+        company,
+        hm.enrichment_source || ''
+      );
+    }
   } catch(e) {
     console.error('identifyHiringManager failed:', e);
     if (row) row.innerHTML = '<div style="font-size:11px;color:#e55353;padding:4px 0">Error identifying HM. Try again.</div>';
@@ -9520,7 +9538,7 @@ async function bulkIdentifyHiringManagers() {
     // Get all saved jobs without a hiring manager
     var res = await fetch('/api/jobs/saved');
     var jobs = await res.json();
-    var needsHM = jobs.filter(function(j) { return !j.hm_name; });
+    var needsHM = jobs.filter(function(j) { return !j.hm_id; });
     if (!needsHM.length) {
       if (prog) { prog.style.display = ''; prog.style.color = '#00c86e'; prog.textContent = 'All jobs already have a hiring manager identified!'; }
       if (btn) { btn.disabled = false; btn.textContent = '\\u1F50D Identify All HMs'; }
@@ -9605,8 +9623,9 @@ async function openHMDetailsModal(hmId, jobId, name, title, url, email, phone, d
   _hmdHmCo    = company;
   _hmdHmSrc   = src;
 
-  document.getElementById('hmd-name').textContent = name || 'Unknown';
-  document.getElementById('hmd-title').textContent = title || '';
+  document.getElementById('hmd-name').textContent = name || 'Not identified';
+  document.getElementById('hmd-name').style.color = name ? '' : 'var(--muted)';
+  document.getElementById('hmd-title').textContent = title || (name ? '' : 'Use Edit below to add the hiring manager manually');
 
   var liRow = document.getElementById('hmd-li-row');
   var liLink = document.getElementById('hmd-li-link');
