@@ -3653,9 +3653,9 @@ app.post('/api/jobs/targeted-scan', async (req: Request, res: Response) => {
       company_focus: companyNames,
     };
 
-    // Run Gemini with company-focused prompt
+    // Run Gemini with company-focused prompt (15s timeout — user is waiting interactively)
     console.log('[TargetedScan] Calling Gemini discovery…');
-    const geminiResult = await runGeminiJobDiscovery(geminiCriteria);
+    const geminiResult = await runGeminiJobDiscovery(geminiCriteria, { timeoutMs: 15000 });
 
     if (geminiResult.skipped) {
       console.log(`[TargetedScan] Gemini skipped: ${geminiResult.skipReason}`);
@@ -12313,7 +12313,16 @@ async function scanForRoles(source) {
     if (!res.ok) throw new Error(json.error || 'Scan failed');
 
     if (json.skipped) {
-      throw new Error('Gemini search not available: ' + (json.skip_reason || 'check GEMINI_API_KEY in Settings'));
+      var reason = json.skip_reason || '';
+      var isCapacity = reason.includes('unavailable') || reason.includes('503') || reason.includes('timeout') || reason.includes('candidates') || reason.includes('demand') || reason.includes('429');
+      if (isCapacity) {
+        if (errBox) {
+          errBox.innerHTML = '<strong>Gemini is temporarily at capacity</strong> \u2014 this is a Google-side issue that usually clears in 1\u20132 minutes.<br><button style="margin-top:8px;padding:4px 14px;background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.3);border-radius:6px;cursor:pointer;font-size:12px" onclick="runTargetedScan(\'' + source + '\')">Retry</button>';
+          errBox.style.display = '';
+        }
+        return;
+      }
+      throw new Error('Gemini not available: ' + (reason || 'check GEMINI_API_KEY in Settings'));
     }
 
     var jobs = json.jobs || [];

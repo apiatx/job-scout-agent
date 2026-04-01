@@ -185,7 +185,8 @@ function isModelUnavailableError(err: unknown): boolean {
 // ── Main entry point ──────────────────────────────────────────────────────────
 
 export async function runGeminiJobDiscovery(
-  criteria: GeminiDiscoveryCriteria
+  criteria: GeminiDiscoveryCriteria,
+  options?: { timeoutMs?: number }
 ): Promise<GeminiDiscoveryResult> {
   const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey) {
@@ -200,7 +201,7 @@ export async function runGeminiJobDiscovery(
   }
 
   const maxResults = parseInt(process.env.GEMINI_MAX_RESULTS ?? '30', 10);
-  const timeoutMs  = parseInt(process.env.GEMINI_TIMEOUT_SECONDS ?? '45', 10) * 1000;
+  const timeoutMs  = options?.timeoutMs ?? (parseInt(process.env.GEMINI_TIMEOUT_SECONDS ?? '45', 10) * 1000);
 
   // Build the candidate list — user override goes first if set.
   // If the env model matches a built-in name, remove the duplicate from the
