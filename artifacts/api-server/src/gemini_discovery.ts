@@ -559,16 +559,44 @@ export async function runPerplexityScoutSearch(
   const { mode, companyNames = [] } = opts;
 
   // ── Derive targeted keyword list from user settings ────────────────────────
-  // Priority: industries (specific) → must_have (explicit) → generic fallback
   const rawIndustries = (criteria.industries ?? []).filter(Boolean);
   const rawMustHave   = (criteria.must_have   ?? []).filter(Boolean);
   const allKeywords   = [...rawIndustries, ...rawMustHave.filter(k => !rawIndustries.includes(k))];
-  // Pad to at least 5 slots with tech-neutral fallbacks so queries stay sensible
-  const KW_FALLBACKS  = ['enterprise software', 'B2B technology', 'infrastructure', 'technology', 'SaaS'];
-  while (allKeywords.length < 5) allKeywords.push(KW_FALLBACKS[allKeywords.length] ?? 'technology');
 
   // Round-robin through keywords to distribute across query slots
   const kw = (i: number) => allKeywords[i % allKeywords.length];
+
+  // ── Industry cluster map: multi-word OR-phrases that signal real product companies ──
+  const INDUSTRY_CLUSTER_MAP: Record<string, string> = {
+    'ai infrastructure':      `("GPU cloud" OR "AI accelerator" OR "ML infrastructure" OR "inference cluster" OR "model serving" OR "LLM training" OR "foundation model" OR "NVIDIA H100" OR "AI compute")`,
+    'semiconductors':         `("chip design" OR "semiconductor sales" OR ASIC OR FPGA OR "silicon photonics" OR "wafer fabrication" OR "integrated circuit" OR "tape-out" OR EDA)`,
+    'photonics':              `(photonics OR "optical transceiver" OR "optical interconnect" OR "coherent optics" OR DWDM OR "fiber optic" OR optoelectronics OR "silicon photonics")`,
+    'optics':                 `("optical components" OR "optical systems" OR "optical networking" OR lidar OR "laser systems" OR "fiber optic" OR photonics OR optoelectronics)`,
+    'electronic components':  `("electronic components" OR "embedded systems" OR "PCB design" OR "IoT hardware" OR "contract electronics" OR "sensors hardware" OR "surface mount")`,
+    'servers':                `("server hardware" OR "rack server" OR "compute infrastructure" OR "server infrastructure" OR "hyperscale server" OR "server platform")`,
+    'data center':            `("data center infrastructure" OR colocation OR "bare metal" OR hyperscaler OR "compute cluster" OR "data center solutions" OR "colo facility")`,
+    'networking':             `("network infrastructure" OR "SD-WAN" OR "network fabric" OR "network security" OR switching OR routing OR MPLS OR SASE OR "network hardware")`,
+    'database':               `("distributed database" OR "data warehouse" OR "data platform" OR "vector database" OR "object storage" OR "database infrastructure" OR "time-series database")`,
+    'infrastructure security': `("zero trust" OR "cloud security" OR "network security" OR "endpoint security" OR XDR OR EDR OR SIEM OR SOAR OR CNAPP OR CSPM OR SASE)`,
+  };
+
+  // Build active clusters dynamically from user industries (case-insensitive, deduplicated)
+  const activeClusters: string[] = [];
+  const seen = new Set<string>();
+  for (const ind of rawIndustries) {
+    const key = ind.trim().toLowerCase();
+    const cluster = INDUSTRY_CLUSTER_MAP[key];
+    if (cluster && !seen.has(cluster)) {
+      seen.add(cluster);
+      activeClusters.push(cluster);
+    }
+  }
+  // Last-resort fallback: if no industries matched the map, use raw industry strings
+  if (activeClusters.length === 0 && rawIndustries.length > 0) {
+    const fallbackCluster = `(${rawIndustries.map(i => `"${i}"`).join(' OR ')})`;
+    activeClusters.push(fallbackCluster);
+    console.warn('[PerplexityScout] No industry cluster matches — using raw industry strings as fallback');
+  }
 
   const role0 = (criteria.target_roles[0] ?? 'Account Executive').trim();
   const role1 = (criteria.target_roles[1] ?? 'Account Manager').trim();
@@ -601,66 +629,47 @@ export async function runPerplexityScoutSearch(
     if (mode === 'watchlist' && companyNames.length === 0) {
       console.warn('[PerplexityScout] Watchlist mode but no companies — falling back to open search');
     }
-    console.log('[PerplexityScout] Open Search — 3 parallel Search API calls (Greenhouse/Lever | Ashby/Workday | SmartRecruiters/Workable)');
+    console.log(`[PerplexityScout] Open Search — 4 parallel Search API calls, ${activeClusters.length} industry clusters`);
 
-    // ── Tech-signal query builder ─────────────────────────────────────────────
-    // Instead of single industry names (which match any company that MENTIONS the
-    // industry), we use OR-clusters of specific product/technology terms that only
-    // companies actively MAKING or SELLING those products would use in job postings.
-    // This dramatically reduces off-target companies (StackAdapt, Linear, etc.)
-    // that slip through on generic industry keyword matches.
-    //
-    // Cluster A: AI compute / GPU / ML infra
-    const clusterAI    = `(GPU OR NVIDIA OR "AI accelerator" OR "AI cloud" OR "AI infrastructure" OR "ML infrastructure" OR "inference" OR "model serving")`;
-    // Cluster B: Semiconductors / silicon
-    const clusterSemi  = `(semiconductor OR "chip design" OR silicon OR ASIC OR FPGA OR "integrated circuit" OR photonics OR optoelectronics)`;
-    // Cluster C: Data center / compute infrastructure
-    const clusterDC    = `("data center" OR hyperscaler OR colocation OR "bare metal" OR HPC OR "server infrastructure" OR "compute cluster")`;
-    // Cluster D: Networking / infrastructure security
-    const clusterNet   = `(networking OR "SD-WAN" OR "network security" OR "infrastructure security" OR "zero trust" OR "network fabric" OR "network infrastructure")`;
-    // Cluster E: Optics / sensors / electronic components
-    const clusterOptic = `(optics OR "optical transceiver" OR "optical interconnect" OR "fiber optic" OR sensors OR "electronic components" OR "embedded systems")`;
-    // Cluster F: Data / storage / database infrastructure
-    const clusterData  = `(database OR "data platform" OR "distributed systems" OR "object storage" OR "storage systems" OR "data infrastructure")`;
-
-    searchRequests = [
-      {
-        label: 'Greenhouse + Lever',
-        query: [
-          `"${role0}" ${clusterAI} remote`,
-          `"${role0}" ${clusterSemi} remote`,
-          `"${role1}" ${clusterDC} remote`,
-          `"${role0}" ${clusterNet} remote`,
-          `"${role1}" ${clusterOptic} remote${locSuffix}`,
-        ],
-        search_domain_filter: ['boards.greenhouse.io', 'jobs.lever.co'],
-        max_results: 20,
-      },
-      {
-        label: 'Ashby + Workday',
-        query: [
-          `"${role0}" ${clusterAI} remote`,
-          `"${role0}" ${clusterDC} remote`,
-          `"${role1}" ${clusterSemi} remote`,
-          `"${role0}" ${clusterData} remote`,
-          `"${role1}" ${clusterNet} remote${locSuffix}`,
-        ],
-        search_domain_filter: ['jobs.ashbyhq.com', 'myworkdayjobs.com'],
-        max_results: 20,
-      },
-      {
-        label: 'SmartRecruiters + Workable + Jobvite',
-        query: [
-          `"${role0}" ${clusterAI} remote`,
-          `"${role0}" ${clusterSemi} remote`,
-          `"${role1}" ${clusterDC} remote`,
-          `"${role1}" ${clusterNet} remote${locSuffix}`,
-          `"${role0}" ${clusterOptic} remote`,
-        ],
-        search_domain_filter: ['jobs.smartrecruiters.com', 'apply.workable.com', 'jobs.jobvite.com'],
-        max_results: 20,
-      },
+    // ── Distribute clusters across 4 ATS-specific calls (2–3 clusters each) ──
+    const callDomains: { label: string; domains: string[] }[] = [
+      { label: 'Greenhouse + Lever',                  domains: ['boards.greenhouse.io', 'jobs.lever.co'] },
+      { label: 'Ashby + Workday',                     domains: ['jobs.ashbyhq.com', 'myworkdayjobs.com'] },
+      { label: 'SmartRecruiters + Workable + Jobvite', domains: ['jobs.smartrecruiters.com', 'apply.workable.com', 'jobs.jobvite.com'] },
+      { label: 'Rippling + iCIMS + Lever',            domains: ['apply.rippling.com', 'careers.icims.com', 'jobs.lever.co'] },
     ];
+
+    // Assign clusters round-robin across the 4 calls
+    const callClusters: string[][] = [[], [], [], []];
+    for (let ci = 0; ci < activeClusters.length; ci++) {
+      callClusters[ci % 4].push(activeClusters[ci]);
+    }
+
+    searchRequests = callDomains.map((cd, callIdx) => {
+      const clusters = callClusters[callIdx];
+      // Build one query per cluster, alternating roles
+      const queries = clusters.map((clusterStr, qi) => {
+        const role = qi % 2 === 0 ? role0 : role1;
+        const suffix = qi === clusters.length - 1 ? locSuffix : '';
+        return `"${role}" ${clusterStr} remote${suffix}`;
+      });
+      return {
+        label: cd.label,
+        query: queries.length === 1 ? queries[0] : queries,
+        search_domain_filter: cd.domains,
+        max_results: 25,
+      } as SearchRequest;
+    });
+
+    // Log query strings for observability
+    for (let ci = 0; ci < searchRequests.length; ci++) {
+      const req = searchRequests[ci];
+      const qs = Array.isArray(req.query) ? req.query : [req.query];
+      console.log(`[PerplexityScout] Call ${ci + 1} (${req.label}): ${qs.length} queries`);
+      for (let qi = 0; qi < Math.min(qs.length, 2); qi++) {
+        console.log(`  Q${qi + 1}: ${qs[qi].length > 120 ? qs[qi].slice(0, 120) + '…' : qs[qi]}`);
+      }
+    }
   } else {
     // Watchlist mode: group companies 3-per-query, 5 queries per request, 3 parallel = 45 max
     // Alternate between role0/role1 and rotate through top industry keywords
