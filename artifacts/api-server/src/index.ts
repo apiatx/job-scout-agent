@@ -7,7 +7,7 @@ import mammoth from 'mammoth';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, UnderlineType } from 'docx';
 import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, runJobSpyScraper, proxyConfigured } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
-import { runGeminiJobDiscovery, deduplicateJobLists, isDirectCompanyUrl, normalizeUrl as normalizeJobUrl } from './gemini_discovery.js';
+import { runGeminiJobDiscovery, runPerplexityScoutSearch, deduplicateJobLists, isDirectCompanyUrl, normalizeUrl as normalizeJobUrl } from './gemini_discovery.js';
 import { runCanonicalResolutionInBackground, computeLinkConfidence, classifySourceTrust, enrichJobsPreScoring } from './link_validator.js';
 import { generateCareerIntel } from './career_intel.js';
 import type { CareerIntelCriteria } from './career_intel.js';
@@ -5085,9 +5085,12 @@ async function runScoutInBackground(
     for (const c of companies) { byType[(c as any).ats_type] = (byType[(c as any).ats_type] || 0) + 1; }
     console.log(`  Companies by ATS type:`, byType);
 
+    // Company names available globally — needed for both Watchlist Fast Search and JobSpy safety filter
+    const companyNames: string[] = companies.map((c: any) => c.name as string);
+
     type Job = { title: string; company: string; location: string; salary?: string; applyUrl: string; description?: string; datePosted?: string; source: string; _fromJobSpy?: boolean; _fromGemini?: boolean };
     const allJobs: Job[] = [];
-    // Side-map: applyUrl → per-job metadata for Gemini-sourced jobs
+    // Side-map: applyUrl → per-job metadata for Perplexity-sourced jobs
     const geminiMetaByUrl = new Map<string, { groundingMetadata?: object; confidence?: number }>();
     let companiesScanned = 0;
     const perCompanyStats: { name: string; type: string; jobs: number; error?: string }[] = [];
@@ -5190,7 +5193,6 @@ async function runScoutInBackground(
     }
 
     // ── Stage 2c: Filter out unsafe companies from all JobSpy-sourced results ──
-    const companyNames = companies.map((c: any) => c.name as string);
     const jobSpyJobs = allJobs.filter(j => (j as any)._fromJobSpy);
     const nonJobSpyJobs = allJobs.filter(j => !(j as any)._fromJobSpy);
     if (jobSpyJobs.length > 0) {
@@ -5211,55 +5213,73 @@ async function runScoutInBackground(
     }
     } // end if (!fastSearch)
 
-    // ── Stage 2c: Perplexity + Gemini grounding — supplemental discovery ───────
+    // ── Stage 2c: Perplexity discovery (Fast Search = primary; regular = supplemental) ──
     const discoveryStageLabel = fastSearch
       ? `Running Perplexity Fast Search (${modeLabel})…`
-      : `JobSpy done (${allJobs.length} total) — running Perplexity discovery…`;
+      : `JobSpy done (${allJobs.length} total) — running Perplexity supplemental discovery…`;
     await setStage(discoveryStageLabel);
     await pool.query(`UPDATE scout_runs SET jobs_in_pipeline=$1 WHERE id=$2`, [allJobs.length, runId]).catch(() => {});
 
-    let geminiJobsFound = 0;
-    let geminiDeduped = 0;
+    let perplexityJobsFound = 0;
+    let perplexityDeduped = 0;
+
     try {
-      // For Watchlist + Fast Search: focus Perplexity on the watchlist companies
-      const discoveryCompanyFocus = (fastSearch && searchMode === 'watchlist')
-        ? companyNames.slice(0, 30)
-        : undefined;
+      let discoveredJobs: import('./gemini_discovery.js').GeminiJob[] = [];
 
-      const geminiResult = await runGeminiJobDiscovery({
-        target_roles:  criteria.target_roles ?? [],
-        locations:     criteria.locations ?? [],
-        work_type:     criteria.work_type ?? 'any',
-        must_have:     criteria.must_have ?? [],
-        nice_to_have:  criteria.nice_to_have ?? [],
-        avoid:         criteria.avoid ?? [],
-        industries:    criteria.industries ?? [],
-        min_salary:    criteria.min_salary ?? null,
-        ...(discoveryCompanyFocus ? { company_focus: discoveryCompanyFocus } : {}),
-      });
+      if (fastSearch) {
+        // ── Fast Search: 2–3 parallel Perplexity calls replace the whole pipeline ──
+        const scoutResult = await runPerplexityScoutSearch(
+          {
+            target_roles:  criteria.target_roles ?? [],
+            locations:     criteria.locations ?? [],
+            work_type:     criteria.work_type ?? 'any',
+            must_have:     criteria.must_have ?? [],
+            nice_to_have:  criteria.nice_to_have ?? [],
+            avoid:         criteria.avoid ?? [],
+            industries:    criteria.industries ?? [],
+            min_salary:    criteria.min_salary ?? null,
+          },
+          { mode: searchMode, companyNames }
+        );
+        discoveredJobs = scoutResult.jobs;
+        console.log(`[PerplexityScout] ${scoutResult.callsRun} calls run, ${scoutResult.callsFailed} failed, ${discoveredJobs.length} unique jobs found`);
+      } else {
+        // ── Regular mode: single Perplexity supplemental call, no Gemini ──
+        const geminiResult = await runGeminiJobDiscovery(
+          {
+            target_roles:  criteria.target_roles ?? [],
+            locations:     criteria.locations ?? [],
+            work_type:     criteria.work_type ?? 'any',
+            must_have:     criteria.must_have ?? [],
+            nice_to_have:  criteria.nice_to_have ?? [],
+            avoid:         criteria.avoid ?? [],
+            industries:    criteria.industries ?? [],
+            min_salary:    criteria.min_salary ?? null,
+          },
+          { skipGemini: true }
+        );
+        if (!geminiResult.skipped) discoveredJobs = geminiResult.jobs;
+        else console.log(`[Discovery] Perplexity supplemental skipped: ${geminiResult.skipReason}`);
+      }
 
-      if (!geminiResult.skipped && geminiResult.jobs.length > 0) {
-        // Merge Gemini results with existing allJobs — dedup by URL + company+title
+      if (discoveredJobs.length > 0) {
+        // Merge Perplexity results with existing allJobs — dedup by URL + company+title
         const { merged, deduplicatedCount } = deduplicateJobLists(
           allJobs as Array<ScrapedJob & { source: string; _fromJobSpy?: boolean }>,
-          geminiResult.jobs
+          discoveredJobs
         );
 
-        geminiJobsFound = geminiResult.jobs.length;
-        geminiDeduped   = deduplicatedCount;
-        const netNew    = geminiJobsFound - deduplicatedCount;
+        perplexityJobsFound = discoveredJobs.length;
+        perplexityDeduped   = deduplicatedCount;
+        const netNew        = perplexityJobsFound - deduplicatedCount;
 
-        // Store gemini metadata for net-new jobs so we can persist it to DB later
-        for (const gJob of geminiResult.jobs) {
-          if (!allJobs.some(j => j.applyUrl === gJob.applyUrl)) {
-            geminiMetaByUrl.set(gJob.applyUrl, {
-              groundingMetadata: gJob.geminiGroundingMetadata as object | undefined,
-              confidence:        gJob.ingestionConfidence,
-            });
+        // Track confidence metadata for net-new jobs
+        for (const pJob of discoveredJobs) {
+          if (!allJobs.some(j => j.applyUrl === pJob.applyUrl)) {
+            geminiMetaByUrl.set(pJob.applyUrl, { confidence: pJob.ingestionConfidence });
           }
         }
 
-        // Rebuild allJobs from merged (preserves all existing + net-new Gemini jobs)
         allJobs.length = 0;
         for (const j of merged) {
           allJobs.push({
@@ -5275,13 +5295,10 @@ async function runScoutInBackground(
           });
         }
 
-        console.log(`[Gemini] ${geminiJobsFound} discovered → ${deduplicatedCount} dupes merged → ${netNew} net-new added`);
-        console.log(`[Gemini] Grounding sources: ${geminiResult.totalGroundingSources} | Queries: ${geminiResult.queriesUsed.join(', ')}`);
-      } else if (geminiResult.skipped) {
-        console.log(`[Gemini] Skipped: ${geminiResult.skipReason}`);
+        console.log(`[Perplexity] ${perplexityJobsFound} discovered → ${deduplicatedCount} dupes merged → ${netNew} net-new added`);
       }
     } catch (e) {
-      console.error(`[Gemini] Unexpected error (non-fatal):`, e);
+      console.error(`[Perplexity Discovery] Unexpected error (non-fatal):`, e);
     }
 
     console.log(`\n──── SCRAPE RESULTS ────────────────────────────────────────`);
@@ -5662,8 +5679,9 @@ async function runScoutInBackground(
     console.log(`  Companies scanned: ${companiesScanned}`);
     console.log(`  Raw jobs scraped:  ${allJobs.length}`);
     console.log(`  Source breakdown:  ${Object.entries(srcBreakdown).map(([k,v]) => `${k}: ${v}`).join(' | ')}`);
-    if (geminiJobsFound > 0) {
-      console.log(`  Gemini discovery:  ${geminiJobsFound} found → ${geminiDeduped} already in JobSpy → ${geminiJobsFound - geminiDeduped} net-new`);
+    if (perplexityJobsFound > 0) {
+      const label = fastSearch ? 'Perplexity (Fast)' : 'Perplexity discovery';
+      console.log(`  ${label}: ${perplexityJobsFound} found → ${perplexityDeduped} already in ATS/JobSpy → ${perplexityJobsFound - perplexityDeduped} net-new`);
     }
     console.log(`  Passed title filter: ${toScore.length}`);
     console.log(`  Pre-filtered (location/avoid/salary): ${preFiltered.length}`);
