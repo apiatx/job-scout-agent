@@ -30,6 +30,7 @@ import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude,
 import type { MomentumScore } from './agent.js';
 import type { SubScores, OpportunityTier, TierSettings, TailoringAnalysis } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
+import { classifyJob, getFilterDecision, mapUserIndustriesToCategories, type JobClassification } from './company_classifier.js';
 // RepVue: link-out only (no scraping — RepVue blocks automated requests)
 
 const { Pool } = pg;
@@ -5470,6 +5471,39 @@ async function runScoutInBackground(
       droppedByTerritory = before - preFiltered.length;
     }
 
+    // ── Shared company-type + industry-category classification ───────────────
+    // Runs for ALL sources (JobSpy, ATS, Perplexity) in BOTH Normal and Quick Search.
+    // Deterministic — no Claude calls. Drops:
+    //   • staffing agencies / recruiting firms at medium+ confidence
+    //   • healthcare providers at medium+ confidence
+    //   • job boards at medium+ confidence
+    //   • generic_saas / healthcare companies when user has stated preferred categories (high-confidence only)
+    const preferredCategories = mapUserIndustriesToCategories(criteria.industries ?? []);
+    const classificationResults = new Map<string, JobClassification>();
+    let droppedByCompanyType = 0;
+    let droppedByIndustryCategory = 0;
+    {
+      const classified: typeof preFiltered = [];
+      for (const j of preFiltered) {
+        const cls = classifyJob({ title: j.title, company: j.company, description: j.description, applyUrl: j.applyUrl });
+        classificationResults.set(j.applyUrl, cls);
+        const decision = getFilterDecision(cls, preferredCategories);
+        if (decision === 'drop_company_type') {
+          droppedByCompanyType++;
+          console.log(`  [Classify] DROP company_type=${cls.companyType} conf=${cls.confidence} — ${j.company} | ${j.title}`);
+        } else if (decision === 'drop_industry') {
+          droppedByIndustryCategory++;
+          console.log(`  [Classify] DROP industry=${cls.industryCategory} conf=${cls.confidence} (not in preferred: ${Array.from(preferredCategories).join(',')}) — ${j.company}`);
+        } else {
+          if (cls.industryCategory !== 'unknown') {
+            console.log(`  [Classify] PASS company=${cls.companyType} industry=${cls.industryCategory} conf=${cls.confidence} — ${j.company}`);
+          }
+          classified.push(j);
+        }
+      }
+      preFiltered = classified;
+    }
+
     let droppedByKnownComp = 0; // reserved for future use
 
     console.log(`\n──── PRE-FILTERS (before Claude scoring) ───────────────────`);
@@ -5478,6 +5512,11 @@ async function runScoutInBackground(
     console.log(`  Dropped by avoid keywords: ${droppedByAvoid}`);
     console.log(`  Dropped by salary below $${criteria.min_salary?.toLocaleString() ?? 'n/a'}: ${droppedBySalary}`);
     console.log(`  Dropped by territory mismatch: ${droppedByTerritory}`);
+    console.log(`  Dropped by company type (staffing/healthcare/job_board): ${droppedByCompanyType}`);
+    console.log(`  Dropped by industry category (generic_saas/healthcare — not in preferred): ${droppedByIndustryCategory}`);
+    if (preferredCategories.size > 0) {
+      console.log(`  Preferred industry categories: ${Array.from(preferredCategories).join(', ')}`);
+    }
     console.log(`  Dropped by known comp below minimum: ${droppedByKnownComp}`);
     console.log(`  Remaining for Claude scoring: ${preFiltered.length}`);
     console.log(`───────────────────────────────────────────────────────────`);

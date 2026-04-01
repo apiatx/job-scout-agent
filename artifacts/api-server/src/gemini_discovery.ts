@@ -396,9 +396,10 @@ function isJobPostingUrl(url: string): boolean {
   return false;
 }
 
-// ── Staffing / recruiting agency blocklist ────────────────────────────────────
-// Companies that post jobs on their own ATS but are recruiters/headhunters,
-// not the actual hiring company. Their postings are noise for a direct-hire scout.
+// ── Staffing / recruiting URL-slug blocklist (early gate only) ────────────────
+// Catches known recruiter ATS slugs at result-normalization time — before jobs enter
+// the pipeline. Name-pattern matching (and broader company-type classification) is
+// handled by the shared company_classifier.ts layer that runs on ALL sources.
 const STAFFING_SLUGS = new Set([
   'lavendo', 'kforce', 'kforcetech', 'randstad', 'adecco', 'manpower',
   'staffmark', 'insightglobal', 'insight-global', 'roberthalf', 'robert-half',
@@ -410,13 +411,9 @@ const STAFFING_SLUGS = new Set([
   'talent-solutions', 'hirehive', 'theladders', 'ziprecruiter',
 ]);
 
-const STAFFING_NAME_PATTERN = /\b(staffing|recruiting|recruitment|headhunting|headhunter|talent\s+acquisition\s+firm|talent\s+solutions|executive\s+search|placement\s+firm|search\s+group|search\s+firm)\b/i;
-
-function isStaffingCompany(urlSlug: string, companyName: string): boolean {
+function isKnownStaffingSlug(urlSlug: string): boolean {
   const slugLower = urlSlug.toLowerCase().replace(/[^a-z0-9]/g, '');
-  if (STAFFING_SLUGS.has(slugLower) || STAFFING_SLUGS.has(urlSlug.toLowerCase())) return true;
-  if (STAFFING_NAME_PATTERN.test(companyName)) return true;
-  return false;
+  return STAFFING_SLUGS.has(slugLower) || STAFFING_SLUGS.has(urlSlug.toLowerCase());
 }
 
 /** Convert an ATS URL slug (kebab-case) to a human-readable company name */
@@ -525,10 +522,10 @@ function searchResultToRawJob(result: PlxSearchResult): RawGeminiJobRecord | nul
     urlSlug = pathParts[0] ?? '';
   } catch { /* ignore */ }
 
-  // Drop known staffing / recruiting agencies — they post jobs for clients
-  // and are not the actual employer; they'll always score poorly and waste Claude calls
-  if (isStaffingCompany(urlSlug, company)) {
-    console.log(`[PerplexityScout] Dropped staffing/recruiting company: ${company} (slug: ${urlSlug})`);
+  // Drop known staffing / recruiting URL slugs early (before normalization).
+  // Broader name-pattern classification is handled by the shared company_classifier layer.
+  if (isKnownStaffingSlug(urlSlug)) {
+    console.log(`[PerplexityScout] Dropped known staffing slug: ${company} (slug: ${urlSlug})`);
     return null;
   }
 

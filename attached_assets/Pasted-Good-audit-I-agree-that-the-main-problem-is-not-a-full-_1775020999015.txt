@@ -1,0 +1,69 @@
+Good audit. I agree that the main problem is not a full settings bypass, but weaker retrieval plus an upstream classification gap.
+
+Now I need a focused second pass to fix the remaining real issue:
+
+1. Perplexity results still do not go through the same company-safety / company-type classification as JobSpy results.
+2. There is still no deterministic industry/category whitelist filter anywhere in the pipeline.
+
+Please implement the following:
+
+A. SHARED COMPANY-TYPE CLASSIFICATION
+Create a reusable company/job classification layer that can be applied to all search sources, including Perplexity results.
+
+At minimum classify:
+
+* direct_employer
+* staffing_recruiting
+* agency_services
+* healthcare_provider / hospital
+* job_board
+* unknown
+
+Use deterministic rules first where possible:
+
+* domain / ATS ownership
+* known company-name patterns
+* known recruiter/staffing patterns
+* known healthcare/hospital patterns
+
+If needed, use Claude only for ambiguous cases, not every result.
+
+Apply this shared classification before Claude scoring for Perplexity results too.
+
+B. DETERMINISTIC INDUSTRY / CATEGORY CLASSIFICATION
+Create a backend category classification layer for jobs/companies based on company name, URL/domain, title, description, and known signals.
+
+Categories should include at least:
+
+* ai_infrastructure
+* semiconductors
+* photonics_optics
+* electronic_components
+* servers_data_center
+* networking
+* database
+* infrastructure_security
+* generic_saas
+* staffing_recruiting
+* other
+
+Then use the user’s saved industry preferences as a deterministic whitelist / preference layer, not only as search-query wording.
+
+Important:
+
+* preferred categories should boost strongly
+* disallowed / irrelevant categories should be penalized or excluded
+* generic_saas should not be treated the same as the user’s preferred infrastructure/hardware/deep-tech categories
+
+C. APPLY TO BOTH MODES
+This should improve both normal search and quick search.
+Do not make this a quick-search-only hack.
+
+D. REPORT BACK
+When finished, tell me:
+
+1. how company-type classification now works
+2. how industry/category classification now works
+3. whether Perplexity results now go through the same company-type filter path as JobSpy
+4. how user saved industries are now enforced more deterministically
+5. what false positives should now be blocked that previously slipped through
