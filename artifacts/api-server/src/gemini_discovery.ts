@@ -361,130 +361,137 @@ function deduplicateGeminiJobs(jobs: GeminiJob[]): GeminiJob[] {
   });
 }
 
-/** Build a criteria summary block reused across all prompts */
-function buildCriteriaBlock(criteria: GeminiDiscoveryCriteria): string {
-  const roles     = criteria.target_roles.slice(0, 12).map(r => `"${r}"`).join(', ');
-  const locations = criteria.locations.join(', ') || 'Remote';
-  const mustHave  = criteria.must_have.slice(0, 10).join(', ');
-  const avoidKw   = criteria.avoid.slice(0, 8).join(', ');
-  const industries= criteria.industries.slice(0, 5).join(', ');
-  const salary    = criteria.min_salary ? `Minimum OTE/base salary: $${criteria.min_salary.toLocaleString()}` : '';
-  const workType  = criteria.work_type === 'remote' ? 'remote only'
-                  : criteria.work_type === 'hybrid' ? 'remote or hybrid'
-                  : 'remote, hybrid, or on-site';
-  return [
-    `JOB REQUIREMENTS (all must match — reject any posting that fails any requirement):`,
-    `- Title must match one of: ${roles}`,
-    `- Work type: ${workType}`,
-    `- Location: ${locations}`,
-    mustHave  ? `- MUST include these skills/keywords: ${mustHave}` : '',
-    avoidKw   ? `- REJECT any job whose title or description contains: ${avoidKw}` : '',
-    industries? `- Target industries: ${industries}` : '',
-    salary    ? `- ${salary}` : '',
-  ].filter(Boolean).join('\n');
+// ── Perplexity Search API types ───────────────────────────────────────────────
+
+interface PlxSearchResult {
+  title: string;
+  url: string;
+  snippet?: string;
+  date?: string;
 }
 
-const JSON_FORMAT_BLOCK = `
-For each matching job output a JSON object with these exact keys:
-- title: exact job title from the posting
-- company: exact company name
-- location: "Remote" or "City, State"
-- url: DIRECT URL to the job posting (not a search results page)
-- description: 2–4 sentences from the actual posting
-- salary: salary/OTE range if visible, else ""
+/**
+ * Returns true only for URLs that are specific individual job postings on a
+ * known ATS — not listing pages, search results, or company home pages.
+ */
+function isJobPostingUrl(url: string): boolean {
+  // boards.greenhouse.io/{company}/jobs/{numeric-id}
+  if (/boards\.greenhouse\.io\/[^/?#]+\/jobs\/\d+/.test(url)) return true;
+  // jobs.lever.co/{company}/{uuid}  (lever uses 8-4-4-4-12 UUIDs)
+  if (/jobs\.lever\.co\/[^/?#]+\/[0-9a-f]{8}-[0-9a-f]{4}/.test(url)) return true;
+  // jobs.ashbyhq.com/{company}/{uuid}
+  if (/jobs\.ashbyhq\.com\/[^/?#]+\/[0-9a-f]{8}-[0-9a-f]{4}/.test(url)) return true;
+  // Workday: {company}.myworkdayjobs.com/**/{slug}/job/{slug}
+  if (/myworkdayjobs\.com\/.+\/job\//.test(url)) return true;
+  // LinkedIn specific job view
+  if (/linkedin\.com\/jobs\/view\/\d+/.test(url)) return true;
+  // Indeed viewjob
+  if (/indeed\.com\/viewjob/.test(url)) return true;
+  return false;
+}
 
-Output ONLY a JSON array between JOBS_START and JOBS_END markers — no other text:
-JOBS_START
-[
-  {"title": "Enterprise Account Executive", "company": "Acme Corp", "location": "Remote", "url": "https://boards.greenhouse.io/acmecorp/jobs/7890123", "description": "Drive net-new revenue...", "salary": "$130k base / $260k OTE"}
-]
-JOBS_END
+/** Convert an ATS URL slug (kebab-case) to a human-readable company name */
+function slugToCompanyName(slug: string): string {
+  return slug
+    .replace(/[-_]/g, ' ')
+    .split(' ')
+    .filter(Boolean)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ')
+    .trim();
+}
 
-Rules:
-- Direct posting URLs only (boards.greenhouse.io/..., jobs.lever.co/..., jobs.ashbyhq.com/..., myworkdayjobs.com/..., linkedin.com/jobs/view/...)
-- Do NOT include LinkedIn search pages, company home pages, or generic job board pages
-- Do NOT fabricate jobs — only include postings you verified exist via live search
-- Do NOT include expired or filled roles`;
+/** Extract the company name from a known ATS URL pattern */
+function extractCompanyFromAtsUrl(url: string): string | null {
+  try {
+    const u    = new URL(url);
+    const host = u.hostname.toLowerCase();
+    const path = u.pathname;
 
-/** Open Search prompt — targets specific ATS board families */
-function buildOpenSearchPrompt(
-  criteria: GeminiDiscoveryCriteria,
-  boards: 'greenhouse_lever' | 'ashby_workday' | 'linkedin_indeed'
-): string {
-  const role0  = criteria.target_roles[0]?.trim()  || 'Account Executive';
-  const role1  = criteria.target_roles[1]?.trim()  || 'Account Manager';
-  const skill0 = criteria.must_have[0]?.trim()     || 'SaaS';
-  const skill1 = criteria.must_have[1]?.trim()     || 'B2B';
-  const loc0   = criteria.locations[0]?.trim()     || 'Remote';
-  const locStr = loc0.toLowerCase() === 'remote' ? 'remote' : loc0;
+    if (host === 'boards.greenhouse.io') {
+      const m = path.match(/^\/([^/]+)\/jobs\//);
+      return m ? slugToCompanyName(m[1]) : null;
+    }
+    if (host === 'jobs.lever.co') {
+      const m = path.match(/^\/([^/]+)\//);
+      return m ? slugToCompanyName(m[1]) : null;
+    }
+    if (host === 'jobs.ashbyhq.com') {
+      const m = path.match(/^\/([^/]+)\//);
+      return m ? slugToCompanyName(m[1]) : null;
+    }
+    if (host.endsWith('.myworkdayjobs.com')) {
+      return slugToCompanyName(host.replace('.myworkdayjobs.com', ''));
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
-  let boardDesc: string;
-  let queries: string;
+/**
+ * Parse a clean job title out of a search result title string.
+ * Search result titles often look like:
+ *   "Enterprise Account Executive - Acme Corp | Greenhouse"
+ *   "Acme Corp: Senior Account Manager"
+ *   "Account Executive (Remote) | Lever Jobs"
+ */
+function parseJobTitle(resultTitle: string, company: string): string {
+  let t = resultTitle.trim();
+  const separators = [' | ', ' - ', ' — ', ': '];
+  const compLow    = company.toLowerCase();
 
-  if (boards === 'greenhouse_lever') {
-    boardDesc = 'Greenhouse and Lever ATS job boards';
-    queries = `QUERY 1: site:boards.greenhouse.io "${role0}" ${locStr}
-QUERY 2: site:boards.greenhouse.io "${role1}" remote
-QUERY 3: site:boards.greenhouse.io "${skill0}" "${role0}"
-QUERY 4: site:boards.greenhouse.io "${skill1}" "${role0}"
-QUERY 5: site:jobs.lever.co "${role0}" ${locStr}
-QUERY 6: site:jobs.lever.co "${role1}" remote
-QUERY 7: site:jobs.lever.co "${skill0}" "${role0}"`;
-  } else if (boards === 'ashby_workday') {
-    boardDesc = 'Ashby and Workday ATS job boards';
-    queries = `QUERY 1: site:jobs.ashbyhq.com "${role0}" remote
-QUERY 2: site:jobs.ashbyhq.com "${role1}" remote
-QUERY 3: site:jobs.ashbyhq.com "${skill0}" "${role0}"
-QUERY 4: site:myworkdayjobs.com "${role0}" remote
-QUERY 5: site:myworkdayjobs.com "${role1}" ${locStr}
-QUERY 6: site:myworkdayjobs.com "${skill0}" "${role0}"
-QUERY 7: site:jobs.ashbyhq.com "${skill1}" "${role0}"`;
-  } else {
-    boardDesc = 'LinkedIn Jobs and Indeed';
-    queries = `QUERY 1: site:linkedin.com/jobs/view "${role0}" "${skill0}" remote
-QUERY 2: site:linkedin.com/jobs/view "${role1}" "${skill1}"
-QUERY 3: site:linkedin.com/jobs/view "enterprise ${role0}" SaaS
-QUERY 4: site:linkedin.com/jobs/view "${role0}" "${skill1}" ${locStr}
-QUERY 5: site:indeed.com/viewjob "${role0}" remote "${skill0}"
-QUERY 6: site:indeed.com/viewjob "${role1}" remote "${skill1}"
-QUERY 7: site:linkedin.com/jobs/view "commercial ${role0}" remote`;
+  for (const sep of separators) {
+    const idx = t.indexOf(sep);
+    if (idx === -1) continue;
+    const left  = t.slice(0, idx).trim();
+    const right = t.slice(idx + sep.length).trim();
+    if (right.toLowerCase().includes(compLow) || right.toLowerCase().includes('greenhouse') || right.toLowerCase().includes('lever') || right.toLowerCase().includes('workday')) {
+      t = left;
+      break;
+    }
+    if (left.toLowerCase() === compLow || left.toLowerCase().includes('greenhouse') || left.toLowerCase().includes('lever')) {
+      t = right;
+      break;
+    }
   }
 
-  return `You are a job search assistant with live Google Search access. Run ALL of these exact Google searches on ${boardDesc} and collect every unique job posting URL:
-
-${queries}
-
-${buildCriteriaBlock(criteria)}
-
-Run all 7 queries. Aim for 20+ unique results across them. Apply the requirements above as a filter — only include jobs that match ALL of them.
-${JSON_FORMAT_BLOCK}`;
+  t = t.replace(/[|:]+$/, '').trim();
+  return t.length >= 5 ? t : resultTitle.trim();
 }
 
-/** Watchlist prompt — searches for a specific batch of companies, filtered by criteria */
-function buildWatchlistBatchPrompt(criteria: GeminiDiscoveryCriteria, companies: string[]): string {
-  const role0 = criteria.target_roles[0]?.trim() || 'Account Executive';
-  const role1 = criteria.target_roles[1]?.trim() || 'Account Manager';
-  const companyList = companies.join(', ');
-
-  return `You are a job search assistant with live Google Search access. Search for currently open jobs at THESE SPECIFIC COMPANIES ONLY:
-
-TARGET COMPANIES: ${companyList}
-
-For each company above, run these searches:
-- site:boards.greenhouse.io "[COMPANY]" "${role0}"
-- site:jobs.lever.co "[COMPANY]" "${role0}"
-- site:jobs.ashbyhq.com "[COMPANY]" "${role0}"
-- site:myworkdayjobs.com "[COMPANY]" "${role0}"
-- site:linkedin.com/jobs/view "[COMPANY]" "${role1}"
-- "[COMPANY]" careers "${role0}" remote
-
-${buildCriteriaBlock(criteria)}
-
-CRITICAL RULE: If a company from the list has NO open jobs that match ALL the requirements above, do NOT include any jobs from that company. Only return jobs that are a genuine fit.
-
-Run all searches for all ${companies.length} companies. Aim for as many matching results as possible.
-${JSON_FORMAT_BLOCK}`;
+/** Try to extract a US city/state or the word "Remote" from a job snippet */
+function extractLocationFromSnippet(snippet: string): string {
+  if (!snippet) return '';
+  if (/\bremote\b/i.test(snippet)) return 'Remote';
+  const m = snippet.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*),\s*([A-Z]{2})\b/);
+  return m ? `${m[1]}, ${m[2]}` : '';
 }
+
+/** Convert a single Perplexity Search result into a RawGeminiJobRecord, or null if not a valid job */
+function searchResultToRawJob(result: PlxSearchResult): RawGeminiJobRecord | null {
+  const url = result.url?.trim() ?? '';
+  if (!url || !isJobPostingUrl(url)) return null;
+
+  const company = extractCompanyFromAtsUrl(url);
+  if (!company) return null;
+
+  const title    = parseJobTitle(result.title ?? '', company);
+  if (!title || title.length < 5) return null;
+
+  const location = extractLocationFromSnippet(result.snippet ?? '');
+
+  return {
+    url,
+    apply_url:   url,
+    title,
+    company,
+    location:    location || undefined,
+    description: result.snippet?.slice(0, 800) || undefined,
+  };
+}
+
+// ── Main Quick-Search entry point (Perplexity Search API) ─────────────────────
 
 export async function runPerplexityScoutSearch(
   criteria: GeminiDiscoveryCriteria,
@@ -497,57 +504,123 @@ export async function runPerplexityScoutSearch(
   }
 
   const { mode, companyNames = [] } = opts;
-  let prompts: string[];
+  const role0  = criteria.target_roles[0]?.trim()  || 'Account Executive';
+  const role1  = criteria.target_roles[1]?.trim()  || 'Account Manager';
+  const skill0 = criteria.must_have[0]?.trim()     || 'SaaS';
+  const skill1 = criteria.must_have[1]?.trim()     || 'B2B';
 
-  if (mode === 'open') {
-    prompts = [
-      buildOpenSearchPrompt(criteria, 'greenhouse_lever'),
-      buildOpenSearchPrompt(criteria, 'ashby_workday'),
-      buildOpenSearchPrompt(criteria, 'linkedin_indeed'),
-    ];
-    console.log(`[PerplexityScout] Open Search — 3 parallel calls (Greenhouse/Lever | Ashby/Workday | LinkedIn/Indeed)`);
-  } else {
-    if (companyNames.length === 0) {
-      console.warn('[PerplexityScout] Watchlist mode but no companies — falling back to open search');
-      prompts = [
-        buildOpenSearchPrompt(criteria, 'greenhouse_lever'),
-        buildOpenSearchPrompt(criteria, 'ashby_workday'),
-        buildOpenSearchPrompt(criteria, 'linkedin_indeed'),
-      ];
-    } else {
-      const batchSize = Math.ceil(companyNames.length / Math.min(3, Math.ceil(companyNames.length / 15)));
-      const batches = chunkArray(companyNames, batchSize).slice(0, 3);
-      prompts = batches.map(batch => buildWatchlistBatchPrompt(criteria, batch));
-      console.log(`[PerplexityScout] Watchlist — ${companyNames.length} companies → ${prompts.length} parallel batches`);
-      batches.forEach((b, i) => console.log(`  Batch ${i + 1}: ${b.slice(0, 5).join(', ')}${b.length > 5 ? `... (${b.length} total)` : ''}`));
-    }
+  interface SearchRequest {
+    label: string;
+    query: string | string[];
+    search_domain_filter?: string[];
+    max_results?: number;
   }
 
-  const callResults = await Promise.allSettled(
-    prompts.map(async (prompt, i) => {
-      const resp = await fetch('https://api.perplexity.ai/chat/completions', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${plxKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'sonar-pro',
-          messages: [{ role: 'user', content: prompt }],
-          max_tokens: 16000,
-          temperature: 0.1,
-        }),
+  let searchRequests: SearchRequest[];
+
+  if (mode === 'open' || companyNames.length === 0) {
+    if (mode === 'watchlist' && companyNames.length === 0) {
+      console.warn('[PerplexityScout] Watchlist mode but no companies — falling back to open search');
+    }
+    console.log('[PerplexityScout] Open Search — 3 parallel Search API calls (Greenhouse/Lever | Ashby/Workday | LinkedIn)');
+    searchRequests = [
+      {
+        label: 'Greenhouse + Lever',
+        query: [
+          `"${role0}" remote ${skill0}`,
+          `"${role0}" remote ${skill1}`,
+          `"${role1}" remote ${skill0}`,
+          `enterprise "${role0}" SaaS remote`,
+          `"${role1}" B2B remote enterprise`,
+        ],
+        search_domain_filter: ['boards.greenhouse.io', 'jobs.lever.co'],
+        max_results: 10,
+      },
+      {
+        label: 'Ashby + Workday',
+        query: [
+          `"${role0}" remote ${skill0}`,
+          `"${role0}" enterprise remote`,
+          `"${role1}" remote B2B`,
+          `"${role0}" SaaS remote ${skill1}`,
+          `"${role1}" remote ${skill0} enterprise`,
+        ],
+        search_domain_filter: ['jobs.ashbyhq.com', 'myworkdayjobs.com'],
+        max_results: 10,
+      },
+      {
+        label: 'LinkedIn Jobs',
+        query: [
+          `"${role0}" remote ${skill0} ${skill1}`,
+          `enterprise "${role0}" SaaS remote`,
+          `"${role1}" remote enterprise software`,
+        ],
+        search_domain_filter: ['linkedin.com'],
+        max_results: 10,
+      },
+    ];
+  } else {
+    // Watchlist mode: group companies 3-per-query, 5 queries per request, 3 parallel = 45 max
+    const PER_QUERY   = 3;
+    const PER_REQUEST = 5;
+    const PER_BATCH   = PER_QUERY * PER_REQUEST; // 15
+
+    const batches = chunkArray(companyNames, PER_BATCH).slice(0, 3);
+    console.log(`[PerplexityScout] Watchlist — ${companyNames.length} companies → ${batches.length} parallel Search API calls`);
+    batches.forEach((b, i) => console.log(`  Batch ${i + 1}: ${b.slice(0, 5).join(', ')}${b.length > 5 ? ` ... (${b.length} total)` : ''}`));
+
+    searchRequests = batches.map((batch, i) => {
+      const groups  = chunkArray(batch, PER_QUERY);
+      const queries = groups.slice(0, PER_REQUEST).map((g, qi) => {
+        const names = g.map(c => `"${c}"`).join(' OR ');
+        return qi % 2 === 0
+          ? `(${names}) "${role0}" remote`
+          : `(${names}) "${role1}" remote`;
       });
+      return {
+        label: `Watchlist batch ${i + 1} (${batch.length} companies)`,
+        query: queries.length === 1 ? queries[0] : queries,
+        max_results: 10,
+      } as SearchRequest;
+    });
+  }
+
+  // ── Run all Search API requests in parallel ───────────────────────────────
+  const callResults = await Promise.allSettled(
+    searchRequests.map(async (req, i) => {
+      const body: Record<string, unknown> = {
+        query:       req.query,
+        max_results: req.max_results ?? 10,
+      };
+      if (req.search_domain_filter) body.search_domain_filter = req.search_domain_filter;
+
+      const resp = await fetch('https://api.perplexity.ai/search', {
+        method:  'POST',
+        headers: { Authorization: `Bearer ${plxKey}`, 'Content-Type': 'application/json' },
+        body:    JSON.stringify(body),
+      });
+
       if (!resp.ok) {
-        const body = await resp.text().catch(() => '');
-        throw new Error(`Perplexity HTTP ${resp.status}: ${body.slice(0, 120)}`);
+        const errBody = await resp.text().catch(() => '');
+        throw new Error(`Perplexity Search HTTP ${resp.status}: ${errBody.slice(0, 200)}`);
       }
-      const data = await resp.json() as any;
-      const text: string = data.choices?.[0]?.message?.content ?? '';
-      const rawJobs = parseJobsFromText(text);
-      if (rawJobs.length === 0) {
-        console.warn(`[PerplexityScout] Call ${i + 1}: 0 jobs parsed (${text.length} chars). Preview: "${text.slice(0, 250)}"`);
+
+      const data    = (await resp.json()) as { results?: PlxSearchResult[] };
+      const results = data.results ?? [];
+
+      const jobs: RawGeminiJobRecord[] = [];
+      for (const r of results) {
+        const job = searchResultToRawJob(r);
+        if (job) jobs.push(job);
+      }
+
+      if (results.length > 0 && jobs.length === 0) {
+        console.warn(`[PerplexityScout] Call ${i + 1} (${req.label}): ${results.length} results but 0 matched job-posting URL patterns`);
+        console.warn(`  Sample: ${results.slice(0, 3).map(r => r.url).join(' | ')}`);
       } else {
-        console.log(`[PerplexityScout] Call ${i + 1}: ${rawJobs.length} jobs parsed (${text.length} chars)`);
+        console.log(`[PerplexityScout] Call ${i + 1} (${req.label}): ${results.length} search results → ${jobs.length} job postings`);
       }
-      return rawJobs;
+      return jobs;
     })
   );
 
@@ -559,18 +632,18 @@ export async function runPerplexityScoutSearch(
       allRaw.push(...r.value);
     } else {
       callsFailed++;
-      const msg = r.reason instanceof Error ? r.reason.message.slice(0, 150) : String(r.reason);
+      const msg = r.reason instanceof Error ? r.reason.message.slice(0, 200) : String(r.reason);
       console.error(`[PerplexityScout] Call ${i + 1} failed: ${msg}`);
     }
   }
 
-  const normalized = normalizeGeminiJobs(allRaw, {} as GroundingMetadata, [], [], criteria, 'Perplexity');
-  const validated  = await validateGreenhouseUrls(normalized);
+  const normalized   = normalizeGeminiJobs(allRaw, {} as GroundingMetadata, [], [], criteria, 'Perplexity');
+  const validated    = await validateGreenhouseUrls(normalized);
   const deduplicated = deduplicateGeminiJobs(validated);
 
   console.log(`[PerplexityScout] ${allRaw.length} raw → ${normalized.length} normalized → ${deduplicated.length} after dedup`);
 
-  return { jobs: deduplicated, callsRun: prompts.length, callsFailed };
+  return { jobs: deduplicated, callsRun: searchRequests.length, callsFailed };
 }
 
 // ── Prompt builder ────────────────────────────────────────────────────────────

@@ -1,0 +1,68 @@
+> @workspace/api-server@1.0.0 dev
+> node -e "require('fs').rmSync('dist',{recursive:true,force:true})" && tsx ./srJob Scout Agent listening on port 8080
+URL health check: checking 4 unchecked job URLs…
+URL health check complete: 0 live, 0 broken, 4 skipped
+
+──── JOB RECOVERY ENGINE ────────────────────────────────────
+[Recovery Phase B] 9 aggregator/broken jobs | Perplexity: primary | Gemini: fallback
+
+════════════════════════════════════════════════════════════
+SCOUT RUN #66 — 101 companies loaded from database
+════════════════════════════════════════════════════════════
+  Companies by ATS type: { plain: 62, workday: 28, greenhouse: 10, lever: 1 }
+[Scout] Mode: Open Search [Quick Search — Perplexity only]
+[PerplexityScout] Open Search — 3 parallel calls (Greenhouse/Lever | Ashby/Workday | LinkedIn/Indeed)
+[PerplexityScout] Call 3: 0 jobs parsed (22 chars). Preview: "JOBS_START
+[]
+JOBS_END"
+[Gemini] Could not parse structured job data. Response preview: I appreciate your detailed request, but I need to clarify what I can and cannot do.
+
+I **cannot** execute this task because:
+
+1. **No live search access**: I don't have the ability to run live Google searches or access real-time job board data. The search results provided to me are static and don't contain the specific job postings you're requesting.
+
+2. **Cannot browse job boards directly**: I ca
+[PerplexityScout] Call 1: 0 jobs parsed (1438 chars). Preview: "I appreciate your detailed request, but I need to clarify what I can and cannot do.
+
+I **cannot** execute this task because:
+
+1. **No live search access**: I don't have the ability to run live Google searches or access real-time job board data. The s"
+[Gemini] Could not parse structured job data. Response preview: I appreciate your detailed request, but I need to clarify what I can and cannot do based on my capabilities and the search results provided.
+
+**I cannot execute this task as requested** for the following reasons:
+
+1. **No live search access**: I don't have the ability to run live Google searches or access real-time job board data. I can only work with the search results that have been provided to 
+[PerplexityScout] Call 2: 0 jobs parsed (1829 chars). Preview: "I appreciate your detailed request, but I need to clarify what I can and cannot do based on my capabilities and the search results provided.
+
+**I cannot execute this task as requested** for the following reasons:
+
+1. **No live search access**: I don'"
+[PerplexityScout] 0 raw → 0 normalized → 0 after dedup
+[PerplexityScout] 3 calls run, 0 failed, 0 unique jobs found
+
+──── SCRAPE RESULTS ────────────────────────────────────────
+Total scraped: 0 raw listings from 0 companies
+  Companies WITH jobs (0):
+  Companies with ZERO jobs (0):
+───────────────────────────────────────────────────────────
+
+──── TITLE FILTER ──────────────────────────────────────────
+Title filter regex: (Account\s+Executive|\bAE\b|Account\s+Manager|\bAM\b)...
+Title filter: 0 total → 0 passed (0 dropped)
+  Passed title filter by company:
+───────────────────────────────────────────────────────────
+
+──── PRE-FILTERS (before Claude scoring) ───────────────────
+  After title filter: 0
+  Dropped by location: 0
+  Dropped by avoid keywords: 0
+  Dropped by salary below $120,000: 0
+  Dropped by territory mismatch: 0
+  Dropped by known comp below minimum: 0
+  Remaining for Claude scoring: 0
+───────────────────────────────────────────────────────────
+
+──── NEW JOB FILTER ─────────────────────────────────────────
+  Already in DB (skipped): 0
+  Genuinely new → Claude:  0
+───────────────────────────────────────────────────────────
