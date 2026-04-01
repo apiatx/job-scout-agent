@@ -140,52 +140,39 @@ SCORING GUIDE:
 8-12: Cautious — some negative signals (slowing growth, leadership turnover)
 0-7:  Red flag — layoffs, legal/regulatory problems, financial distress`;
 
+  const CANDIDATE_MODELS = ['gemini-3-flash-preview', 'gemini-flash-latest', 'gemini-pro-latest'];
+
   let result: MomentumScore | null = null;
 
-  // ── Perplexity primary (real-time web search + answer) ────────────────
-  try {
-    const { perplexitySearch } = await import('./perplexity.js');
-    const plxText = await perplexitySearch(prompt, { maxTokens: 512, temperature: 0.1 });
-    const cleaned = plxText.trim().replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
-    const parsed = JSON.parse(cleaned) as { score?: number; signals?: string[]; warning?: string | null };
-    result = {
-      companyName,
-      score:   Math.min(25, Math.max(0, Math.round(parsed.score ?? (isPreApproved ? 16 : 10)))),
-      signals: Array.isArray(parsed.signals) ? parsed.signals.slice(0, 3) : [],
-      warning: parsed.warning ?? null,
-      cached:  false,
-    };
-    console.log(`  [Momentum] ${companyName}: ${result.score}/25 via perplexity${result.warning ? ' ⚠ ' + result.warning : ''}`);
-  } catch (plxErr) {
-    console.warn(`  [Momentum] Perplexity failed for ${companyName}, trying Gemini:`, plxErr instanceof Error ? plxErr.message.slice(0, 80) : plxErr);
-  }
+  for (const modelName of CANDIDATE_MODELS) {
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: prompt,
+        config: { tools: [{ googleSearch: {} }] },
+      });
 
-  // ── Gemini fallback waterfall ─────────────────────────────────────────
-  if (!result) {
-    const CANDIDATE_MODELS = ['gemini-3-flash-preview', 'gemini-flash-latest', 'gemini-pro-latest'];
-    for (const modelName of CANDIDATE_MODELS) {
-      try {
-        const ai = new GoogleGenAI({ apiKey });
-        const response = await ai.models.generateContent({
-          model: modelName,
-          contents: prompt,
-          config: { tools: [{ googleSearch: {} }] },
-        });
-        const text = (response.text ?? '').trim().replace(/```json|```/g, '').trim();
-        if (!text) continue;
-        const parsed = JSON.parse(text) as { score?: number; signals?: string[]; warning?: string | null };
-        result = {
-          companyName,
-          score:   Math.min(25, Math.max(0, Math.round(parsed.score ?? (isPreApproved ? 16 : 10)))),
-          signals: Array.isArray(parsed.signals) ? parsed.signals.slice(0, 3) : [],
-          warning: parsed.warning ?? null,
-          cached:  false,
-        };
-        console.log(`  [Momentum] ${companyName}: ${result.score}/25 via ${modelName}${result.warning ? ' ⚠ ' + result.warning : ''}`);
-        break;
-      } catch {
-        // Try next model
-      }
+      const text = (response.text ?? '').trim().replace(/```json|```/g, '').trim();
+      if (!text) continue;
+
+      const parsed = JSON.parse(text) as {
+        score?: number;
+        signals?: string[];
+        warning?: string | null;
+      };
+
+      result = {
+        companyName,
+        score:   Math.min(25, Math.max(0, Math.round(parsed.score ?? (isPreApproved ? 16 : 10)))),
+        signals: Array.isArray(parsed.signals) ? parsed.signals.slice(0, 3) : [],
+        warning: parsed.warning ?? null,
+        cached:  false,
+      };
+      console.log(`  [Momentum] ${companyName}: ${result.score}/25 via ${modelName}${result.warning ? ' ⚠ ' + result.warning : ''}`);
+      break;
+    } catch {
+      // Try next model
     }
   }
 

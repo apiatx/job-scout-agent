@@ -168,25 +168,6 @@ export async function generatePreIpo(criteria: PreIpoCriteria): Promise<PreIpoRe
   const prompt = buildPreIpoPrompt(criteria);
   const chain = buildCandidateChain();
 
-  // ── Perplexity primary ────────────────────────────────────────────────
-  try {
-    const { perplexitySearch } = await import('./perplexity.js');
-    console.log('[PreIPO] Trying Perplexity sonar-pro');
-    const plxText = await perplexitySearch(prompt, { maxTokens: 4096 });
-    const start = plxText.indexOf('PREIPO_START');
-    const end   = plxText.indexOf('PREIPO_END');
-    if (start !== -1 && end !== -1) {
-      const jsonStr = plxText.slice(start + 'PREIPO_START'.length, end).trim();
-      const parsed: PreIpoResult = JSON.parse(jsonStr);
-      console.log(`[PreIPO] Perplexity returned ${parsed.companies?.length ?? 0} companies`);
-      return parsed;
-    }
-    throw new Error('Markers not found in Perplexity response');
-  } catch (plxErr) {
-    console.warn('[PreIPO] Perplexity failed, trying Gemini:', plxErr instanceof Error ? plxErr.message.slice(0, 80) : plxErr);
-  }
-
-  // ── Gemini fallback ────────────────────────────────────────────────────
   let lastErr: unknown;
   for (const candidate of chain) {
     try {

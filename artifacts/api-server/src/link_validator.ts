@@ -715,44 +715,6 @@ Prioritize in this order:
 
 Return ONLY the single best URL you find, nothing else. If not found, return: NOT_FOUND`;
 
-  // ── Perplexity primary ────────────────────────────────────────────────
-  try {
-    const plxKey = process.env.PERPLEXITY_API_KEY?.trim();
-    if (plxKey) {
-      const plxResp = await fetch('https://api.perplexity.ai/chat/completions', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${plxKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'sonar-pro', messages: [{ role: 'user', content: prompt }], max_tokens: 256, temperature: 0 }),
-      });
-      if (plxResp.ok) {
-        const plxData = await plxResp.json() as any;
-        const plxText = (plxData.choices?.[0]?.message?.content ?? '').trim();
-        if (plxText && !plxText.includes('NOT_FOUND')) {
-          const urlMatch = plxText.match(/https?:\/\/[^\s\n"'<>()\],;]+/);
-          if (urlMatch) {
-            const candidateUrl = urlMatch[0].replace(/[.,;!?)]+$/, '');
-            const candidateTrust = classifySourceTrust(candidateUrl);
-            if (candidateTrust !== 'aggregator') {
-              try {
-                const ctrl = new AbortController();
-                const timer = setTimeout(() => ctrl.abort(), 7000);
-                const headRes = await fetch(candidateUrl, { method: 'HEAD', redirect: 'follow', signal: ctrl.signal, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobScout/1.0)' } });
-                clearTimeout(timer);
-                if (headRes.status < 400) {
-                  const lbl = candidateTrust === 'ats_direct' ? 'perplexity_resolved_ats' : candidateTrust === 'company_career' ? 'perplexity_resolved_company' : 'perplexity_resolved';
-                  return { url: candidateUrl, source: lbl };
-                }
-              } catch { /* fall through to Gemini */ }
-            }
-          }
-        }
-      }
-    }
-  } catch (plxErr) {
-    console.warn(`[Recovery] Perplexity URL search failed: ${plxErr instanceof Error ? plxErr.message.slice(0, 80) : plxErr}`);
-  }
-
-  // ── Gemini fallback ────────────────────────────────────────────────────
   for (const q of queries) {
     try {
       const response = await ai.models.generateContent({
@@ -1075,9 +1037,8 @@ export async function runCanonicalResolutionInBackground(
       console.log(`[Recovery Phase A] Done: ${aOk} validated, ${aFail} failed`);
     }
 
-    // ── PHASE B: Perplexity (primary) + Gemini (fallback) URL resolver ────────
+    // ── PHASE B: Gemini URL resolver for aggregator + broken links (sequential) ─
     const hasGemini = !!process.env.GEMINI_API_KEY?.trim();
-    const hasPerplexity = !!process.env.PERPLEXITY_API_KEY?.trim();
     const { rows: geminiJobs } = await pool.query(`
       SELECT j.id, j.title, j.company, j.location, j.apply_url, j.description,
              j.match_score, j.url_ok, j.canonical_url, j.canonical_source,
@@ -1105,7 +1066,7 @@ export async function runCanonicalResolutionInBackground(
       return;
     }
 
-    console.log(`[Recovery Phase B] ${geminiJobs.length} aggregator/broken jobs | Perplexity: ${hasPerplexity ? 'primary' : 'off'} | Gemini: ${hasGemini ? 'fallback' : 'off'}`);
+    console.log(`[Recovery Phase B] ${geminiJobs.length} aggregator/broken jobs | Gemini: ${hasGemini ? 'enabled' : 'disabled'}`);
     let bUpgraded = 0, bDescFetched = 0, bFailed = 0;
 
     for (const job of geminiJobs) {
@@ -1114,7 +1075,7 @@ export async function runCanonicalResolutionInBackground(
         let canonicalSource: string = job.canonical_source ?? 'original';
         let usedGemini = false;
 
-        if (hasPerplexity || hasGemini) {
+        if (hasGemini) {
           const resolved = await resolveJobUrlWithGemini(
             job.title, job.company, job.location ?? '', canonicalUrl,
           );

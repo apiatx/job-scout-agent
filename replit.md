@@ -13,9 +13,8 @@ The user prefers detailed explanations for AI-generated insights, particularly f
 The Job Scout Agent is built on a Node.js 24 runtime using `pnpm` for package management in a monorepo structure. The backend is an Express 5 server integrated with a PostgreSQL database.
 
 **AI Integration:**
-- **Anthropic Claude**: Used for job scoring (`claude-haiku-4-5`), resume tailoring, cover letters, and outreach (`claude-opus-4-6`). NOT used for any web search functions.
-- **Perplexity (sonar-pro)**: Primary engine for ALL real-time web search functions — hiring manager identification, job discovery, company momentum scoring, career intel, deep value, pre-IPO research, job market pulse, industry news analysis, and URL resolution.
-- **Gemini with Google Search**: Fallback for all Perplexity-powered search functions. If Perplexity fails, Gemini's waterfall (gemini-3-flash-preview → gemini-flash-latest → gemini-pro-latest) is tried.
+- **Anthropic Claude**: Used for job scoring, research, salary estimation (`claude-haiku-4-5`), and resume tailoring (`claude-sonnet-4-5`).
+- **Gemini with Google Search**: Augments job discovery and resolves canonical URLs for aggregated and broken job links.
 
 **Frontend:**
 - A single-file, server-rendered HTML template embedded directly within `index.ts`, avoiding separate frontend build processes.

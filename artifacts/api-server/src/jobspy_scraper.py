@@ -64,7 +64,7 @@ def _proxy_status() -> str:
 # ── Scraping config ───────────────────────────────────────────────────────────
 
 RESULTS_INDEED       = 50   # Indeed: permissive, handles 50 reliably
-RESULTS_LINKEDIN     = 100  # LinkedIn: 100 per term — Perplexity also searches LinkedIn in parallel
+RESULTS_LINKEDIN     = 50   # LinkedIn: 50 per term — rate limits handled by MAX_WORKERS_LINKEDIN=3
 RESULTS_GLASSDOOR    = 25   # Glassdoor: proxy needed in cloud environments
 RESULTS_ZIPRECRUITER = 25   # ZipRecruiter: Cloudflare-blocked without proxy
 

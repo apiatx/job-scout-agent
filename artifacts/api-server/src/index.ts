@@ -7,7 +7,7 @@ import mammoth from 'mammoth';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, UnderlineType } from 'docx';
 import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, runJobSpyScraper, proxyConfigured } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
-import { runGeminiJobDiscovery, runPerplexityScoutSearch, deduplicateJobLists, isDirectCompanyUrl, normalizeUrl as normalizeJobUrl } from './gemini_discovery.js';
+import { runGeminiJobDiscovery, deduplicateJobLists, isDirectCompanyUrl, normalizeUrl as normalizeJobUrl } from './gemini_discovery.js';
 import { runCanonicalResolutionInBackground, computeLinkConfidence, classifySourceTrust, enrichJobsPreScoring } from './link_validator.js';
 import { generateCareerIntel } from './career_intel.js';
 import type { CareerIntelCriteria } from './career_intel.js';
@@ -30,7 +30,6 @@ import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude,
 import type { MomentumScore } from './agent.js';
 import type { SubScores, OpportunityTier, TierSettings, TailoringAnalysis } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
-import { classifyJob, getFilterDecision, mapUserIndustriesToCategories, hasPreferredIndustrySignal, type JobClassification } from './company_classifier.js';
 // RepVue: link-out only (no scraping — RepVue blocks automated requests)
 
 const { Pool } = pg;
@@ -109,55 +108,6 @@ const US_STATE_ABBREVS = /\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|
 
 // International 2-letter country codes that must be treated as territory (not fully-remote)
 const INTL_COUNTRY_CODES = /\b(uk|gb|eu|de|fr|es|it|au|nz|sg|hk|jp|kr|cn|nl|be|ch|se|no|dk|ie|pt|pl|cz|at|gr|ro|hu|fi|sk|bg|hr|si|lt|lv|ee|cy|lu|mt)\b/i;
-
-// ── International location detection ─────────────────────────────────────────
-// Used for hard-dropping explicitly out-of-country jobs regardless of "Remote" label.
-
-const INTL_CITY_PATTERN = /\b(barcelona|madrid|london|berlin|paris|amsterdam|munich|zurich|geneva|stockholm|oslo|copenhagen|helsinki|dublin|brussels|rome|milan|vienna|warsaw|prague|budapest|lisbon|athens|bucharest|sofia|zagreb|vilnius|riga|tallinn|nicosia|luxembourg|valletta|tokyo|beijing|shanghai|singapore|sydney|melbourne|auckland|toronto|montreal|vancouver|calgary|dubai|abu\s+dhabi|tel\s+aviv|cape\s+town|johannesburg|nairobi|bogota|lima|santiago|buenos\s+aires|mexico\s+city|guadalajara|mumbai|delhi|bangalore|bengaluru|hyderabad|seoul|hong\s+kong|taipei|jakarta|bangkok|kuala\s+lumpur|manila|ho\s+chi\s+minh|lagos)\b/i;
-
-const INTL_REGION_PATTERN = /\b(emea|apac|latam|mena|europe(?:an)?\s*(region|team|hub)?|asia[\s-]pacific|united\s+kingdom(?:\s+and\s+ireland)?|middle\s+east|sub[\s-]saharan\s+africa|canada(?:ian)?|australia(?:n)?|germany|german\s+market|france|french\s+market|spain|italy|netherlands|sweden|norway|denmark|finland|switzerland|austria|poland|ireland|portugal|belgium|israel)\b/i;
-
-/**
- * Extracts a city/country name embedded in the job title in parentheses.
- * e.g., "Mid-Market AE (Barcelona)" → "Barcelona"
- * Returns null for non-location parentheticals like "(Mid-Market)" or "(SLED)".
- */
-function extractTitleEmbeddedCity(title: string): string | null {
-  const m = title.match(/\(([^)]{2,40})\)/g);
-  if (!m) return null;
-  for (const match of m) {
-    const inner = match.slice(1, -1).trim();
-    // Skip obvious non-location parentheticals
-    if (/^(mid[\s-]?market|commercial|enterprise|smb|strategic|global|sled|public\s+sector|healthcare|federal|fintech|saas|startup|series\s+[a-e]|seed|stealth|\d+)$/i.test(inner)) continue;
-    // If it looks like a location: contains a known intl city, region, or country code
-    if (INTL_CITY_PATTERN.test(inner) || INTL_REGION_PATTERN.test(inner) || INTL_COUNTRY_CODES.test(inner)) return inner;
-    // Multi-word that isn't a sales segment — could be a city
-    if (/^[A-Z][a-z]+(?:[\s,]+[A-Za-z]+)*$/.test(inner) && inner.split(/\s+/).length <= 4) {
-      // Only return if it actually matches a known intl signal pattern
-      if (INTL_CITY_PATTERN.test(inner) || INTL_REGION_PATTERN.test(inner)) return inner;
-    }
-  }
-  return null;
-}
-
-/**
- * Detects if a job has an explicit international location that mismatches a US-only user.
- * Checks both the location field AND the job title (for embedded cities like "(Barcelona)").
- */
-function detectInternationalMismatch(title: string, jobLocation: string): { mismatch: boolean; reason: string } {
-  // Check explicit international city in location field (non-remote)
-  if (jobLocation && !/^(remote|unknown|n\/a|tbd|)$/i.test(jobLocation.trim())) {
-    if (INTL_CITY_PATTERN.test(jobLocation)) return { mismatch: true, reason: `intl_city_in_location:${jobLocation}` };
-    if (INTL_REGION_PATTERN.test(jobLocation)) return { mismatch: true, reason: `intl_region_in_location:${jobLocation}` };
-    if (INTL_COUNTRY_CODES.test(jobLocation) && !/\b(us|usa|united states)\b/i.test(jobLocation)) return { mismatch: true, reason: `intl_country_code_in_location:${jobLocation}` };
-  }
-  // Check for international city embedded in the title — e.g., "(Barcelona)"
-  const titleCity = extractTitleEmbeddedCity(title);
-  if (titleCity) return { mismatch: true, reason: `intl_city_in_title:${titleCity}` };
-  // Check for EMEA/APAC/LATAM in the title itself (not just in location)
-  if (INTL_REGION_PATTERN.test(title)) return { mismatch: true, reason: `intl_region_in_title:${title.match(INTL_REGION_PATTERN)?.[0] ?? ''}` };
-  return { mismatch: false, reason: '' };
-}
 
 // Single directional words that are too vague for location pattern matching
 // (User has "South"/"South East" to describe *themselves*, not as a job location keyword)
@@ -2199,28 +2149,6 @@ app.delete('/api/jobs/:id/save', async (req: Request, res: Response) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-app.delete('/api/jobs/bulk', async (req: Request, res: Response) => {
-  try {
-    const { tier } = req.body as { tier: string };
-    const validTiers = ['Top Target', 'Fast Win', 'Stretch Role', 'Probably Skip'];
-    if (!tier || !validTiers.includes(tier)) { res.status(400).json({ error: 'Invalid tier' }); return; }
-    const { rows } = await pool.query(
-      `DELETE FROM jobs WHERE opportunity_tier = $1 AND saved_at IS NULL RETURNING id`, [tier]
-    );
-    console.log(`[Delete] Bulk deleted ${rows.length} jobs from tier: ${tier}`);
-    res.json({ ok: true, deleted: rows.length });
-  } catch (e) { res.status(500).json({ error: String(e) }); }
-});
-
-app.delete('/api/jobs/:id', async (req: Request, res: Response) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
-    await pool.query('DELETE FROM jobs WHERE id = $1', [id]);
-    res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: String(e) }); }
-});
-
 // ── User action tracking (applied, interested, skipped, etc.) ─────────────
 app.put('/api/jobs/:id/action', async (req: Request, res: Response) => {
   try {
@@ -2574,62 +2502,32 @@ Rules: AE reports to Director/VP; Director reports to VP/SVP; Manager reports to
       }
     }
 
-    // ── Step 2.7: Perplexity direct identification (primary) ─────────────
-    let hmData: Record<string, any> = { full_name: null, title: null, linkedin_url: null, confidence: 'none', reasoning: 'No search results available', alternative: null };
-    let perplexitySuccess = false;
+    // ── Step 2.7: Gemini web search (fires when CSE/Apollo are unavailable) ─
     let geminiWebSearchText = '';
     const geminiHMKey = process.env.GEMINI_API_KEY?.trim();
-
-    const kwArr = Array.isArray(analysis.manager_seniority_keywords) && analysis.manager_seniority_keywords.length > 0
-      ? analysis.manager_seniority_keywords.slice(0, 4)
-      : ['VP Sales', 'Director of Sales', 'Regional Sales Director', 'Head of Sales'];
-    const regionStr = analysis.region ? ` ${analysis.region}` : (location ? ` ${location}` : '');
-    const managerTitle = analysis.manager_likely_title || 'VP Sales or Director of Sales';
-
-    if (!usedCache) {
-      try {
-        const { perplexitySearch } = await import('./perplexity.js');
-        const plxPrompt = `I need to find the hiring manager for a "${roleTitle}" position at ${companyName}${regionStr ? ' covering the ' + regionStr + ' region/territory' : ''}.
-
-The hiring manager is the person this role REPORTS TO — one level above the open role. They most likely have a title like: ${kwArr.join(', ')}.
-
-Search for:
-1. Who currently holds the ${managerTitle} role at ${companyName}${regionStr ? ' in the ' + regionStr + ' region' : ''}?
-2. Any ${kwArr.slice(0, 2).join(' or ')} currently at ${companyName}
-3. ${companyName} sales leadership team members
-
-For every person you find, provide their FULL NAME, exact current TITLE, and LinkedIn URL.
-
-Return ONLY this JSON (no markdown, no other text):
-{"full_name":"First Last","title":"Their exact title","linkedin_url":"URL or null","confidence":"high/medium/low","reasoning":"one sentence — what source confirmed this","alternative":{"full_name":"Second candidate or null","title":"title or null","linkedin_url":"URL or null"}}`;
-
-        const plxText = await perplexitySearch(plxPrompt, {
-          systemPrompt: 'You identify specific people at companies using real-time web search. Always return a real person\'s name when findable. Return only valid JSON, no markdown.',
-          maxTokens: 1024,
-        });
-
-        const jsonMatch = plxText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
-          if (parsed.full_name && String(parsed.full_name).toLowerCase() !== 'null') {
-            hmData = parsed;
-            enrichmentSource = 'perplexity';
-            perplexitySuccess = true;
-            console.log(`[HiringManager] Perplexity identified: ${hmData.full_name} [${hmData.confidence}]`);
-          }
-        }
-      } catch (plxErr) {
-        console.warn('[HiringManager] Perplexity failed, falling back to Gemini:', plxErr instanceof Error ? plxErr.message.slice(0, 100) : plxErr);
-      }
-    }
-
-    // ── Step 2.8: Gemini web search fallback (only if Perplexity failed) ──
-    if (!usedCache && !perplexitySuccess && geminiHMKey) {
+    if (!usedCache && geminiHMKey) {
       try {
         const { GoogleGenAI } = await import('@google/genai');
         const hmGenAI = new GoogleGenAI({ apiKey: geminiHMKey });
-        const prompt1 = `Find the hiring manager for a ${roleTitle} position at ${companyName}. Who is the current ${managerTitle} at ${companyName}${regionStr ? ' covering the ' + regionStr + ' territory' : ''}? Search LinkedIn profiles at ${companyName} for people with titles: ${kwArr.join(', ')}. Give FULL NAME, TITLE, and LinkedIn URL for every person you find.`;
-        const prompt2 = `Search for ${companyName} sales leadership team. Find people at ${companyName} with titles: ${kwArr.join(', ')}${regionStr ? ' in ' + regionStr : ''}. Also check ${companyName}'s website leadership page and recent press releases naming their sales executives. List each person's full name, title, and LinkedIn URL.`;
+        const kwArr = Array.isArray(analysis.manager_seniority_keywords) && analysis.manager_seniority_keywords.length > 0
+          ? analysis.manager_seniority_keywords.slice(0, 4)
+          : ['VP Sales', 'Director of Sales', 'Regional Sales Director', 'Head of Sales'];
+        const regionStr = analysis.region ? ` ${analysis.region}` : (location ? ` ${location}` : '');
+        const managerTitle = analysis.manager_likely_title || 'VP Sales or Director of Sales';
+
+        // Two targeted prompts run in parallel for more coverage
+        const prompt1 = `Find the hiring manager for a ${roleTitle} position at ${companyName}. ` +
+          `Specifically search for: who is the current ${managerTitle} at ${companyName}${regionStr ? ' covering the' + regionStr + ' territory' : ''}? ` +
+          `Search LinkedIn profiles at ${companyName} for people with titles like: ${kwArr.join(', ')}. ` +
+          `For EVERY person you find at ${companyName} in a sales leadership role, give me their FULL NAME, exact current TITLE, and LinkedIn profile URL. ` +
+          `Be specific — I need real names of real people currently at ${companyName}.`;
+
+        const prompt2 = `Search for ${companyName} sales leadership team. ` +
+          `Find people at ${companyName} with the following titles: ${kwArr.join(', ')}${regionStr ? ' in ' + regionStr : ''}. ` +
+          `Also search: "${companyName} ${kwArr[0]} LinkedIn" and "${companyName} ${kwArr[1] || 'Director of Sales'} site:linkedin.com". ` +
+          `List each person's full name, title, and LinkedIn URL. ` +
+          `Also check ${companyName}'s website leadership/team page and any recent press releases that name their sales executives.`;
+
         const hmModels = ['gemini-3-flash-preview', 'gemini-flash-latest', 'gemini-pro-latest'];
         for (const hmModel of hmModels) {
           try {
@@ -2637,11 +2535,13 @@ Return ONLY this JSON (no markdown, no other text):
               hmGenAI.models.generateContent({ model: hmModel, contents: prompt1, config: { tools: [{ googleSearch: {} }] } }),
               hmGenAI.models.generateContent({ model: hmModel, contents: prompt2, config: { tools: [{ googleSearch: {} }] } }),
             ]);
-            const texts = ([r1, r2] as any[]).filter(r => r.status === 'fulfilled' && r.value?.text).map((r, i) => `SEARCH ${i + 1}:\n${r.value.text}`);
+            const texts = ([r1, r2] as any[])
+              .filter(r => r.status === 'fulfilled' && r.value?.text)
+              .map((r, i) => `SEARCH ${i + 1}:\n${r.value.text}`);
             if (texts.length > 0) {
               geminiWebSearchText = texts.join('\n\n---\n\n');
               enrichmentSource = 'gemini';
-              console.log(`[HiringManager] Gemini fallback search (${hmModel}): ${geminiWebSearchText.length} chars`);
+              console.log(`[HiringManager] Gemini web search (${hmModel}): ${geminiWebSearchText.length} chars from ${texts.length}/2 queries`);
             }
             break;
           } catch (hmModelErr: any) {
@@ -2656,56 +2556,114 @@ Return ONLY this JSON (no markdown, no other text):
       }
     }
 
-    // Build flattened results (used by Claude fallback below)
+    // Build flattened results text for Claude
     let flattenedResults = '';
     if (usedCache) {
       flattenedResults = cachedResultsText;
     } else {
-      const cseText = allResults.length ? allResults.map((r, i) => `Result ${i + 1}:\nTitle: ${r.title}\nSnippet: ${r.snippet}\nURL: ${r.link}`).join('\n\n') : '';
-      const apolloText = apolloResults.length > 0 ? 'APOLLO:\n' + apolloResults.map((p: any) => `${p.first_name || ''} ${p.last_name || ''} - ${p.title || ''} at ${companyName}`).join('\n') : '';
-      const parts = [cseText, apolloText, geminiWebSearchText ? 'WEB SEARCH:\n' + geminiWebSearchText : ''].filter(Boolean);
+      const cseText = allResults.length
+        ? allResults.map((r, i) => `Result ${i + 1}:\nTitle: ${r.title}\nSnippet: ${r.snippet}\nURL: ${r.link}`).join('\n\n')
+        : '';
+      const apolloText = apolloResults.length > 0
+        ? 'APOLLO PEOPLE SEARCH RESULTS:\n' + apolloResults.map((p: any) =>
+          `Apollo Result: ${p.first_name || ''} ${p.last_name || ''} - ${p.title || ''} at ${p.organization?.name || companyName}. Location: ${p.city || ''} ${p.state || ''}. LinkedIn: ${p.linkedin_url || 'N/A'}`
+        ).join('\n')
+        : '';
+      const parts = [cseText, apolloText, geminiWebSearchText ? 'WEB SEARCH RESULTS (via Gemini):\n' + geminiWebSearchText : ''].filter(Boolean);
       flattenedResults = parts.length > 0 ? parts.join('\n\n---\n\n') : 'No search results available.';
     }
 
-    // ── Step 3: Claude Haiku fallback identification (only if Perplexity failed) ──
+    // ── Step 3: Claude identifies the hiring manager ─────────────────────
+    let hmData: Record<string, any> = { full_name: null, title: null, linkedin_url: null, confidence: 'none', reasoning: 'No search results available', alternative: null };
+
+    const step3System = `You are a hiring manager identification engine. ALWAYS return the most likely hiring manager — never return a null name unless the company is completely fictional.
+
+Priority:
+1. SEARCH RESULTS (high confidence): Extract real names/titles/LinkedIn URLs from provided search results.
+2. TRAINING KNOWLEDGE (medium confidence): You know thousands of companies' leadership teams. Use it.
+3. REASONED INFERENCE (low confidence): Infer from role type, company, region. Give a specific plausible person.
+
+Rules:
+- Hiring manager = person this role REPORTS TO (one level above)
+- Ignore recruiters, HR, talent acquisition
+- Ignore peers (same title as the open role)
+- Look for VP/Director/RVP/Area VP in the same department + region
+- ALWAYS return a real name. null only if company is completely unknown/fictional.
+
+Return ONLY valid JSON:
+{"full_name":"First Last","title":"Their title","linkedin_url":"URL or null","confidence":"high/medium/low","reasoning":"one sentence","alternative":{"full_name":"Second choice or null","title":"title or null","linkedin_url":"URL or null"}}
+
+Confidence: high=confirmed in search results, medium=from training knowledge, low=reasoned inference.
+Never fabricate a LinkedIn URL — only include one found in search results or certain from training.`;
+
+    const step3User = `OPEN ROLE:
+Company: ${companyName}
+Role: ${roleTitle}
+Department: ${analysis.department || 'Sales'}
+Seniority: ${analysis.role_seniority || 'AE'}
+Expected Manager Title: ${analysis.manager_likely_title || 'Director of Sales'}
+Region: ${analysis.region || location || 'Not specified'}
+Vertical: ${analysis.vertical || 'Not specified'}
+People named in JD: ${(analysis.named_people || []).join(', ') || 'None'}
+
+SEARCH RESULTS:
+${flattenedResults}`;
+
+    // Try claude-haiku-4-5 first (faster, less likely to be overloaded)
     let claudeStep3Success = false;
-    if (!perplexitySuccess) {
-      const step3System = `You are a hiring manager identification engine. ALWAYS return the most likely hiring manager — never return null unless the company is completely fictional.
-Priority: 1) Search results provided 2) Your training knowledge of this company 3) Reasoned inference from role/company/region.
-Rules: hiring manager = one level ABOVE the open role, same dept/region. Ignore recruiters/HR. ALWAYS return a real name.
-Return ONLY valid JSON: {"full_name":"First Last","title":"Their title","linkedin_url":"URL or null","confidence":"high/medium/low","reasoning":"one sentence","alternative":{"full_name":"Second or null","title":"title or null","linkedin_url":"URL or null"}}
-Never fabricate a LinkedIn URL.`;
-      const step3User = `Company: ${companyName}\nRole: ${roleTitle}\nDept: ${analysis.department || 'Sales'}\nSeniority: ${analysis.role_seniority || 'AE'}\nExpected Manager Title: ${analysis.manager_likely_title || 'Director of Sales'}\nRegion: ${analysis.region || location || 'Not specified'}\nVertical: ${analysis.vertical || 'Not specified'}\n\nSEARCH RESULTS:\n${flattenedResults}`;
+    for (const claudeModel of ['claude-haiku-4-5', 'claude-opus-4-5']) {
       try {
-        const step3 = await hmClaude.messages.create({ model: 'claude-haiku-4-5', max_tokens: 512, system: step3System, messages: [{ role: 'user', content: step3User }] });
-        const raw3 = step3.content.filter(b => b.type === 'text').map(b => (b as any).text).join('').trim().replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
-        hmData = JSON.parse(raw3);
+        const step3 = await hmClaude.messages.create({
+          model: claudeModel,
+          max_tokens: 512,
+          system: step3System,
+          messages: [{ role: 'user', content: step3User }],
+        });
+        const rawText3 = step3.content.filter(b => b.type === 'text').map(b => (b as any).text).join('').trim();
+        const cleaned3 = rawText3.replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
+        hmData = JSON.parse(cleaned3);
         claudeStep3Success = true;
-        console.log(`[HiringManager] Claude Haiku identified: ${hmData.full_name || 'null'} [${hmData.confidence}]`);
+        console.log(`[HiringManager] Step 3 Claude (${claudeModel}) identified: ${hmData.full_name || 'null'} [${hmData.confidence}]`);
+        break;
       } catch (e: any) {
-        console.warn('[HiringManager] Claude Haiku fallback failed:', e instanceof Error ? e.message.slice(0, 100) : e);
+        const msg = e instanceof Error ? e.message : String(e);
+        const isOverload = msg.includes('529') || msg.includes('overload') || msg.includes('529');
+        console.warn(`[HiringManager] Step 3 Claude (${claudeModel}) failed: ${msg.slice(0, 100)}`);
+        if (!isOverload) break; // non-overload error — don't retry different model
       }
     }
 
-    // ── Step 3.5: Gemini fallback identification (last resort) ──────────
-    if (!perplexitySuccess && !claudeStep3Success && geminiHMKey && geminiWebSearchText) {
+    // ── Step 3.5: Gemini fallback identification when Claude is down ──────
+    if (!claudeStep3Success && geminiHMKey && geminiWebSearchText) {
       try {
         const { GoogleGenAI } = await import('@google/genai');
-        const fbGenAI = new GoogleGenAI({ apiKey: geminiHMKey });
-        const fbPrompt = `Based on these web search results, identify the most likely hiring manager for a ${roleTitle} at ${companyName}${analysis.region ? ' in ' + analysis.region : ''}. The hiring manager is one level ABOVE the open role — typically a ${managerTitle}.\n\nSearch results:\n${geminiWebSearchText.slice(0, 6000)}\n\nReturn ONLY this JSON:\n{"full_name":"First Last or null","title":"title or null","linkedin_url":"URL or null","confidence":"high/medium/low","reasoning":"one sentence"}`;
-        const fbResp = await fbGenAI.models.generateContent({ model: 'gemini-3-flash-preview', contents: fbPrompt });
+        const fallbackGenAI = new GoogleGenAI({ apiKey: geminiHMKey });
+        const fallbackPrompt = `Based on the following web search results, identify the most likely hiring manager for a ${roleTitle} position at ${companyName}${analysis.region ? ' in ' + analysis.region : ''}.
+
+The hiring manager is the person this role REPORTS TO — typically a ${analysis.manager_likely_title || 'Director or VP of Sales'}.
+
+Search results:
+${geminiWebSearchText.slice(0, 6000)}
+
+Return ONLY this JSON (no other text):
+{"full_name":"First Last or null","title":"their title or null","linkedin_url":"URL or null","confidence":"high/medium/low","reasoning":"one sentence"}`;
+
+        const fbResp = await fallbackGenAI.models.generateContent({
+          model: 'gemini-3-flash-preview',
+          contents: fallbackPrompt,
+        });
         const fbText = ((fbResp as any).text || '').trim();
         const fbMatch = fbText.match(/\{[\s\S]*\}/);
         if (fbMatch) {
           const fbData = JSON.parse(fbMatch[0]);
-          if (fbData.full_name && String(fbData.full_name).toLowerCase() !== 'null') {
+          if (fbData.full_name) {
             hmData = { ...fbData, alternative: null };
-            enrichmentSource = 'gemini';
-            console.log(`[HiringManager] Gemini fallback identified: ${hmData.full_name} [${hmData.confidence}]`);
+            enrichmentSource = enrichmentSource === 'gemini' ? 'gemini' : 'gemini-fallback';
+            console.log(`[HiringManager] Step 3 Gemini fallback identified: ${hmData.full_name} [${hmData.confidence}]`);
           }
         }
       } catch (fbErr) {
-        console.warn('[HiringManager] Gemini fallback identification failed:', fbErr instanceof Error ? fbErr.message.slice(0, 80) : fbErr);
+        console.warn('[HiringManager] Step 3 Gemini fallback failed:', fbErr instanceof Error ? fbErr.message.slice(0, 80) : fbErr);
       }
     }
 
@@ -3943,16 +3901,7 @@ async function reclassifyJobsLocally(): Promise<number> {
   const _isSEUser = _userLocLower.some((l: string) => /south.?carolina|north.?carolina|georgia|florida|southeast|se\b/.test(l));
   const _TERRITORY_EXCLUDE = /\b(northeast|new\s+england|mid[\s-]atlantic|midwest|great\s+lakes|north\s+central|northwest|pacific\s+northwest|pnw|west\s+coast|southwest|tola|mountain\s+west|rocky\s+mountain|plains|upper\s+midwest)\b/i;
   const _TERRITORY_SE_OK   = /\b(southeast|southern|carolinas?|florida|georgia|sc\b|nc\b|fl\b|ga\b)\b/i;
-  const _userIsUsOnly = (userLocations).every((loc: string) => {
-    const l = loc.toLowerCase().trim();
-    return !INTL_CITY_PATTERN.test(l) && !INTL_REGION_PATTERN.test(l) && !INTL_COUNTRY_CODES.test(l);
-  });
-  function _isExcludedTerritory(title: string, jobLoc = ''): boolean {
-    // International city/region in the title is always a hard drop for US-only users
-    if (_userIsUsOnly) {
-      const intl = detectInternationalMismatch(title, jobLoc);
-      if (intl.mismatch) return true;
-    }
+  function _isExcludedTerritory(title: string): boolean {
     if (!_isSEUser) return false;
     if (!_TERRITORY_EXCLUDE.test(title)) return false;
     if (_TERRITORY_SE_OK.test(title)) return false;
@@ -4025,8 +3974,8 @@ async function reclassifyJobsLocally(): Promise<number> {
       // Hard filter 4: salary (only when salary is EXPLICITLY listed AND known below min)
       const belowSalary = salaryKnownBelow(j.salary);
 
-      // Hard filter 5: territory mismatch + international hard-drop
-      const badTerritory = _isExcludedTerritory(j.title ?? '', loc);
+      // Hard filter 5: territory mismatch only (segment is NOT a hard block — comp handles it)
+      const badTerritory = _isExcludedTerritory(j.title ?? '');
 
       if (!titleMatches || hasAvoid || !locationOk || belowSalary || badTerritory) {
         tier = 'Probably Skip';
@@ -4065,32 +4014,21 @@ app.get('/api/scout/status', async (_req, res: Response) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-app.get('/api/scout-runs/latest', async (_req, res: Response) => {
-  try {
-    const { rows } = await pool.query(
-      "SELECT id, started_at, completed_at, jobs_found, matches_found FROM scout_runs WHERE status='completed' ORDER BY completed_at DESC LIMIT 1"
-    );
-    res.json(rows.length > 0 ? rows[0] : null);
-  } catch (e) { res.status(500).json({ error: String(e) }); }
-});
-
 let scoutRunning = false;
 
-app.post('/api/scout/run', async (req: Request, res: Response) => {
+app.post('/api/scout/run', async (_req, res: Response) => {
   if (scoutRunning) {
     res.status(409).json({ error: 'A scout run is already in progress.' });
     return;
   }
   try {
-    const searchMode: 'watchlist' | 'open' = req.body?.search_mode === 'open' ? 'open' : 'watchlist';
-    const fastSearch: boolean = req.body?.fast_search === true;
     const { rows } = await pool.query(
       "INSERT INTO scout_runs (status, jobs_found) VALUES ('running', 0) RETURNING *"
     );
     const run = rows[0];
-    res.json({ runId: run.id, message: 'Scout run started', searchMode, fastSearch });
+    res.json({ runId: run.id, message: 'Scout run started' });
     scoutRunning = true;
-    runScoutInBackground(run.id, { searchMode, fastSearch }).catch(console.error).finally(() => { scoutRunning = false; });
+    runScoutInBackground(run.id).catch(console.error).finally(() => { scoutRunning = false; });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -5135,11 +5073,7 @@ async function checkUrlHealthInBackground(jobIds?: number[]): Promise<void> {
   }
 }
 
-async function runScoutInBackground(
-  runId: number,
-  opts: { searchMode?: 'watchlist' | 'open'; fastSearch?: boolean } = {}
-): Promise<void> {
-  const { searchMode = 'watchlist', fastSearch = false } = opts;
+async function runScoutInBackground(runId: number): Promise<void> {
   try {
     const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
     if (cRows.length === 0) {
@@ -5175,30 +5109,24 @@ async function runScoutInBackground(
     for (const c of companies) { byType[(c as any).ats_type] = (byType[(c as any).ats_type] || 0) + 1; }
     console.log(`  Companies by ATS type:`, byType);
 
-    // Company names available globally — needed for both Watchlist Fast Search and JobSpy safety filter
-    const companyNames: string[] = companies.map((c: any) => c.name as string);
-
     type Job = { title: string; company: string; location: string; salary?: string; applyUrl: string; description?: string; datePosted?: string; source: string; _fromJobSpy?: boolean; _fromGemini?: boolean };
     const allJobs: Job[] = [];
-    // Side-map: applyUrl → per-job metadata for Perplexity-sourced jobs
+    // Side-map: applyUrl → per-job metadata for Gemini-sourced jobs
     const geminiMetaByUrl = new Map<string, { groundingMetadata?: object; confidence?: number }>();
     let companiesScanned = 0;
     const perCompanyStats: { name: string; type: string; jobs: number; error?: string }[] = [];
 
-    const modeLabel = searchMode === 'open' ? 'Open Search' : 'Watchlist';
-    const fastLabel = fastSearch ? ' [Quick Search — Perplexity only]' : '';
-    console.log(`[Scout] Mode: ${modeLabel}${fastLabel}`);
+    await setStage(`Scraping ${companies.length} ATS job boards…`);
 
-    // Build title filter regardless — used by ATS loop and as a reference
+    // Build title filter once before the ATS loop so Greenhouse/Lever can apply it
+    // at the source — this prevents hundreds of irrelevant jobs (engineering, finance,
+    // HR, etc.) from entering the pipeline just to be dropped later.
     const atsTitleFilter = buildTitleFilter(criteria.target_roles);
-    if (atsTitleFilter && searchMode !== 'open') {
+    if (atsTitleFilter) {
       console.log(`ATS title filter active: ${criteria.target_roles.slice(0, 5).join(', ')}${criteria.target_roles.length > 5 ? '…' : ''}`);
     }
 
-    // ── Stage 2a: Scrape Greenhouse, Lever, and Workday companies ─────────────
-    // Skip if Open Search mode (user wants criteria-only, not watchlist companies)
-    if (searchMode !== 'open') {
-    await setStage(`Scraping ${companies.length} ATS job boards…`);
+    // ── Stage 2a: Scrape Greenhouse, Lever, and Workday companies ──
     for (const c of companies) {
       const co = c as { id: number; name: string; ats_type: string; ats_slug: string | null; careers_url: string | null; scan_failures: number; ats_types_tried: string[] };
       try {
@@ -5253,13 +5181,10 @@ async function runScoutInBackground(
         companiesScanned++;
       }
     }
-    } // end if (searchMode !== 'open')
 
-    // ── Stage 2b: JobSpy — LinkedIn + Indeed + (Glassdoor/ZipRecruiter via proxy) ──
-    // Skip entirely when Fast Search is active
-    if (!fastSearch) {
     await setStage(`ATS done (${allJobs.length} found) — searching LinkedIn & Indeed via JobSpy…`);
     await pool.query(`UPDATE scout_runs SET jobs_in_pipeline=$1 WHERE id=$2`, [allJobs.length, runId]).catch(() => {});
+    // ── Stage 2b: JobSpy — LinkedIn + Indeed + (Glassdoor/ZipRecruiter via proxy) ──
     try {
       const jobSpyResults = await runJobSpyScraper({
         target_roles: criteria.target_roles ?? [],
@@ -5283,6 +5208,7 @@ async function runScoutInBackground(
     }
 
     // ── Stage 2c: Filter out unsafe companies from all JobSpy-sourced results ──
+    const companyNames = companies.map((c: any) => c.name as string);
     const jobSpyJobs = allJobs.filter(j => (j as any)._fromJobSpy);
     const nonJobSpyJobs = allJobs.filter(j => !(j as any)._fromJobSpy);
     if (jobSpyJobs.length > 0) {
@@ -5301,75 +5227,46 @@ async function runScoutInBackground(
       const sourceByUrl = new Map(jobSpyJobs.map(j => [j.applyUrl, j.source]));
       allJobs.push(...safeJobSpyJobs.map(j => ({ ...j, source: sourceByUrl.get(j.applyUrl) ?? 'JobSpy' })));
     }
-    } // end if (!fastSearch)
 
-    // ── Stage 2c: Perplexity discovery (Fast Search = primary; regular = supplemental) ──
-    const discoveryStageLabel = fastSearch
-      ? `Running Perplexity Fast Search (${modeLabel})…`
-      : `JobSpy done (${allJobs.length} total) — running Perplexity supplemental discovery…`;
-    await setStage(discoveryStageLabel);
+    await setStage(`JobSpy done (${allJobs.length} total) — running Gemini discovery…`);
     await pool.query(`UPDATE scout_runs SET jobs_in_pipeline=$1 WHERE id=$2`, [allJobs.length, runId]).catch(() => {});
-
-    let perplexityJobsFound = 0;
-    let perplexityDeduped = 0;
-
+    // ── Stage 2c: Gemini + Google Search grounding — supplemental discovery ──
+    let geminiJobsFound = 0;
+    let geminiDeduped = 0;
     try {
-      let discoveredJobs: import('./gemini_discovery.js').GeminiJob[] = [];
+      const geminiResult = await runGeminiJobDiscovery({
+        target_roles:  criteria.target_roles ?? [],
+        locations:     criteria.locations ?? [],
+        work_type:     criteria.work_type ?? 'any',
+        must_have:     criteria.must_have ?? [],
+        nice_to_have:  criteria.nice_to_have ?? [],
+        avoid:         criteria.avoid ?? [],
+        industries:    criteria.industries ?? [],
+        min_salary:    criteria.min_salary ?? null,
+      });
 
-      if (fastSearch) {
-        // ── Fast Search: 2–3 parallel Perplexity calls replace the whole pipeline ──
-        const scoutResult = await runPerplexityScoutSearch(
-          {
-            target_roles:  criteria.target_roles ?? [],
-            locations:     criteria.locations ?? [],
-            work_type:     criteria.work_type ?? 'any',
-            must_have:     criteria.must_have ?? [],
-            nice_to_have:  criteria.nice_to_have ?? [],
-            avoid:         criteria.avoid ?? [],
-            industries:    criteria.industries ?? [],
-            min_salary:    criteria.min_salary ?? null,
-          },
-          { mode: searchMode, companyNames }
-        );
-        discoveredJobs = scoutResult.jobs;
-        console.log(`[PerplexityScout] ${scoutResult.callsRun} calls run, ${scoutResult.callsFailed} failed, ${discoveredJobs.length} unique jobs found`);
-      } else {
-        // ── Regular mode: single Perplexity supplemental call, no Gemini ──
-        const geminiResult = await runGeminiJobDiscovery(
-          {
-            target_roles:  criteria.target_roles ?? [],
-            locations:     criteria.locations ?? [],
-            work_type:     criteria.work_type ?? 'any',
-            must_have:     criteria.must_have ?? [],
-            nice_to_have:  criteria.nice_to_have ?? [],
-            avoid:         criteria.avoid ?? [],
-            industries:    criteria.industries ?? [],
-            min_salary:    criteria.min_salary ?? null,
-          },
-          { skipGemini: true }
-        );
-        if (!geminiResult.skipped) discoveredJobs = geminiResult.jobs;
-        else console.log(`[Discovery] Perplexity supplemental skipped: ${geminiResult.skipReason}`);
-      }
-
-      if (discoveredJobs.length > 0) {
-        // Merge Perplexity results with existing allJobs — dedup by URL + company+title
+      if (!geminiResult.skipped && geminiResult.jobs.length > 0) {
+        // Merge Gemini results with existing allJobs — dedup by URL + company+title
         const { merged, deduplicatedCount } = deduplicateJobLists(
           allJobs as Array<ScrapedJob & { source: string; _fromJobSpy?: boolean }>,
-          discoveredJobs
+          geminiResult.jobs
         );
 
-        perplexityJobsFound = discoveredJobs.length;
-        perplexityDeduped   = deduplicatedCount;
-        const netNew        = perplexityJobsFound - deduplicatedCount;
+        geminiJobsFound = geminiResult.jobs.length;
+        geminiDeduped   = deduplicatedCount;
+        const netNew    = geminiJobsFound - deduplicatedCount;
 
-        // Track confidence metadata for net-new jobs
-        for (const pJob of discoveredJobs) {
-          if (!allJobs.some(j => j.applyUrl === pJob.applyUrl)) {
-            geminiMetaByUrl.set(pJob.applyUrl, { confidence: pJob.ingestionConfidence });
+        // Store gemini metadata for net-new jobs so we can persist it to DB later
+        for (const gJob of geminiResult.jobs) {
+          if (!allJobs.some(j => j.applyUrl === gJob.applyUrl)) {
+            geminiMetaByUrl.set(gJob.applyUrl, {
+              groundingMetadata: gJob.geminiGroundingMetadata as object | undefined,
+              confidence:        gJob.ingestionConfidence,
+            });
           }
         }
 
+        // Rebuild allJobs from merged (preserves all existing + net-new Gemini jobs)
         allJobs.length = 0;
         for (const j of merged) {
           allJobs.push({
@@ -5385,10 +5282,13 @@ async function runScoutInBackground(
           });
         }
 
-        console.log(`[Perplexity] ${perplexityJobsFound} discovered → ${deduplicatedCount} dupes merged → ${netNew} net-new added`);
+        console.log(`[Gemini] ${geminiJobsFound} discovered → ${deduplicatedCount} dupes merged → ${netNew} net-new added`);
+        console.log(`[Gemini] Grounding sources: ${geminiResult.totalGroundingSources} | Queries: ${geminiResult.queriesUsed.join(', ')}`);
+      } else if (geminiResult.skipped) {
+        console.log(`[Gemini] Skipped: ${geminiResult.skipReason}`);
       }
     } catch (e) {
-      console.error(`[Perplexity Discovery] Unexpected error (non-fatal):`, e);
+      console.error(`[Gemini] Unexpected error (non-fatal):`, e);
     }
 
     console.log(`\n──── SCRAPE RESULTS ────────────────────────────────────────`);
@@ -5435,20 +5335,9 @@ async function runScoutInBackground(
     const hasLocationPrefs = criteria.locations.length > 0;
     const allowedWorkModes: string[] = criteria.allowed_work_modes ?? [];
 
-    // Determine if user has a US-only location profile (no international preferences).
-    // When true, any job with an explicit international location signal is hard-dropped.
-    const userIsUsOnly = (criteria.locations ?? []).every(loc => {
-      const l = loc.toLowerCase().trim();
-      return !INTL_CITY_PATTERN.test(l) && !INTL_REGION_PATTERN.test(l) && !INTL_COUNTRY_CODES.test(l);
-    });
-
-    // jobMatchesLocation uses the stored location field plus the title-embedded city override
-    function jobMatchesLocation(jobTitle: string, jobLocation: string): boolean {
+    function jobMatchesLocation(jobLocation: string): boolean {
       if (!hasLocationPrefs && allowedWorkModes.length === 0) return true;
-      // If the title embeds an international city, treat that as the effective location
-      const titleCity = extractTitleEmbeddedCity(jobTitle);
-      const effectiveLoc = titleCity ?? jobLocation;
-      return checkJobLocation(effectiveLoc, criteria.locations, false, allowedWorkModes);
+      return checkJobLocation(jobLocation, criteria.locations, false, allowedWorkModes);
     }
 
     // 2. Avoid keywords hard filter — exclude jobs whose title or description contains avoid keywords
@@ -5494,24 +5383,18 @@ async function runScoutInBackground(
       return SEGMENT_ROLE_CTX.test(title); // only block when it's clearly the sales segment
     }
 
-    // 5. Territory + international filter — block job titles with an explicit regional territory
-    //    clearly OUTSIDE the user's preferred locations, including international cities.
+    // 5. Territory filter — block job titles with an explicit regional territory
+    //    that is clearly OUTSIDE the user's preferred locations.
+    //    e.g., user is SE/Remote → "(Northeast)" in title = hard mismatch.
     const userLocLower = (criteria.locations ?? []).map((l: string) => l.toLowerCase());
     const isSEUser = userLocLower.some(l => /south.?carolina|north.?carolina|georgia|florida|southeast|se\b/.test(l));
     const TERRITORY_EXCLUDE = /\b(northeast|new\s+england|mid[\s-]atlantic|midwest|great\s+lakes|north\s+central|northwest|pacific\s+northwest|pnw|west\s+coast|southwest|tola|mountain\s+west|rocky\s+mountain|plains|upper\s+midwest)\b/i;
     const TERRITORY_SE_OK   = /\b(southeast|southern|carolinas?|florida|georgia|sc\b|nc\b|fl\b|ga\b)\b/i;
 
     function isExcludedTerritory(title: string): boolean {
-      // Defense-in-depth: always block international city names in the title,
-      // regardless of whether the user is SE-based. This catches embedded cities
-      // like "(Barcelona)" that the location field missed.
-      if (userIsUsOnly) {
-        const intl = detectInternationalMismatch(title, '');
-        if (intl.mismatch) return true;
-      }
-      if (!isSEUser) return false; // US territory check only applies to SE-based users
+      if (!isSEUser) return false; // only apply if user is clearly SE-based
       if (!TERRITORY_EXCLUDE.test(title)) return false;
-      // If it also mentions SE territory, let it through
+      // If it also mentions SE territory, let it through (e.g., "SE + Northeast" hybrid)
       if (TERRITORY_SE_OK.test(title)) return false;
       return true;
     }
@@ -5522,38 +5405,10 @@ async function runScoutInBackground(
     let droppedByAvoid = 0;
     let droppedBySalary = 0;
     let droppedByTerritory = 0;
-    let droppedByInternational = 0;
 
-    // 1a. International hard-drop — runs BEFORE regular location filter
-    //     Hard-drops any job with an explicit international location signal
-    //     (checked in both location field AND job title).
-    //     Fails closed: even "Remote" location jobs are dropped when the title
-    //     embeds an international city like "(Barcelona)".
-    if (userIsUsOnly) {
-      const before = preFiltered.length;
-      preFiltered = preFiltered.filter(j => {
-        const intl = detectInternationalMismatch(j.title, j.location);
-        if (intl.mismatch) {
-          console.log(`  [Location] HARD-DROP international: "${j.company}" — ${j.title} | ${j.location} | reason: ${intl.reason}`);
-          return false;
-        }
-        return true;
-      });
-      droppedByInternational = before - preFiltered.length;
-    }
-
-    // 1b. Location filter — uses title-embedded city as effective location override
     if (hasLocationPrefs) {
       const before = preFiltered.length;
-      preFiltered = preFiltered.filter(j => {
-        const pass = jobMatchesLocation(j.title, j.location);
-        if (!pass) {
-          const titleCity = extractTitleEmbeddedCity(j.title);
-          const effectiveLoc = titleCity ?? j.location;
-          console.log(`  [Location] DROP location mismatch: "${j.company}" — effective_loc="${effectiveLoc}" title="${j.title}"`);
-        }
-        return pass;
-      });
+      preFiltered = preFiltered.filter(j => jobMatchesLocation(j.location));
       droppedByLocation = before - preFiltered.length;
     }
     if (avoidPatterns.length > 0) {
@@ -5567,96 +5422,21 @@ async function runScoutInBackground(
       droppedBySalary = before - preFiltered.length;
     }
 
-    // Apply territory filter (US regions + international defense-in-depth)
+    // Apply territory filter only (segment is NOT a hard block — compensation handles it)
     {
       const before = preFiltered.length;
-      preFiltered = preFiltered.filter(j => {
-        const excluded = isExcludedTerritory(j.title);
-        if (excluded) console.log(`  [Location] DROP territory mismatch: "${j.company}" — ${j.title}`);
-        return !excluded;
-      });
+      preFiltered = preFiltered.filter(j => !isExcludedTerritory(j.title));
       droppedByTerritory = before - preFiltered.length;
-    }
-
-    // ── Shared company-type + industry-category classification ───────────────
-    // Runs for ALL sources (JobSpy, ATS, Perplexity) in BOTH Normal and Quick Search.
-    // Deterministic — no Claude calls. Drops:
-    //   • staffing agencies / recruiting firms at medium+ confidence
-    //   • healthcare providers at medium+ confidence
-    //   • job boards at medium+ confidence
-    //   • generic_saas / healthcare companies when user has stated preferred categories (high-confidence only)
-    const preferredCategories = mapUserIndustriesToCategories(criteria.industries ?? []);
-    const classificationResults = new Map<string, JobClassification>();
-    let droppedByCompanyType = 0;
-    let droppedByIndustryCategory = 0;
-    {
-      const classified: typeof preFiltered = [];
-      for (const j of preFiltered) {
-        const cls = classifyJob({ title: j.title, company: j.company, description: j.description, applyUrl: j.applyUrl });
-        classificationResults.set(j.applyUrl, cls);
-        const decision = getFilterDecision(cls, preferredCategories);
-        if (decision === 'drop_company_type') {
-          droppedByCompanyType++;
-          console.log(`  [Classify] DROP company_type=${cls.companyType} conf=${cls.confidence} — ${j.company} | ${j.title}`);
-        } else if (decision === 'drop_industry') {
-          droppedByIndustryCategory++;
-          console.log(`  [Classify] DROP industry=${cls.industryCategory} conf=${cls.confidence} (not in preferred: ${Array.from(preferredCategories).join(',')}) — ${j.company}`);
-        } else {
-          if (cls.industryCategory !== 'unknown') {
-            console.log(`  [Classify] PASS company=${cls.companyType} industry=${cls.industryCategory} conf=${cls.confidence} — ${j.company}`);
-          }
-          classified.push(j);
-        }
-      }
-      preFiltered = classified;
-    }
-
-    // ── Description-relevance gate — Perplexity (Quick Search) jobs ONLY ────────
-    // Normal Search scrapes the user's hand-picked watchlist companies → always on-target.
-    // Quick Search asks Perplexity to find jobs on open ATS platforms (Greenhouse, Lever,
-    // etc.) → any company on those platforms can appear, including ones completely outside
-    // the user's target industries (construction firms, ad agencies, healthcare SaaS, etc.).
-    //
-    // This gate drops a Perplexity job if its combined title+description snippet contains
-    // ZERO signals from the user's preferred industry categories.  It is built dynamically
-    // from the user's saved industries setting — no company names are hardcoded here.
-    // Jobs with very short descriptions (<100 chars) pass through (not enough to judge).
-    let droppedByDescRelevance = 0;
-    if (preferredCategories.size > 0) {
-      const before = preFiltered.length;
-      const descFiltered: typeof preFiltered = [];
-      for (const j of preFiltered) {
-        // Only gate Perplexity-discovered jobs — ATS scrapes are pre-qualified by watchlist
-        if (j.source !== 'Perplexity') { descFiltered.push(j); continue; }
-        const desc = (j.description ?? '').trim();
-        // Too short to judge → pass through (let Claude handle it)
-        if (desc.length < 100) { descFiltered.push(j); continue; }
-        const combinedText = `${j.title} ${desc}`;
-        if (hasPreferredIndustrySignal(combinedText, preferredCategories)) {
-          descFiltered.push(j);
-        } else {
-          console.log(`  [DescRelevance] DROP no industry signal in description: "${j.company}" — ${j.title}`);
-          droppedByDescRelevance++;
-        }
-      }
-      preFiltered = descFiltered;
     }
 
     let droppedByKnownComp = 0; // reserved for future use
 
     console.log(`\n──── PRE-FILTERS (before Claude scoring) ───────────────────`);
     console.log(`  After title filter: ${toScore.length}`);
-    console.log(`  Dropped by international location (hard): ${droppedByInternational}${userIsUsOnly ? ' [US-only profile]' : ''}`);
-    console.log(`  Dropped by location mismatch: ${droppedByLocation}`);
+    console.log(`  Dropped by location: ${droppedByLocation}`);
     console.log(`  Dropped by avoid keywords: ${droppedByAvoid}`);
     console.log(`  Dropped by salary below $${criteria.min_salary?.toLocaleString() ?? 'n/a'}: ${droppedBySalary}`);
     console.log(`  Dropped by territory mismatch: ${droppedByTerritory}`);
-    console.log(`  Dropped by company type (staffing/healthcare/job_board): ${droppedByCompanyType}`);
-    console.log(`  Dropped by industry category (generic_saas/healthcare — not in preferred): ${droppedByIndustryCategory}`);
-    console.log(`  Dropped by desc-relevance (Perplexity only — no industry signal in description): ${droppedByDescRelevance}`);
-    if (preferredCategories.size > 0) {
-      console.log(`  Preferred industry categories: ${Array.from(preferredCategories).join(', ')}`);
-    }
     console.log(`  Dropped by known comp below minimum: ${droppedByKnownComp}`);
     console.log(`  Remaining for Claude scoring: ${preFiltered.length}`);
     console.log(`───────────────────────────────────────────────────────────`);
@@ -5805,18 +5585,10 @@ async function runScoutInBackground(
       const loc = (m.location ?? '').trim();
       let finalTier: string;
 
-      // Apply location check + deterministic tier logic using our computeTier.
-      // Location mismatch OVERRIDES company attractiveness — a great company in
-      // the wrong geography cannot become a Top Target.
+      // Apply location check + deterministic tier logic using our computeTier
       const locationOk = checkJobLocation(loc, criteria.locations, false, allowedWorkModes);
-      // Defense-in-depth: also check for international signals in the Claude-returned title/location.
-      // This catches cases where Claude adjusted the location field in its response.
-      const intlCheck = userIsUsOnly ? detectInternationalMismatch(m.title ?? '', loc) : { mismatch: false, reason: '' };
-      if (!locationOk || intlCheck.mismatch) {
+      if (!locationOk) {
         finalTier = 'Probably Skip';
-        if (intlCheck.mismatch) {
-          console.log(`  [PostScore] Override to Probably Skip — international mismatch: ${m.company} | ${m.title} | ${'reason' in intlCheck ? intlCheck.reason : ''}`);
-        }
       } else if (m.subScores && m.matchScore) {
         finalTier = computeTier(m.matchScore, m.aiRisk, m.subScores, m.title, m.company, loc, tierSettings);
       } else {
@@ -5897,9 +5669,8 @@ async function runScoutInBackground(
     console.log(`  Companies scanned: ${companiesScanned}`);
     console.log(`  Raw jobs scraped:  ${allJobs.length}`);
     console.log(`  Source breakdown:  ${Object.entries(srcBreakdown).map(([k,v]) => `${k}: ${v}`).join(' | ')}`);
-    if (perplexityJobsFound > 0) {
-      const label = fastSearch ? 'Perplexity (Fast)' : 'Perplexity discovery';
-      console.log(`  ${label}: ${perplexityJobsFound} found → ${perplexityDeduped} already in ATS/JobSpy → ${perplexityJobsFound - perplexityDeduped} net-new`);
+    if (geminiJobsFound > 0) {
+      console.log(`  Gemini discovery:  ${geminiJobsFound} found → ${geminiDeduped} already in JobSpy → ${geminiJobsFound - geminiDeduped} net-new`);
     }
     console.log(`  Passed title filter: ${toScore.length}`);
     console.log(`  Pre-filtered (location/avoid/salary): ${preFiltered.length}`);
@@ -6193,21 +5964,6 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .run-stage{font-size:11px;color:var(--gold);margin-left:4px;font-style:italic}
 .run-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .auto-run-badge{font-size:11px;color:var(--muted);padding:3px 9px;border:1px solid #2a2a2a;border-radius:20px;margin-left:auto;white-space:nowrap}
-/* Scout options popup */
-.scout-opts-wrap{position:relative;display:inline-flex}
-.scout-opts-btn{background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:7px;padding:8px 10px;font-size:12px;cursor:pointer;line-height:1;transition:color .15s,border-color .15s}
-.scout-opts-btn:hover{color:var(--text);border-color:#444}
-.scout-opts-btn.active{color:var(--gold);border-color:var(--gold)}
-.scout-popup{display:none;position:absolute;top:calc(100% + 6px);left:0;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;min-width:240px;z-index:9000;box-shadow:0 8px 32px rgba(0,0,0,.5)}
-.scout-popup.open{display:block}
-.scout-popup-title{font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px}
-.scout-mode-btns{display:flex;gap:6px;margin-bottom:12px}
-.scout-mode-btn{flex:1;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;text-align:center}
-.scout-mode-btn.selected{background:rgba(197,155,75,.15);border-color:var(--gold);color:var(--gold)}
-.scout-fast-row{display:flex;align-items:center;gap:8px;padding-top:10px;border-top:1px solid var(--border)}
-.scout-fast-chk{width:15px;height:15px;accent-color:var(--gold);cursor:pointer;flex-shrink:0}
-.scout-fast-label{font-size:12px;color:var(--text);cursor:pointer;user-select:none}
-.scout-fast-sub{font-size:10px;color:var(--muted);margin-top:2px}
 /* Quick-link job site pills */
 .quick-links{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .quick-link-sep{width:1px;height:16px;background:var(--border);flex-shrink:0;margin:0 2px}
@@ -6309,8 +6065,6 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .inner-tab.tier-win.active{color:#00c86e;border-bottom-color:#00c86e}
 .inner-tab.tier-stretch.active{color:#7c8dff;border-bottom-color:#7c8dff}
 .inner-tab.tier-skip.active{color:#888;border-bottom-color:#888}
-.inner-tab.tier-new{color:#a78bfa}
-.inner-tab.tier-new.active{color:#a78bfa;border-bottom-color:#a78bfa}
 .tier-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
 .tier-top-target{background:rgba(245,200,66,.15);color:#f5c842;border:1px solid rgba(245,200,66,.35)}
 .tier-fast-win{background:rgba(0,200,110,.13);color:#00c86e;border:1px solid rgba(0,200,110,.3)}
@@ -6320,11 +6074,6 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .card.card-fast-win{border-left:3px solid #00c86e}
 .card.card-stretch-role{border-left:3px solid #7c8dff}
 .card.card-probably-skip{border-left:3px solid #444;opacity:.85}
-.card-delete-btn{background:transparent;border:none;color:#444;font-size:13px;cursor:pointer;padding:3px 5px;border-radius:4px;line-height:1;transition:color .15s,background .15s;flex-shrink:0}
-.card-delete-btn:hover{color:#e55353;background:rgba(229,83,83,.14)}
-.bulk-delete-bar{display:flex;align-items:center;gap:10px;margin-bottom:10px}
-.bulk-delete-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:6px;border:1px solid rgba(229,83,83,.35);background:transparent;color:#e55353;font-size:11px;font-weight:600;cursor:pointer;transition:background .15s,border-color .15s}
-.bulk-delete-btn:hover{background:rgba(229,83,83,.14);border-color:rgba(229,83,83,.55)}
 .sub-scores{padding:10px 18px;border-bottom:1px solid #1e1e1e;display:none}
 .sub-scores.open{display:block}
 .sub-score-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px 16px}
@@ -7026,23 +6775,6 @@ textarea:focus,input:focus{border-color:var(--gold)}
 
 <div class="run-bar">
   <button class="btn btn-gold" id="run-btn" onclick="runScout()">&#9654; Run Scout Now</button>
-  <div class="scout-opts-wrap">
-    <button class="scout-opts-btn" id="scout-opts-btn" onclick="toggleScoutOpts(event)" title="Search options">&#9881;</button>
-    <div class="scout-popup" id="scout-popup">
-      <div class="scout-popup-title">Search Mode</div>
-      <div class="scout-mode-btns">
-        <button class="scout-mode-btn selected" id="mode-btn-watchlist" onclick="setScoutMode('watchlist')">&#x1F3AF; Watchlist Search</button>
-        <button class="scout-mode-btn" id="mode-btn-open" onclick="setScoutMode('open')">&#x1F30E; Open Search</button>
-      </div>
-      <div class="scout-fast-row">
-        <input type="checkbox" class="scout-fast-chk" id="fast-search-chk">
-        <div>
-          <label class="scout-fast-label" for="fast-search-chk">&#x26A1; Quick Search</label>
-          <div class="scout-fast-sub">Perplexity only &mdash; skips JobSpy</div>
-        </div>
-      </div>
-    </div>
-  </div>
   <span class="run-msg" id="run-msg"></span>
   <span class="run-stage" id="run-stage" style="display:none"></span>
   <span class="quick-link-sep"></span>
@@ -7190,7 +6922,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="nav-group">
     <div class="nav-group-label">Settings</div>
     <div class="tab" id="tab-settings" onclick="showTab('settings')" data-tooltip="Controls what the scout actually searches for: target roles, industries, locations, must-have skills, things to avoid, and salary floor. The scout won't run without this configured.">User Search Settings</div>
-    <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Your Company Watchlist — tracks open roles at each company daily using Perplexity AI search. Also tells the scraper which ATS pages to hit and boosts their score.">Company Watchlist</div>
+    <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Your Company Watchlist — tracks open roles at each company daily using Gemini search. Also tells the scraper which ATS pages to hit and boosts their score.">Company Watchlist</div>
     <div class="tab" id="tab-runs" onclick="showTab('runs')" data-tooltip="Full log of every scout run — jobs found, matches scored, errors, and timing. Use this to debug why a run found too many or too few results.">Run History</div>
   </div>
 </nav>
@@ -7222,10 +6954,8 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="inner-tab tier-win" id="jtab-win" onclick="showJobsTab('win')">&#x26A1; Fast Wins <span id="jtab-count-win" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
     <div class="inner-tab tier-stretch" id="jtab-stretch" onclick="showJobsTab('stretch')">&#x1F680; Stretch <span id="jtab-count-stretch" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
     <div class="inner-tab tier-skip" id="jtab-skip" onclick="showJobsTab('skip')">&#x1F6AB; Probably Skip <span id="jtab-count-skip" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
-    <div class="inner-tab tier-new" id="jtab-new" onclick="showJobsTab('new')" style="display:none">&#x2728; New <span id="jtab-count-new" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
     <div class="inner-tab" id="jtab-all" onclick="showJobsTab('all')">All <span id="jtab-count-all" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
   </div>
-  <div id="bulk-delete-bar" class="bulk-delete-bar" style="display:none"></div>
   <div class="sec-title" id="jobs-count">Loading jobs&hellip;</div>
   <div class="jobs-grid" id="jobs-grid"></div>
 </div>
@@ -7475,7 +7205,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="intel-loading" style="display:none">
     <div class="intel-loading-wrap">
       <div class="intel-spinner"></div>
-      <div class="intel-loading-msg">Perplexity is searching and synthesising company signals&hellip;<br><span style="font-size:11px;color:var(--muted)">This typically takes 30&ndash;60 seconds</span></div>
+      <div class="intel-loading-msg">Gemini is searching and synthesising company signals&hellip;<br><span style="font-size:11px;color:var(--muted)">This typically takes 30&ndash;60 seconds</span></div>
     </div>
   </div>
 
@@ -7517,7 +7247,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </div>
       <div id="intel-scan-spinner" style="display:none;text-align:center;padding:20px 0">
         <div class="intel-spinner" style="margin:0 auto 10px"></div>
-        <div style="font-size:12px;color:var(--muted)">Asking Perplexity to search for open roles at each company&hellip; (30-90s)</div>
+        <div style="font-size:12px;color:var(--muted)">Asking Gemini to search for open roles at each company&hellip; (30-90s)</div>
       </div>
       <div id="intel-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
       <div id="intel-scan-results" style="display:none;margin-top:14px">
@@ -7535,7 +7265,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="pulse-header">
     <div>
       <div class="sec-title" style="margin-bottom:4px">Job Market Pulse</div>
-      <div class="intel-meta" id="pulse-meta">Scout data + Perplexity search &mdash; hiring trends and signal analysis for your target companies</div>
+      <div class="intel-meta" id="pulse-meta">Scout data + Gemini search &mdash; hiring trends and signal analysis for your target companies</div>
     </div>
     <button class="btn btn-gold btn-sm" id="pulse-refresh-btn" onclick="refreshJobMarketPulse()">&#x26A1; Refresh Pulse</button>
   </div>
@@ -7598,12 +7328,12 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="dv-loading" style="display:none">
     <div class="dv-loading-wrap">
       <div class="dv-spinner"></div>
-      <div class="dv-loading-msg">Perplexity is searching for the most compelling infrastructure companies with undeniable value props&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;60 seconds</span></div>
+      <div class="dv-loading-msg">Gemini is searching for the most compelling infrastructure companies with undeniable value props&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;60 seconds</span></div>
     </div>
   </div>
 
   <div id="dv-empty" style="display:none">
-    <div class="dv-empty">No Deep Value data yet.<br>Click &ldquo;Refresh Intel&rdquo; to have Perplexity search for cutting-edge infrastructure companies with the clearest &ldquo;why you need this&rdquo; value props &mdash; plus any open roles at each.</div>
+    <div class="dv-empty">No Deep Value data yet.<br>Click &ldquo;Refresh Intel&rdquo; to have Gemini search for cutting-edge infrastructure companies with the clearest &ldquo;why you need this&rdquo; value props &mdash; plus any open roles at each.</div>
   </div>
 
   <div id="dv-error" style="display:none" class="dv-error-box"></div>
@@ -7670,7 +7400,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </div>
       <div id="preipo-scan-spinner" style="display:none;text-align:center;padding:20px 0">
         <div class="intel-spinner" style="margin:0 auto 10px"></div>
-        <div style="font-size:12px;color:var(--muted)">Asking Perplexity to search for open roles at each company&hellip; (30-90s)</div>
+        <div style="font-size:12px;color:var(--muted)">Asking Gemini to search for open roles at each company&hellip; (30-90s)</div>
       </div>
       <div id="preipo-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
       <div id="preipo-scan-results" style="display:none;margin-top:14px">
@@ -7721,7 +7451,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </div>
       <div id="leaders-scan-spinner" style="display:none;text-align:center;padding:20px 0">
         <div class="intel-spinner" style="margin:0 auto 10px"></div>
-        <div style="font-size:12px;color:var(--muted)">Asking Perplexity to search for open roles at each company&hellip; (30-90s)</div>
+        <div style="font-size:12px;color:var(--muted)">Asking Gemini to search for open roles at each company&hellip; (30-90s)</div>
       </div>
       <div id="leaders-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
       <div id="leaders-scan-results" style="display:none;margin-top:14px">
@@ -7738,14 +7468,14 @@ textarea:focus,input:focus{border-color:var(--gold)}
 <div class="panel" id="panel-companies">
   <div style="margin-bottom:20px">
     <div class="sec-title" style="margin-bottom:4px">Company Watchlist</div>
-    <div style="font-size:12px;color:var(--muted)">Perplexity searches for open sales roles at each company daily. Green = matching roles found. Also boosts each company&rsquo;s score in your job board.</div>
+    <div style="font-size:12px;color:var(--muted)">Gemini searches for open sales roles at each company daily. Green = matching roles found. Also boosts each company&rsquo;s score in your job board.</div>
   </div>
 
   <!-- Watchlist scan controls -->
   <div class="cw-scan-header">
     <div>
       <div style="font-size:13px;font-weight:700;color:var(--text)">Daily Job Scan</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:2px" id="cw-scan-status">Perplexity checks for open roles at each company daily &mdash; automatically</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:2px" id="cw-scan-status">Gemini checks for open roles at each company daily &mdash; automatically</div>
     </div>
     <button class="btn btn-ghost btn-sm" id="cw-scan-btn" onclick="runWatchlistScan()">&#x1F50D; Scan Now</button>
   </div>
@@ -8598,7 +8328,6 @@ var _jobsById = {};
 var _allJobs = [];
 var _currentJobsTab = 'target';
 var _jobsRetries = 0;
-var _latestRunId = null;
 function isRemoteInTerritory(loc) {
   if (!loc || !/remote/i.test(loc)) return false;
   var stripped = loc
@@ -8983,7 +8712,7 @@ function sortJobs(jobs) {
 
 function showJobsTab(tab) {
   _currentJobsTab = tab;
-  ['target','win','stretch','skip','new','all'].forEach(function(t) {
+  ['target','win','stretch','skip','all'].forEach(function(t) {
     var el = document.getElementById('jtab-' + t);
     if (el) el.classList.toggle('active', t === tab);
   });
@@ -9225,16 +8954,11 @@ function renderJobCard(j, opts) {
     }
   }
 
-  var deleteBtn = opts.showSavedDate ? '' : '<button class="card-delete-btn" data-jid="' + j.id + '" onclick="deleteJob(this.dataset.jid,this)" title="Remove from board">\u2715</button>';
-
   return '<div class="card ' + tierClass + '">' +
-    // ── Tier row: badge + (delete btn + score chip)
+    // ── Tier row: badge + score chip
     '<div class="card-tier-row">' +
       '<span>' + tBadge + '</span>' +
-      '<span style="display:flex;align-items:center;gap:7px">' +
-        deleteBtn +
-        '<span class="' + scoreChipClass + '">' + esc(j.match_score) + '</span>' +
-      '</span>' +
+      '<span class="' + scoreChipClass + '">' + esc(j.match_score) + '</span>' +
     '</div>' +
     // ── Title block
     '<div class="card-title-block">' +
@@ -9302,48 +9026,23 @@ function updateTabCounts() {
   });
   var allEl = document.getElementById('jtab-count-all');
   if (allEl) allEl.textContent = allCount > 0 ? '(' + allCount + ')' : '';
-
-  // "New" tab — jobs from the latest scout run
-  var newTab = document.getElementById('jtab-new');
-  var newCount = document.getElementById('jtab-count-new');
-  var newJobs = _latestRunId ? _allJobs.filter(function(j) { return !j.saved_at && String(j.scout_run_id) === String(_latestRunId); }) : [];
-  if (newTab) {
-    newTab.style.display = newJobs.length > 0 ? '' : 'none';
-  }
-  if (newCount) newCount.textContent = newJobs.length > 0 ? '(' + newJobs.length + ')' : '';
 }
 
 function renderJobs() {
   var grid = document.getElementById('jobs-grid');
   var cnt  = document.getElementById('jobs-count');
-  var bbar = document.getElementById('bulk-delete-bar');
   var jobs;
 
   updateTabCounts();
 
   var unsavedJobs = _allJobs.filter(function(j) { return !j.saved_at; });
 
-  var tierMapBulk = { target:'Top Target', win:'Fast Win', stretch:'Stretch Role', skip:'Probably Skip' };
-
   if (_currentJobsTab === 'all') {
     jobs = sortJobs(unsavedJobs);
     cnt.textContent = jobs.length + ' job' + (jobs.length !== 1 ? 's' : '') + ' total';
-    if (bbar) bbar.style.display = 'none';
-  } else if (_currentJobsTab === 'new') {
-    // Jobs from the most recent scout run
-    jobs = _latestRunId
-      ? unsavedJobs.filter(function(j) { return String(j.scout_run_id) === String(_latestRunId); }).sort(function(a,b) { return new Date(b.found_at||0).getTime() - new Date(a.found_at||0).getTime(); })
-      : [];
-    if (!jobs.length) {
-      cnt.textContent = 'No new jobs from the latest scout run';
-      grid.innerHTML = '<div style="padding:48px 24px;text-align:center;color:var(--muted);font-size:13px">Run the scout to see new results here</div>';
-      if (bbar) bbar.style.display = 'none';
-      return;
-    }
-    cnt.textContent = jobs.length + ' new job' + (jobs.length !== 1 ? 's' : '') + ' from the latest run';
-    if (bbar) bbar.style.display = 'none';
   } else {
-    var tierLabel = tierMapBulk[_currentJobsTab];
+    var tierMap = { target:'Top Target', win:'Fast Win', stretch:'Stretch Role', skip:'Probably Skip' };
+    var tierLabel = tierMap[_currentJobsTab];
     jobs = sortJobs(unsavedJobs.filter(function(j) { return tierKey(j) === _currentJobsTab; }));
     var emptyMsg = {
       target: 'No Top Target roles yet \\u2014 run the scout or score your library',
@@ -9354,56 +9053,16 @@ function renderJobs() {
     if (!jobs.length) {
       cnt.textContent = emptyMsg[_currentJobsTab] || 'No jobs in this tier';
       grid.innerHTML = '<div style="padding:48px 24px;text-align:center;color:var(--muted);font-size:13px">' + (emptyMsg[_currentJobsTab] || 'No jobs in this tier') + '</div>';
-      if (bbar) bbar.style.display = 'none';
       return;
     }
     var newCount = jobs.filter(isNew).length;
     cnt.textContent = jobs.length + ' ' + (tierLabel || _currentJobsTab) + (jobs.length !== 1 ? ' roles' : ' role') + (newCount ? ' \\u2014 ' + newCount + ' new' : '');
-    if (bbar) {
-      bbar.style.display = 'flex';
-      bbar.innerHTML = '<button class="bulk-delete-btn" onclick="deleteBulkCurrentTab()">\uD83D\uDDD1 Delete All ' + jobs.length + ' ' + (tierLabel || _currentJobsTab) + ' jobs</button><span style="font-size:11px;color:var(--muted)">Permanently removes from your board and database</span>';
-    }
   }
   if (!jobs || !jobs.length) {
     grid.innerHTML = '<div style="padding:48px 24px;text-align:center;color:var(--muted);font-size:13px">No jobs yet \\u2014 run the scout to find matches</div>';
-    if (bbar) bbar.style.display = 'none';
     return;
   }
   grid.innerHTML = jobs.map(function(j) { return renderJobCard(j, { showNew: true }); }).join('');
-}
-
-async function deleteJob(jobId, btn) {
-  if (!confirm('Remove this job from your board? This cannot be undone.')) return;
-  try {
-    if (btn) btn.disabled = true;
-    var res = await fetch('/api/jobs/' + jobId, { method: 'DELETE' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    _allJobs = _allJobs.filter(function(j) { return String(j.id) !== String(jobId); });
-    renderJobs();
-  } catch (e) {
-    alert('Delete failed: ' + e.message);
-    if (btn) btn.disabled = false;
-  }
-}
-
-async function deleteBulkCurrentTab() {
-  var tierMapBulk2 = { target:'Top Target', win:'Fast Win', stretch:'Stretch Role', skip:'Probably Skip' };
-  var tier = tierMapBulk2[_currentJobsTab];
-  if (!tier) return;
-  var count = _allJobs.filter(function(j) { return !j.saved_at && tierKey(j) === _currentJobsTab; }).length;
-  if (!confirm('Permanently delete all ' + count + ' ' + tier + ' jobs? This cannot be undone.')) return;
-  try {
-    var res = await fetch('/api/jobs/bulk', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tier: tier })
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    _allJobs = _allJobs.filter(function(j) { return j.saved_at || tierKey(j) !== _currentJobsTab; });
-    renderJobs();
-  } catch (e) {
-    alert('Bulk delete failed: ' + e.message);
-  }
 }
 
 var _hideLowConfidence = false;
@@ -9423,13 +9082,13 @@ function toggleConfidenceFilter() {
 async function loadJobs() {
   try {
     var url = '/api/jobs?min_score=50' + (_hideLowConfidence ? '&hide_low_confidence=true' : '');
-    var results = await Promise.all([
-      fetch(url).then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }),
-      fetch('/api/scout-runs/latest').then(function(r) { return r.ok ? r.json() : null; }).catch(function() { return null; })
-    ]);
-    var jobs = results[0];
-    var latestRun = results[1];
-    _latestRunId = latestRun ? latestRun.id : null;
+    var res = await fetch(url);
+    if (!res.ok) {
+      var body = '';
+      try { body = JSON.stringify(await res.json()); } catch(_){}
+      throw new Error('HTTP ' + res.status + (body ? ': ' + body : ''));
+    }
+    var jobs = await res.json();
     _allJobs = jobs;
     _jobsById = {};
     jobs.forEach(function(j) { _jobsById[j.id] = j; });
@@ -11200,30 +10859,6 @@ async function saveToWatchlist(name, website, btn) {
   }
 }
 
-// ── scout options popup ───────────────────────────────────────────────────
-var _scoutMode = 'watchlist';
-function toggleScoutOpts(e) {
-  e.stopPropagation();
-  var popup = document.getElementById('scout-popup');
-  var btn = document.getElementById('scout-opts-btn');
-  var isOpen = popup.classList.contains('open');
-  popup.classList.toggle('open', !isOpen);
-  btn.classList.toggle('active', !isOpen);
-}
-function setScoutMode(mode) {
-  _scoutMode = mode;
-  document.getElementById('mode-btn-watchlist').classList.toggle('selected', mode === 'watchlist');
-  document.getElementById('mode-btn-open').classList.toggle('selected', mode === 'open');
-}
-document.addEventListener('click', function(e) {
-  var popup = document.getElementById('scout-popup');
-  var wrap = document.getElementById('scout-opts-btn')?.closest('.scout-opts-wrap');
-  if (popup && wrap && !wrap.contains(e.target)) {
-    popup.classList.remove('open');
-    document.getElementById('scout-opts-btn').classList.remove('active');
-  }
-});
-
 // ── run scout ─────────────────────────────────────────────────────────────
 var pollTimer = null;
 async function runScout() {
@@ -11231,21 +10866,11 @@ async function runScout() {
   var msg = document.getElementById('run-msg');
   var stageEl = document.getElementById('run-stage');
   var autoEl = document.getElementById('auto-run-badge');
-  var fastSearch = document.getElementById('fast-search-chk')?.checked || false;
-  // Close the popup
-  document.getElementById('scout-popup')?.classList.remove('open');
-  document.getElementById('scout-opts-btn')?.classList.remove('active');
   btn.disabled = true;
   stageEl.style.display = 'none';
-  var modeDisplay = _scoutMode === 'open' ? 'Open Search' : 'Watchlist';
-  var fastDisplay = fastSearch ? ' \u26A1 Quick' : '';
-  msg.textContent = 'Starting\u2026 (' + modeDisplay + fastDisplay + ')';
+  msg.textContent = 'Starting\u2026';
   try {
-    var res = await fetch('/api/scout/run', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ search_mode: _scoutMode, fast_search: fastSearch }),
-    });
+    var res = await fetch('/api/scout/run', { method:'POST' });
     if (!res.ok) {
       var d = await res.json();
       msg.textContent = d.error || 'Error starting run';
@@ -11259,7 +10884,7 @@ async function runScout() {
   }
   document.getElementById('dot').className = 'dot running';
   if (autoEl) autoEl.style.display = 'none';
-  msg.textContent = 'Scouting\u2026 (' + modeDisplay + fastDisplay + ')';
+  msg.textContent = 'Scouting\u2026';
   var jobRefreshTimer = null;
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(async function() {
@@ -11288,11 +10913,6 @@ async function runScout() {
           loadJobs().then(function() {
             if (_allJobs.length > found) {
               msg.textContent = 'Done! ' + found + ' new match' + (found !== 1 ? 'es' : '') + ' (\u2022 ' + _allJobs.length + ' total)';
-            }
-            // Auto-switch to New tab if there are results from this run
-            var newTabJobs = _latestRunId ? _allJobs.filter(function(j) { return !j.saved_at && String(j.scout_run_id) === String(_latestRunId); }) : [];
-            if (newTabJobs.length > 0 && document.getElementById('panel-jobs') && document.getElementById('panel-jobs').classList.contains('active')) {
-              showJobsTab('new');
             }
           });
         } else {
@@ -12693,7 +12313,7 @@ async function scanForRoles(source) {
     if (!res.ok) throw new Error(json.error || 'Scan failed');
 
     if (json.skipped) {
-      throw new Error('AI discovery not available: ' + (json.skip_reason || 'check PERPLEXITY_API_KEY in Settings'));
+      throw new Error('Gemini search not available: ' + (json.skip_reason || 'check GEMINI_API_KEY in Settings'));
     }
 
     var jobs = json.jobs || [];
@@ -13380,7 +13000,7 @@ async function runWatchlistScan() {
   var btn = document.getElementById('cw-scan-btn');
   var statusEl = document.getElementById('cw-scan-status');
   if (btn) { btn.disabled = true; btn.textContent = 'Scanning\u2026'; }
-  if (statusEl) statusEl.textContent = 'Perplexity is searching for open roles at each company\u2026 (30-90s per company)';
+  if (statusEl) statusEl.textContent = 'Gemini is searching for open roles at each company\u2026 (30-90s per company)';
   try {
     var res = await fetch('/api/companies/scan-jobs', { method: 'POST' });
     var data = await res.json();

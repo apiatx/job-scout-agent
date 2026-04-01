@@ -281,25 +281,8 @@ export async function generateCareerIntel(criteria: CareerIntelCriteria): Promis
   const ai = new GoogleGenAI({ apiKey });
 
   console.log(`\n──── CAREER INTEL GENERATION ─────────────────────────────────`);
+  console.log(`[CareerIntel] Candidate chain: ${candidates.map(c => c.modelName).join(' → ')}`);
 
-  // ── Perplexity primary ────────────────────────────────────────────────
-  try {
-    const { perplexitySearch } = await import('./perplexity.js');
-    console.log('[CareerIntel] Trying Perplexity sonar-pro');
-    const plxText = await perplexitySearch(prompt, { maxTokens: 8192, temperature: 0.2 });
-    const parsed = parseIntelFromText(plxText);
-    if (parsed && Array.isArray(parsed.companies) && parsed.companies.length > 0) {
-      const cards = rankAndNormaliseCards(parsed.companies, criteria, parsed.web_search_queries ?? []);
-      console.log(`[CareerIntel] Perplexity returned ${cards.length} company cards`);
-      return { ...parsed, companies: cards, model_used: 'perplexity/sonar-pro', grounding_sources_count: 0 };
-    }
-    throw new Error('No companies parsed from Perplexity response');
-  } catch (plxErr) {
-    console.warn('[CareerIntel] Perplexity failed, trying Gemini:', plxErr instanceof Error ? plxErr.message.slice(0, 80) : plxErr);
-  }
-
-  // ── Gemini fallback ────────────────────────────────────────────────────
-  console.log(`[CareerIntel] Gemini candidate chain: ${candidates.map(c => c.modelName).join(' → ')}`);
   for (const candidate of candidates) {
     const { modelName, note } = candidate;
     console.log(`[CareerIntel] Trying: ${modelName} (${note})`);

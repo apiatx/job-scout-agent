@@ -191,34 +191,6 @@ Return ONLY valid JSON — no markdown, no prose, no code blocks:
   ]
 }`;
 
-  // ── Perplexity primary ────────────────────────────────────────────────
-  try {
-    const { perplexitySearch } = await import('./perplexity.js');
-    console.log('[DeepValue] Trying Perplexity sonar-pro');
-    const plxText = await perplexitySearch(fullPrompt, { maxTokens: 8192, temperature: 0.3 });
-    let jsonStr = plxText.trim();
-    const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
-    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('No JSON object in Perplexity response');
-    const parsed: any = JSON.parse(jsonMatch[0]);
-    const companies: DeepValueCompany[] = (parsed.companies || []).map((c: any) => ({
-      name: c.name || '', website: c.website || null, category: c.category || 'Other',
-      stage: c.stage || null, ticker: c.ticker || null, is_public: Boolean(c.is_public),
-      tagline: c.tagline || '', why_you_need_this: c.why_you_need_this || '',
-      customer_pain: c.customer_pain || '', growth_signal: c.growth_signal || '',
-      notable_customers: Array.isArray(c.notable_customers) ? c.notable_customers : [],
-      open_roles: Array.isArray(c.open_roles) ? c.open_roles : [],
-      has_open_roles: Boolean(c.has_open_roles),
-      source_citations: Array.isArray(c.source_citations) ? c.source_citations : [],
-    }));
-    console.log(`[DeepValue] Perplexity returned ${companies.length} companies`);
-    return { generated_at: new Date().toISOString(), market_summary: parsed.market_summary || '', companies, model_used: 'perplexity/sonar-pro', grounding_sources_count: 0 };
-  } catch (plxErr) {
-    console.warn('[DeepValue] Perplexity failed, trying Gemini:', plxErr instanceof Error ? plxErr.message.slice(0, 80) : plxErr);
-  }
-
-  // ── Gemini fallback ────────────────────────────────────────────────────
   let lastError: unknown;
 
   for (const candidate of candidates) {
