@@ -502,6 +502,7 @@ async function initDb(): Promise<void> {
   await safeAddColumn('criteria', 'proxy_url', "TEXT NOT NULL DEFAULT ''");
   await safeAddColumn('jobs', 'description', 'TEXT');
   await safeAddColumn('jobs', 'date_posted', 'TEXT');
+  await safeAddColumn('jobs', 'first_seen_at', 'TIMESTAMPTZ DEFAULT NOW()');
   await safeAddColumn('jobs', 'url_ok', 'BOOLEAN');
   await safeAddColumn('jobs', 'url_checked_at', 'TIMESTAMPTZ');
   await safeAddColumn('jobs', 'canonical_url', 'TEXT');
@@ -5188,8 +5189,9 @@ async function runScoutInBackground(runId: number): Promise<void> {
     try {
       const jobSpyResults = await runJobSpyScraper({
         target_roles: criteria.target_roles ?? [],
-        locations: criteria.locations ?? [],
-        proxy_url: criteria.proxy_url ?? '',
+        locations:    criteria.locations    ?? [],
+        industries:   criteria.industries   ?? [],
+        proxy_url:    criteria.proxy_url    ?? '',
       });
       console.log(`JobSpy returned ${jobSpyResults.length} jobs — adding all to pipeline`);
       // Use the per-job source tag from the scraper (linkedin / indeed / glassdoor / ziprecruiter)
@@ -5335,9 +5337,24 @@ async function runScoutInBackground(runId: number): Promise<void> {
     const hasLocationPrefs = criteria.locations.length > 0;
     const allowedWorkModes: string[] = criteria.allowed_work_modes ?? [];
 
-    function jobMatchesLocation(jobLocation: string): boolean {
-      if (!hasLocationPrefs && allowedWorkModes.length === 0) return true;
-      return checkJobLocation(jobLocation, criteria.locations, false, allowedWorkModes);
+    // Build a simple pattern to check whether any user location appears in a string
+    const { pattern: locPattern } = buildLocationAllowPattern(criteria.locations);
+    function jobMatchesLocation(jobLocation: string, jobTitle: string): { pass: boolean; reason: string } {
+      // No location prefs configured — let everything through
+      if (!hasLocationPrefs && allowedWorkModes.length === 0) return { pass: true, reason: 'no prefs' };
+      // Empty / unknown location — treat as potentially remote; pass through
+      const locTrim = jobLocation.trim();
+      if (!locTrim || /^(unknown|n\/a|none)$/i.test(locTrim)) return { pass: true, reason: 'no location listed' };
+      // "Remote" anywhere in location — always pass
+      if (/remote/i.test(locTrim)) return { pass: true, reason: 'remote location' };
+      // Location field matches a user-saved location
+      if (locPattern && locPattern.test(locTrim)) return { pass: true, reason: 'location field matches prefs' };
+      // Job TITLE contains a user-saved location (e.g. "AE Southeast", "Account Director Georgia")
+      if (locPattern && locPattern.test(jobTitle)) return { pass: true, reason: 'title contains location pref' };
+      // Fall through to the mode-based filter for onsite jobs
+      const modeCheck = checkJobLocation(locTrim, criteria.locations, false, allowedWorkModes);
+      if (modeCheck) return { pass: true, reason: 'mode/pattern match' };
+      return { pass: false, reason: `location "${locTrim}" not in prefs [${criteria.locations.join(', ')}]` };
     }
 
     // 2. Avoid keywords hard filter — exclude jobs whose title or description contains avoid keywords
@@ -5406,10 +5423,21 @@ async function runScoutInBackground(runId: number): Promise<void> {
     let droppedBySalary = 0;
     let droppedByTerritory = 0;
 
-    if (hasLocationPrefs) {
+    if (hasLocationPrefs || allowedWorkModes.length > 0) {
+      const locDropLog: string[] = [];
       const before = preFiltered.length;
-      preFiltered = preFiltered.filter(j => jobMatchesLocation(j.location));
+      preFiltered = preFiltered.filter(j => {
+        const { pass, reason } = jobMatchesLocation(j.location, j.title);
+        if (!pass) locDropLog.push(`  ✗ "${j.title}" @ ${j.company} — loc:"${j.location}" → ${reason}`);
+        return pass;
+      });
       droppedByLocation = before - preFiltered.length;
+      if (locDropLog.length > 0) {
+        console.log(`\n──── LOCATION FILTER DROPS (${locDropLog.length}) ─────────────────────`);
+        for (const msg of locDropLog.slice(0, 40)) console.log(msg);
+        if (locDropLog.length > 40) console.log(`  … and ${locDropLog.length - 40} more`);
+        console.log(`───────────────────────────────────────────────────────────`);
+      }
     }
     if (avoidPatterns.length > 0) {
       const before = preFiltered.length;
@@ -5664,19 +5692,35 @@ async function runScoutInBackground(runId: number): Promise<void> {
     const srcBreakdown: Record<string, number> = {};
     for (const j of allJobs) { srcBreakdown[j.source] = (srcBreakdown[j.source] ?? 0) + 1; }
 
-    console.log(`════════════════════════════════════════════════════════════`);
-    console.log(`SCOUT RUN #${runId} COMPLETE`);
+    // ── End-of-run coverage summary ──────────────────────────────────────────
+    const tierCounts: Record<string, number> = {};
+    for (const m of matches) { tierCounts[m.opportunityTier ?? 'unscored'] = (tierCounts[m.opportunityTier ?? 'unscored'] ?? 0) + 1; }
+
+    console.log(`\n${'═'.repeat(60)}`);
+    console.log(`SCOUT RUN #${runId} — COVERAGE SUMMARY`);
+    console.log(`${'═'.repeat(60)}`);
+    console.log(`  Roles searched (${criteria.target_roles.length}): ${criteria.target_roles.slice(0, 6).join(', ')}${criteria.target_roles.length > 6 ? '…' : ''}`);
+    console.log(`  Locations searched (${criteria.locations.length}): ${criteria.locations.join(', ') || '(national)'}`);
+    console.log(`  Industries used (${criteria.industries?.length ?? 0}): ${(criteria.industries ?? []).slice(0, 5).join(', ') || '(defaults)'}`);
     console.log(`  Companies scanned: ${companiesScanned}`);
+    console.log(`  ─── Raw pipeline ──────────────────────────────────────`);
     console.log(`  Raw jobs scraped:  ${allJobs.length}`);
     console.log(`  Source breakdown:  ${Object.entries(srcBreakdown).map(([k,v]) => `${k}: ${v}`).join(' | ')}`);
     if (geminiJobsFound > 0) {
-      console.log(`  Gemini discovery:  ${geminiJobsFound} found → ${geminiDeduped} already in JobSpy → ${geminiJobsFound - geminiDeduped} net-new`);
+      console.log(`  Gemini discovery:  ${geminiJobsFound} found → ${geminiDeduped} dupes → ${geminiJobsFound - geminiDeduped} net-new`);
     }
-    console.log(`  Passed title filter: ${toScore.length}`);
-    console.log(`  Pre-filtered (location/avoid/salary): ${preFiltered.length}`);
-    console.log(`  Claude matches (score >= 50): ${matches.length}`);
-    console.log(`  Saved to database: ${matches.length}`);
-    console.log(`════════════════════════════════════════════════════════════\n`);
+    console.log(`  ─── Filters ────────────────────────────────────────────`);
+    console.log(`  After title filter:    ${toScore.length} (${droppedByTitle} dropped)`);
+    console.log(`  After location filter: ${toScore.length - droppedByLocation} (${droppedByLocation} dropped)`);
+    if (droppedByAvoid > 0)    console.log(`  After avoid filter:    ${toScore.length - droppedByLocation - droppedByAvoid} (${droppedByAvoid} dropped)`);
+    if (droppedBySalary > 0)   console.log(`  After salary filter:   (${droppedBySalary} below minimum)`);
+    if (droppedByTerritory > 0) console.log(`  After territory filter:(${droppedByTerritory} wrong territory)`);
+    console.log(`  Sent to Claude:        ${preFiltered.length}`);
+    console.log(`  ─── Results ────────────────────────────────────────────`);
+    console.log(`  Claude scored:     ${matches.length} matches`);
+    console.log(`  Tier breakdown:    ${Object.entries(tierCounts).map(([k,v]) => `${k}: ${v}`).join(' | ')}`);
+    console.log(`  Saved to DB:       ${matches.length}`);
+    console.log(`${'═'.repeat(60)}\n`);
 
     await pool.query(
       "UPDATE scout_runs SET status='completed', companies_scanned=$1, jobs_found=$2, matches_found=$3, completed_at=NOW() WHERE id=$4",
@@ -8845,6 +8889,20 @@ function renderJobCard(j, opts) {
     }
   }
 
+  // first_seen_at freshness badge — "New" / "X days ago" / "30+ days"
+  var firstSeenBadge = '';
+  var _fsa = j.first_seen_at || j.found_at;
+  if (_fsa) {
+    var _fsaDays = Math.floor((Date.now() - new Date(_fsa).getTime()) / 86400000);
+    if (_fsaDays < 1) {
+      firstSeenBadge = '<span style="display:inline-flex;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:700;background:rgba(74,222,128,.15);color:#4ade80;border:1px solid rgba(74,222,128,.35)" title="First seen today \u2014 just discovered in this scout run">New</span>';
+    } else if (_fsaDays >= 30) {
+      firstSeenBadge = '<span style="display:inline-flex;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:600;background:rgba(251,146,60,.1);color:#fb923c;border:1px solid rgba(251,146,60,.3)" title="First seen ' + _fsaDays + ' days ago \u2014 may be a stale posting">30+ days</span>';
+    } else {
+      firstSeenBadge = '<span style="display:inline-flex;padding:2px 7px;border-radius:3px;font-size:10px;font-weight:500;background:transparent;color:var(--muted);border:1px solid #333" title="First seen ' + _fsaDays + ' days ago">' + _fsaDays + 'd ago</span>';
+    }
+  }
+
   // User action status badge
   var userAction = j.user_action || '';
   var actionColors = { applied: '#4ade80', interested: '#f5c842', interviewing: '#818cf8', rejected: '#e55353', skipped: '#555' };
@@ -8975,6 +9033,7 @@ function renderJobCard(j, opts) {
     '<div class="card-meta-strip">' +
       salaryHtml +
       aiRiskBadge +
+      firstSeenBadge +
       urgentBadge +
       staleBadge +
       actionBadgeHtml +

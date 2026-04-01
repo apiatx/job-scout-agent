@@ -222,6 +222,7 @@ export function proxyConfigured(settingsProxyUrl?: string): { configured: boolea
 export async function runJobSpyScraper(criteria?: {
   target_roles?: string[];
   locations?: string[];
+  industries?: string[];
   proxy_url?: string;   // fallback if JOBSPY_PROXY Replit Secret is not set
 }): Promise<Array<ScrapedJob & { source: string }>> {
   const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -230,6 +231,7 @@ export async function runJobSpyScraper(criteria?: {
   const criteriaJson = JSON.stringify({
     target_roles: criteria?.target_roles ?? [],
     locations:    criteria?.locations    ?? [],
+    industries:   criteria?.industries   ?? [],
   });
 
   // Determine proxy status (never log the actual URL)

@@ -1,0 +1,83 @@
+The job scout needs better real-time job finding. Three improvements needed. Stay on the feature branch.
+
+IMPORTANT CONSTRAINT FOR ALL IMPROVEMENTS:
+Every search, filter, and location preference must be read dynamically from the user's settings table at the start of each scout run. Never hardcode locations, role titles, sectors, or any other search criteria. If the user changes their settings, the next scout run must reflect those changes automatically with zero code changes required.
+
+IMPROVEMENT 1 — Build JobSpy searches dynamically from user settings
+
+Read these values from the settings table at the start of every scout run:
+- target_roles (list of role titles the user wants)
+- locations (list of locations/regions the user prefers)
+- industries (list of sectors/industries the user targets)
+- must_have_keywords
+- nice_to_have_keywords
+
+Build the JobSpy search matrix dynamically using what is actually saved:
+
+Step 1 — Role x Sector searches (existing logic, keep it):
+For each role in target_roles x each industry in industries, create one search.
+
+Step 2 — Role x Location searches (new):
+For each role in target_roles x each location in locations, create one search.
+Example: if user has saved "Enterprise Account Executive" and "Georgia", create search "Enterprise Account Executive Georgia"
+Example: if user has saved "Account Director" and "Southeast", create search "Account Director Southeast"
+
+Step 3 — Role x Location x Sector searches for top combinations (new):
+For the top 3 most specific roles x top 3 most specific locations x top 3 industries, create searches like:
+"Enterprise Account Executive Southeast data center"
+"Named Account Executive Georgia storage"
+This adds targeted 3-keyword searches that hit LinkedIn very precisely.
+
+Deduplicate all searches before running. Cap total searches at 500 to avoid timeouts.
+Set results_wanted=15 per search, is_remote=True, site_name=["linkedin", "indeed"].
+Run in batches of 5 with 2 second delays.
+Deduplicate all results by URL before passing to pipeline.
+
+IMPROVEMENT 2 — Fix location pre-filter to respect user settings
+
+Read locations from the settings table. Never hardcode any location.
+
+A job should PASS the location filter if ANY of these are true:
+- Job location field contains "Remote" (case insensitive)
+- Job location field contains any location string from user's saved locations list
+- Job title contains any location string from user's saved locations list (catches "AE Southeast" type titles)
+- Job has no location listed (treat as potentially remote)
+
+A job should only be DROPPED if:
+- Location is explicitly a specific city or state that does not match any of the user's saved locations
+- AND the job title contains no location indicator that matches user's saved locations
+
+When the user's saved locations include broad terms like "Remote" or "Southeast" or "East Coast", be generous — match any job that could reasonably fall within those terms.
+
+Log the exact reason each job is dropped by location filter so it can be debugged if roles are being incorrectly filtered.
+
+IMPROVEMENT 3 — Job freshness tracking
+
+Add first_seen_at column to jobs table if it does not already exist:
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMP DEFAULT NOW();
+
+When a job is first inserted, set first_seen_at to NOW().
+When a job already exists and is seen again in a new scout run, do NOT update first_seen_at — keep the original date.
+
+On every job card display, show a freshness badge:
+- "New" in green — seen for the first time in the current scout run
+- "X days ago" in muted text — seen X days before today
+- "30+ days" in orange — may be a stale posting
+
+IMPROVEMENT 4 — Log search coverage at end of scout run
+
+At the end of every scout run, log a summary showing:
+- How many unique searches were run (built from user settings)
+- Which locations were searched (from settings)
+- Which role titles were searched (from settings)
+- Which industries were searched (from settings)
+- Total raw results before dedup
+- Total after dedup
+- Total after location filter (and how many dropped)
+- Total after title filter
+- Total sent to Claude scoring
+- Final counts per category (Top Targets, Fast Wins, Stretch, Probably Pass)
+
+This makes it easy to see exactly what the scout did and tune settings if coverage is too narrow or too broad.
+
+Push to the feature branch when done.

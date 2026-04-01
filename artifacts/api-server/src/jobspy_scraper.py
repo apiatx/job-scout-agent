@@ -108,23 +108,41 @@ MAX_INDEED_TERMS = 50
 
 # ── Search term generation ────────────────────────────────────────────────────
 
-def build_terms(target_roles: list) -> dict:
+def build_terms(target_roles: list, user_locations: list = None, industries: list = None) -> dict:
     """
     Build search term sets for each source phase.
+
+    Step 1 — Role × Sector (classic):
+      seniority prefix × base role; industry qualifier × base role; specialty terms.
+
+    Step 2 — Role × Location (new):
+      Each exact target role combined with each user-saved location string.
+      e.g. "Enterprise Account Executive Georgia", "Account Director Southeast"
+
+    Step 3 — Role × Location × Sector top combos (new):
+      top-3 roles × top-3 locations × top-3 industries for precise 3-keyword hits.
+      e.g. "Enterprise AE Southeast data center"
+
     Returns:
-      all_terms     : up to MAX_INDEED_TERMS terms for Indeed national sweep
-      linkedin_terms: up to 20 focused terms for LinkedIn (no industry qualifiers)
-      location_terms: up to 15 high-signal terms for per-city Indeed sweeps
+      all_terms       : full set (capped at MAX_INDEED_TERMS) for Indeed national sweep
+      linkedin_terms  : focused subset for LinkedIn (no industry qualifiers)
+      location_terms  : high-signal subset for per-city Indeed sweeps
+      role_x_loc_terms: role × location terms for targeted LinkedIn + Indeed passes
     """
+    if user_locations is None:
+        user_locations = []
+    if industries is None:
+        industries = []
+
     all_terms = set()
 
-    # 1. User's exact saved roles always included first
+    # ── Step 1a: User's exact saved roles always included first ──────────────
     for role in target_roles:
         r = role.strip()
         if r:
             all_terms.add(r)
 
-    # 2. Detect base role families from what the user saved
+    # ── Step 1b: Detect base role families ────────────────────────────────────
     role_text = " ".join(target_roles).lower()
     base_roles = []
     role_map = [
@@ -146,45 +164,83 @@ def build_terms(target_roles: list) -> dict:
     if not base_roles:
         base_roles = ["Account Executive", "Account Manager", "Sales Executive"]
 
-    # 3. Seniority prefix × base role
+    # ── Step 1c: Seniority prefix × base role ─────────────────────────────────
     for prefix in SENIORITY_PREFIXES:
         for role in base_roles:
             all_terms.add(f"{prefix} {role}")
 
-    # 4. Industry qualifier × top 2 base roles
-    for qual in INDUSTRY_QUALIFIERS:
+    # ── Step 1d: Industry qualifier × top 2 base roles ────────────────────────
+    # Use user-saved industries if available; fall back to hard-coded qualifiers
+    industry_qualifiers = [i.strip() for i in industries if i.strip()] or INDUSTRY_QUALIFIERS
+    for qual in industry_qualifiers:
         for role in base_roles[:2]:
             all_terms.add(f"{role} {qual}")
 
-    # 5. Specialty terms
+    # ── Step 1e: Specialty terms ───────────────────────────────────────────────
     all_terms.update(SPECIALTY_TERMS)
 
-    all_sorted = sorted(all_terms)
+    # ── Step 2: Role × Location matrix ────────────────────────────────────────
+    # Skip broad/vague location strings that won't help LinkedIn searches
+    _skip_locs = {"united states", "us", "usa", "remote", ""}
+    _specific_locs = [
+        loc.strip() for loc in user_locations
+        if loc.strip().lower() not in _skip_locs
+    ]
+    role_x_loc_terms: set = set()
+    for role in target_roles:
+        r = role.strip()
+        if not r:
+            continue
+        for loc in _specific_locs:
+            role_x_loc_terms.add(f"{r} {loc}")
 
-    # Apply hard cap — priority: user's exact roles first
+    # Also add seniority × base role × location for the top 3 roles / top 3 locs
+    top_roles = (target_roles or base_roles)[:3]
+    top_locs  = _specific_locs[:3]
+    for role in top_roles:
+        for loc in top_locs:
+            role_x_loc_terms.add(f"{role.strip()} {loc}")
+
+    # ── Step 3: Role × Location × Industry top combos ─────────────────────────
+    top_industries = [i.strip() for i in industries if i.strip()][:3] or INDUSTRY_QUALIFIERS[:3]
+    role_x_loc_x_ind_terms: set = set()
+    for role in (target_roles or base_roles)[:3]:
+        r = role.strip()
+        if not r:
+            continue
+        for loc in top_locs:
+            for ind in top_industries:
+                role_x_loc_x_ind_terms.add(f"{r} {loc} {ind}")
+
+    # ── Apply hard cap on Step 1 terms ────────────────────────────────────────
+    all_sorted = sorted(all_terms)
     if len(all_sorted) > MAX_INDEED_TERMS:
         priority = [t for t in all_sorted if t in target_roles]
         rest     = [t for t in all_sorted if t not in priority]
         all_sorted = (priority + rest)[:MAX_INDEED_TERMS]
 
-    # LinkedIn subset: seniority variants only (no industry qualifiers, no specialty)
+    # ── LinkedIn subset: seniority variants only ───────────────────────────────
     linkedin_terms = sorted({
         t for t in all_sorted
         if not any(q in t for q in INDUSTRY_QUALIFIERS)
         and t not in SPECIALTY_TERMS
     })[:20]
 
-    # Location subset: high-signal terms only for per-city sweeps
+    # ── Location subset: high-signal terms for per-city Indeed sweeps ─────────
     location_terms = sorted({
         t for t in all_sorted
         if any(p in t for p in ["Senior", "Enterprise", "Commercial", "Mid-Market", "Strategic", "Named"])
         or t in target_roles
     })[:15]
 
+    # Merge role×loc and role×loc×ind into a single targeted set (capped at 200)
+    targeted_terms = sorted(role_x_loc_terms | role_x_loc_x_ind_terms)[:200]
+
     return {
         "all_terms":      all_sorted,
         "linkedin_terms": linkedin_terms,
         "location_terms": location_terms,
+        "targeted_terms": targeted_terms,
     }
 
 
@@ -530,26 +586,30 @@ def main():
 
     target_roles:    list = criteria.get("target_roles") or []
     user_locations:  list = criteria.get("locations")    or []
+    industries:      list = criteria.get("industries")   or []
 
     # ── Log startup info (NO proxy credentials in output) ────────────────────
-    print(f"JobSpy: target_roles={target_roles}", file=sys.stderr)
-    print(f"JobSpy: locations={user_locations}",  file=sys.stderr)
-    print(f"JobSpy: proxy={_proxy_status()}",     file=sys.stderr)
+    print(f"JobSpy: target_roles={target_roles}",   file=sys.stderr)
+    print(f"JobSpy: locations={user_locations}",    file=sys.stderr)
+    print(f"JobSpy: industries={industries}",       file=sys.stderr)
+    print(f"JobSpy: proxy={_proxy_status()}",       file=sys.stderr)
 
     # Emit a structured status line so Node.js can surface it to the API
     proxy_configured = bool(PROXY_URL)
     print(f"PROXY_STATUS: {'configured' if proxy_configured else 'not_configured'}", file=sys.stderr)
 
-    # ── Build search terms ────────────────────────────────────────────────────
-    terms          = build_terms(target_roles)
-    all_terms      = terms["all_terms"]       # full set for Indeed national
-    linkedin_terms = terms["linkedin_terms"]  # focused subset for LinkedIn
-    location_terms = terms["location_terms"]  # focused subset for per-city sweeps
+    # ── Build search terms (dynamic from user settings) ───────────────────────
+    terms           = build_terms(target_roles, user_locations, industries)
+    all_terms       = terms["all_terms"]        # full set for Indeed national
+    linkedin_terms  = terms["linkedin_terms"]   # focused subset for LinkedIn
+    location_terms  = terms["location_terms"]   # focused subset for per-city sweeps
+    targeted_terms  = terms["targeted_terms"]   # role × location (± industry) combos
 
     print(
-        f"JobSpy: {len(all_terms)} Indeed terms | "
+        f"JobSpy search matrix: {len(all_terms)} sector terms | "
         f"{len(linkedin_terms)} LinkedIn terms | "
-        f"{len(location_terms)} per-location terms",
+        f"{len(location_terms)} per-city terms | "
+        f"{len(targeted_terms)} role\u00d7location targeted terms",
         file=sys.stderr,
     )
 
@@ -657,6 +717,48 @@ def main():
             file=sys.stderr,
         )
 
+    # ── Phase 5: Targeted role × location (± industry) searches ──────────────
+    # These are the dynamic combos built from the user's saved roles + locations.
+    # Run on both LinkedIn and Indeed to maximise geo-targeted coverage.
+    if targeted_terms:
+        # LinkedIn targeted pass (top 30 terms, rate-limit conscious)
+        li_targeted = targeted_terms[:30]
+        print(
+            f"\nJobSpy [Phase 5/5]: LinkedIn targeted (role×location) — {len(li_targeted)} terms",
+            file=sys.stderr,
+        )
+        li_tgt_frames = run_concurrent(
+            search_linkedin,
+            [(term, "United States") for term in li_targeted],
+            MAX_WORKERS_LINKEDIN,
+            "LinkedIn-Targeted",
+        )
+        li_tgt_df = concat_and_dedup(li_tgt_frames, "linkedin")
+        print(f"JobSpy [Phase 5/5]: LinkedIn targeted → {len(li_tgt_df)} unique", file=sys.stderr)
+        source_dfs.append(li_tgt_df)
+
+        # Indeed targeted pass — use specific location from each term (already embedded)
+        # Run up to 50 targeted Indeed searches capped at 15 results each (faster)
+        indeed_targeted = targeted_terms[:50]
+        print(
+            f"JobSpy [Phase 5/5]: Indeed targeted (role×location) — {len(indeed_targeted)} terms",
+            file=sys.stderr,
+        )
+        indeed_tgt_frames = run_concurrent(
+            search_indeed,
+            [(term, "United States", 15) for term in indeed_targeted],
+            MAX_WORKERS_INDEED,
+            "Indeed-Targeted",
+        )
+        indeed_tgt_df = concat_and_dedup(indeed_tgt_frames, "indeed")
+        print(f"JobSpy [Phase 5/5]: Indeed targeted → {len(indeed_tgt_df)} unique", file=sys.stderr)
+        source_dfs.append(indeed_tgt_df)
+    else:
+        print(
+            f"\nJobSpy [Phase 5/5]: Skipped — no locations saved in Settings",
+            file=sys.stderr,
+        )
+
     # ── Global cross-source dedup ─────────────────────────────────────────────
     total_raw = sum(len(df) for df in source_dfs if df is not None and not df.empty)
     final_df  = global_dedup(source_dfs)
@@ -676,6 +778,27 @@ def main():
     source_counts = Counter(j["source"] for j in jobs)
     print(f"JobSpy: source breakdown → {dict(source_counts)}", file=sys.stderr)
     print(f"JobSpy: outputting {len(jobs)} jobs", file=sys.stderr)
+
+    # ── Coverage summary ──────────────────────────────────────────────────────
+    _specific_locs_final = [
+        loc for loc in user_locations
+        if loc.strip().lower() not in ("united states", "us", "usa", "remote", "")
+    ]
+    print(f"\n{'='*60}", file=sys.stderr)
+    print(f"JOBSPY COVERAGE SUMMARY", file=sys.stderr)
+    print(f"{'='*60}", file=sys.stderr)
+    print(f"  Roles searched ({len(target_roles)}): {', '.join(target_roles) or '(defaults)'}", file=sys.stderr)
+    print(f"  Locations searched ({len(user_locations)}): {', '.join(user_locations) or '(national)'}", file=sys.stderr)
+    print(f"  Industries used ({len(industries)}): {', '.join(industries) or '(qualifiers)'}", file=sys.stderr)
+    print(f"  Sector terms built:   {len(all_terms)}", file=sys.stderr)
+    print(f"  LinkedIn terms:       {len(linkedin_terms)}", file=sys.stderr)
+    print(f"  Per-city terms:       {len(location_terms)} × {len(_specific_locs_final)} locations", file=sys.stderr)
+    print(f"  Targeted terms:       {len(targeted_terms)} (role×location combos)", file=sys.stderr)
+    print(f"  Raw results:          {total_raw}", file=sys.stderr)
+    print(f"  After global dedup:   {len(final_df)}", file=sys.stderr)
+    print(f"  Valid jobs output:    {len(jobs)}", file=sys.stderr)
+    print(f"  Source breakdown:     {dict(source_counts)}", file=sys.stderr)
+    print(f"{'='*60}\n", file=sys.stderr)
 
     # Emit a structured summary line so Node.js can parse it
     print(
