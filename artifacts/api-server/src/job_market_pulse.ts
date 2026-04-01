@@ -3,17 +3,17 @@
  *
  * Combines two data sources:
  *   1. Scout-collected jobs DB — raw hiring activity per company/role/salary
- *   2. Gemini + Google Search — real-time signal assessment per company
+ *   2. Claude + web search — real-time signal assessment per company
  *
- * For each company the scout has found jobs at, Gemini assesses:
+ * For each company the scout has found jobs at, Claude assesses:
  *   - Is this TRUE GROWTH (new funding, new product, new market)?
  *   - Or HYPE / FLUFF / DESPERATION (patching bad product with headcount)?
  *   - Or AI RISK (core offering soon automated away)?
  *
- * Model waterfall: gemini-3-flash-preview → gemini-3.1-pro-preview → gemini-flash-latest → gemini-pro-latest
+ * Model: claude-sonnet-4-6 with web_search tool
  */
 
-// [Removed] Gemini import (GoogleGenAI)
+import Anthropic from '@anthropic-ai/sdk';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -66,29 +66,6 @@ export interface JobMarketPulseResult {
   grounding_sources_count: number;
 }
 
-// ── Model waterfall ───────────────────────────────────────────────────────────
-
-interface ModelCandidate { modelName: string; note: string }
-
-const CANDIDATES: ModelCandidate[] = [
-  { modelName: 'gemini-3-flash-preview',  note: 'Gemini 3 Flash — default' },
-  { modelName: 'gemini-3.1-pro-preview',  note: 'Gemini 3.1 Pro — quality' },
-  { modelName: 'gemini-flash-latest',     note: 'Flash alias' },
-  { modelName: 'gemini-pro-latest',       note: 'Pro alias' },
-];
-
-function isUnavailable(err: unknown): boolean {
-  const m = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  return m.includes('model not found') || m.includes('404') || m.includes('not found') ||
-         m.includes('not available') || m.includes('unsupported model') || m.includes('deprecated');
-}
-
-function candidateChain(): ModelCandidate[] {
-  const env = process.env.GEMINI_MODEL?.trim();
-  if (!env) return [...CANDIDATES];
-  return [{ modelName: env, note: 'env override' }, ...CANDIDATES.filter(c => c.modelName !== env)];
-}
-
 // ── Prompt ────────────────────────────────────────────────────────────────────
 
 function buildPulsePrompt(companies: ScoutCompanyStat[], criteria: { target_roles: string[]; industries: string[]; min_salary: number | null }): string {
@@ -109,7 +86,7 @@ ${criteria.min_salary ? `SALARY FLOOR: $${criteria.min_salary.toLocaleString()}+
 COMPANIES WITH ACTIVE JOB POSTINGS (scout-collected data):
 ${companyList}
 
-Use Google Search to research each company and classify its hiring signal. Apply a critical, skeptical lens:
+Use web search to research each company and classify its hiring signal. Apply a critical, skeptical lens:
 
 TRUE GROWTH signals:
 - New funding round (Series B+), recent IPO, profitable growth
@@ -238,12 +215,69 @@ function signalDefaultLabel(s: PulseSignal): string {
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-// [Removed] Gemini Job Market Pulse generation
+const CLAUDE_MODEL = 'claude-sonnet-4-6';
+
 export async function generateJobMarketPulse(
-  _scoutStats: ScoutCompanyStat[],
-  _criteria: { target_roles: string[]; industries: string[]; min_salary: number | null },
+  scoutStats: ScoutCompanyStat[],
+  criteria: { target_roles: string[]; industries: string[]; min_salary: number | null },
 ): Promise<JobMarketPulseResult> {
-  throw new Error('[Removed] Job Market Pulse feature requires Gemini which has been removed');
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not configured');
+
+  const client = new Anthropic({ apiKey });
+  const prompt = buildPulsePrompt(scoutStats, criteria);
+  const statMap = new Map(scoutStats.map(s => [s.company_name.toLowerCase(), s]));
+
+  console.log(`\n──── JOB MARKET PULSE GENERATION ─────────────────────────────`);
+  console.log(`[JobMarketPulse] ${scoutStats.length} companies to assess | model: ${CLAUDE_MODEL}`);
+
+  const response = await client.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 8192,
+    tools: [{ type: 'web_search_20250305', name: 'web_search' }] as any[],
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  const text = response.content
+    .filter((b: any) => b.type === 'text')
+    .map((b: any) => b.text)
+    .join('\n');
+
+  const groundingSources = response.content.filter((b: any) => b.type === 'tool_use').length;
+
+  console.log(`[JobMarketPulse] ✓ ${CLAUDE_MODEL} — ${groundingSources} web search calls`);
+
+  const parsed = parsePulseFromText(text);
+  if (!parsed) throw new Error('Could not parse structured output');
+
+  // Merge scout stats into each card
+  const cards: PulseCompanyCard[] = (parsed.companies ?? []).map((raw: Partial<PulseCompanyCard>) => {
+    const stat = statMap.get((raw.company_name || '').toLowerCase());
+    return normaliseCard(raw, stat);
+  });
+
+  // Sort: pursue first, then by signal quality, then by scout job count
+  const sigOrder: Record<PulseSignal, number> = { true_growth:5, cautious:4, unknown:3, hype_risk:2, desperate_hiring:1, ai_risk:0 };
+  const recOrder: Record<string, number> = { pursue:4, watch:3, caution:2, avoid:1 };
+  cards.sort((a, b) => {
+    const ro = (recOrder[b.recommendation] ?? 0) - (recOrder[a.recommendation] ?? 0);
+    if (ro !== 0) return ro;
+    return (sigOrder[b.signal] ?? 0) - (sigOrder[a.signal] ?? 0);
+  });
+
+  console.log(`[JobMarketPulse] ${cards.length} company cards | mood: ${parsed.market_mood}`);
+  console.log(`──────────────────────────────────────────────────────────────`);
+
+  return {
+    generated_at: new Date().toISOString(),
+    pulse_headline: parsed.pulse_headline ?? '',
+    market_mood: (['hot','warm','cooling','mixed'].includes(parsed.market_mood as string) ? parsed.market_mood : 'mixed') as JobMarketPulseResult['market_mood'],
+    market_commentary: parsed.market_commentary ?? '',
+    stats: buildStats(scoutStats, criteria),
+    companies: cards,
+    model_used: CLAUDE_MODEL,
+    grounding_sources_count: groundingSources,
+  };
 }
 
 // ── Stats builder (from raw DB data, no AI needed) ────────────────────────────
@@ -267,6 +301,8 @@ export function buildStats(stats: ScoutCompanyStat[], criteria: { target_roles: 
     .sort((a, b) => b[1] - a[1])
     .slice(0, 8)
     .map(([role, count]) => ({ role, count }));
+
+  void salarySum; void salaryCnt; void salaryHits; void criteria;
 
   return {
     top_roles,

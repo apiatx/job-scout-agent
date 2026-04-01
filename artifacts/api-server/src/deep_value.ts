@@ -1,15 +1,15 @@
 /**
  * Deep Value Intelligence Engine
  *
- * Uses Gemini + Google Search grounding to identify cutting-edge infrastructure
+ * Uses Claude + web search to identify cutting-edge infrastructure
  * companies with the clearest "why you need this" customer value proposition.
  * Focus: non-SaaS infrastructure — Cloud, AI Infra, Data/Database, HPC, Semiconductors,
  * Photonics, Networking, Storage, Datacenter.
  *
- * The EXACT user prompt is passed to Gemini, with a structured JSON output wrapper.
+ * The EXACT user prompt is passed to Claude, with a structured JSON output wrapper.
  */
 
-// [Removed] Gemini import (GoogleGenAI)
+import Anthropic from '@anthropic-ai/sdk';
 import type { Pool } from 'pg';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -43,32 +43,6 @@ export interface DeepValueResult {
   companies: DeepValueCompany[];
   model_used: string | null;
   grounding_sources_count: number;
-}
-
-// ── Model waterfall ────────────────────────────────────────────────────────────
-
-const BUILTIN_CANDIDATES = [
-  { modelName: 'gemini-3-flash-preview',   note: 'Gemini 3 Flash' },
-  { modelName: 'gemini-3.1-pro-preview',   note: 'Gemini 3.1 Pro' },
-  { modelName: 'gemini-flash-latest',      note: 'Gemini Flash (alias)' },
-  { modelName: 'gemini-pro-latest',        note: 'Gemini Pro (alias)' },
-];
-
-function isModelUnavailableError(err: unknown): boolean {
-  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  return msg.includes('model not found') || msg.includes('404') || msg.includes('not found') ||
-    msg.includes('not available') || msg.includes('unsupported model') ||
-    msg.includes('invalid model') || msg.includes('deprecated') ||
-    msg.includes('503') || msg.includes('unavailable') || msg.includes('high demand') ||
-    msg.includes('try again later') || msg.includes('overloaded') ||
-    msg.includes('resource_exhausted') || msg.includes('429') || msg.includes('timeout');
-}
-
-function buildCandidateChain() {
-  const envModel = process.env.GEMINI_MODEL?.trim();
-  if (!envModel) return [...BUILTIN_CANDIDATES];
-  const deduped = BUILTIN_CANDIDATES.filter(c => c.modelName !== envModel);
-  return [{ modelName: envModel, note: 'env override' }, ...deduped];
 }
 
 // ── DB helpers ─────────────────────────────────────────────────────────────────
@@ -143,25 +117,178 @@ export async function upsertCompanyJobScan(
   );
 }
 
-// ── Gemini generation ──────────────────────────────────────────────────────────
+// ── Claude generation ──────────────────────────────────────────────────────────
 
-export async function generateDeepValue(_criteria: {
+const CLAUDE_MODEL = 'claude-sonnet-4-6';
+
+export async function generateDeepValue(criteria: {
   target_roles: string[];
   locations: string[];
   min_salary: number | null;
 }): Promise<DeepValueResult> {
-  // [Removed] Gemini Deep Value generation
-  throw new Error('[Removed] Deep Value feature requires Gemini which has been removed');
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
+  if (!apiKey) {
+    throw new Error('ANTHROPIC_API_KEY not set — configure it in Settings');
+  }
+
+  const client = new Anthropic({ apiKey });
+
+  // The EXACT user-specified prompt + structured JSON output instructions
+  const userPromptCore = `What cutting edge companies have the clearest "why you need this" case when talking to customers. Only looking at non-saas tools, moreso 'infrastructure' like Cloud infra, AI Infra, data/database, high performance storage, HPC/Compute, semiconductors, photonics, networking, datacenter, etc.`;
+
+  const fullPrompt = `${userPromptCore}
+
+You are a senior enterprise sales intelligence analyst. Based on the above question, identify the TOP 15-25 companies that best match this criteria right now in early 2026. These should be the most compelling infrastructure companies with an undeniable customer value proposition — where the "why you need this" is crystal clear and urgent.
+
+For each company, ALSO search for any currently open sales roles (Account Executive, Sales Engineer, Strategic AE, Enterprise Sales, Regional Sales Manager, Director of Sales, VP Sales, etc.) and return any current job posting URLs you can find.
+
+Also check what target roles the user is looking for: ${(criteria.target_roles || []).join(', ') || 'Enterprise Account Executive, Sales Engineer'}.
+
+Return ONLY valid JSON — no markdown, no prose, no code blocks:
+{
+  "market_summary": "2-3 sentences on why infrastructure has the most defensible 'why you need this' value props right now",
+  "companies": [
+    {
+      "name": "company name",
+      "website": "their main domain e.g. nvidia.com",
+      "category": "one of: AI Infrastructure | Cloud Infrastructure | Data/Database | HPC/Compute | Semiconductor | Photonics | Networking | High-Performance Storage | Data Center | Advanced Materials",
+      "stage": "if private: Series A/B/C/D+/Late Stage; if public: null",
+      "ticker": "stock ticker if public, else null",
+      "is_public": true or false,
+      "tagline": "one punchy line — what they do and why it matters (max 15 words)",
+      "why_you_need_this": "the clearest 1-2 sentence customer value prop — why a buyer MUST have this",
+      "customer_pain": "what specific pain/problem they solve in 1 sentence",
+      "growth_signal": "most compelling recent signal — funding, customer win, product launch, market expansion",
+      "notable_customers": ["Customer1", "Customer2"],
+      "open_roles": [
+        { "title": "job title", "apply_url": "direct apply URL or careers page URL or null", "location": "Remote / City or null" }
+      ],
+      "has_open_roles": true or false,
+      "source_citations": [{ "title": "page title", "url": "url" }]
+    }
+  ]
+}`;
+
+  console.log(`[DeepValue] Generating with ${CLAUDE_MODEL} + web search`);
+
+  const response = await client.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 8192,
+    tools: [{ type: 'web_search_20250305', name: 'web_search' }] as any[],
+    messages: [{ role: 'user', content: fullPrompt }],
+  });
+
+  const raw = response.content
+    .filter((b: any) => b.type === 'text')
+    .map((b: any) => b.text)
+    .join('\n');
+
+  const sourceCount = response.content.filter((b: any) => b.type === 'tool_use').length;
+
+  console.log(`[DeepValue] ${CLAUDE_MODEL} — ${raw.length} chars, ${sourceCount} web search calls`);
+
+  // Parse JSON — strip markdown code blocks if present
+  let jsonStr = raw.trim();
+  const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
+  const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error(`No JSON object found in response. Preview: ${raw.slice(0, 300)}`);
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(jsonMatch[0]);
+  } catch (parseErr) {
+    throw new Error(`JSON parse failed: ${parseErr}. Preview: ${jsonMatch[0].slice(0, 300)}`);
+  }
+
+  const companies: DeepValueCompany[] = (parsed.companies || []).map((c: any) => ({
+    name: c.name || '',
+    website: c.website || null,
+    category: c.category || 'Infrastructure',
+    stage: c.stage || null,
+    ticker: c.ticker || null,
+    is_public: Boolean(c.is_public),
+    tagline: c.tagline || '',
+    why_you_need_this: c.why_you_need_this || '',
+    customer_pain: c.customer_pain || '',
+    growth_signal: c.growth_signal || '',
+    notable_customers: Array.isArray(c.notable_customers) ? c.notable_customers : [],
+    open_roles: Array.isArray(c.open_roles)
+      ? c.open_roles.map((r: any) => ({ title: r.title || '', apply_url: r.apply_url || null, location: r.location || null }))
+      : [],
+    has_open_roles: Boolean(c.has_open_roles) || (Array.isArray(c.open_roles) && c.open_roles.length > 0),
+    source_citations: Array.isArray(c.source_citations)
+      ? c.source_citations.map((s: any) => ({ title: s.title || '', url: s.url || '' }))
+      : [],
+  }));
+
+  return {
+    generated_at: new Date().toISOString(),
+    market_summary: parsed.market_summary || '',
+    companies,
+    model_used: CLAUDE_MODEL,
+    grounding_sources_count: sourceCount,
+  };
 }
 
 // ── Watchlist job scan ─────────────────────────────────────────────────────────
 
 export async function scanWatchlistCompanyJobs(
-  _pool: Pool,
+  pool: Pool,
   companyName: string,
-  _criteria: { target_roles: string[]; locations: string[] }
+  criteria: { target_roles: string[]; locations: string[] }
 ): Promise<Array<{ title: string; apply_url: string | null; location: string | null }>> {
-  // [Removed] Gemini watchlist company job scan
-  console.log(`[WatchlistScan] ${companyName}: Gemini removed — returning empty`);
-  return [];
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
+
+  const client = new Anthropic({ apiKey });
+
+  const roles = (criteria.target_roles || []).join(', ') || 'Enterprise Account Executive, Sales Engineer, Strategic Account Executive';
+  const locs = (criteria.locations || ['Remote']).join(', ');
+
+  const prompt = `Search for currently open sales job postings at ${companyName} that match these criteria:
+- Target roles: ${roles}
+- Locations: ${locs}
+
+Return ONLY valid JSON array (no markdown, no prose):
+[
+  { "title": "exact job title", "apply_url": "direct URL to apply or careers page URL", "location": "city or Remote" }
+]
+
+If no matching open roles found, return: []
+Only include REAL, currently open positions. Do not make up job listings.`;
+
+  try {
+    const response = await client.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 1024,
+      tools: [{ type: 'web_search_20250305', name: 'web_search' }] as any[],
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const raw = response.content
+      .filter((b: any) => b.type === 'text')
+      .map((b: any) => b.text)
+      .join('\n');
+
+    let jsonStr = raw.trim();
+    const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
+    const arrMatch = jsonStr.match(/\[[\s\S]*\]/);
+    if (!arrMatch) return [];
+
+    const parsed = JSON.parse(arrMatch[0]);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((r: any) => ({
+      title: r.title || '',
+      apply_url: r.apply_url || null,
+      location: r.location || null,
+    }));
+  } catch (err) {
+    console.error(`[WatchlistScan] Error scanning ${companyName}:`, err);
+    return [];
+  }
+
+  // Suppress unused variable warning
+  void pool;
 }

@@ -1,16 +1,16 @@
 /**
  * Pre-IPO Intelligence Engine
  *
- * Uses Gemini + Google Search grounding to identify top Series A/B/C/D companies
+ * Uses Claude + web search to identify top Series A/B/C/D companies
  * experiencing hypergrowth — ranked by opportunity for sales professionals right now.
  *
  * Series B is the primary target: proven PMF, scaling sales motion, high OTE potential,
  * equity still meaningful before an IPO or acquisition event.
  *
- * Same model waterfall as career_intel.ts.
+ * Model: claude-sonnet-4-6 with web_search tool
  */
 
-// [Removed] Gemini import (GoogleGenAI)
+import Anthropic from '@anthropic-ai/sdk';
 import type { Pool } from 'pg';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -56,34 +56,6 @@ export interface PreIpoCriteria {
   min_salary: number | null;
 }
 
-// ── Model waterfall (same as career_intel.ts) ─────────────────────────────────
-
-interface ModelCandidate { modelName: string; note: string; }
-
-const BUILTIN_CANDIDATES: ModelCandidate[] = [
-  { modelName: 'gemini-3-flash-preview',  note: 'Gemini 3 Flash — speed/cost default' },
-  { modelName: 'gemini-3.1-pro-preview',  note: 'Gemini 3.1 Pro — quality mode' },
-  { modelName: 'gemini-flash-latest',     note: 'alias — latest Flash' },
-  { modelName: 'gemini-pro-latest',       note: 'alias — latest Pro' },
-];
-
-function isModelUnavailableError(err: unknown): boolean {
-  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  return msg.includes('model not found') || msg.includes('404') || msg.includes('not found') ||
-    msg.includes('not available') || msg.includes('unsupported model') ||
-    msg.includes('invalid model') || msg.includes('deprecated') ||
-    msg.includes('503') || msg.includes('unavailable') || msg.includes('high demand') ||
-    msg.includes('try again later') || msg.includes('overloaded') ||
-    msg.includes('resource_exhausted') || msg.includes('429') || msg.includes('timeout');
-}
-
-function buildCandidateChain(): ModelCandidate[] {
-  const envModel = process.env.GEMINI_MODEL?.trim();
-  if (!envModel) return [...BUILTIN_CANDIDATES];
-  const deduped = BUILTIN_CANDIDATES.filter(c => c.modelName !== envModel);
-  return [{ modelName: envModel, note: 'user-configured via GEMINI_MODEL env var' }, ...deduped];
-}
-
 // ── Prompt builder ─────────────────────────────────────────────────────────────
 
 function buildPreIpoPrompt(criteria: PreIpoCriteria): string {
@@ -95,7 +67,7 @@ function buildPreIpoPrompt(criteria: PreIpoCriteria): string {
   return `You are a top-tier venture capital analyst and career intelligence researcher.
 Today's date: ${today}
 
-Your job: use Google Search to identify the most explosive, high-growth private companies at Series A, B, C, and D stages that a senior sales professional should be targeting RIGHT NOW.
+Your job: use web search to identify the most explosive, high-growth private companies at Series A, B, C, and D stages that a senior sales professional should be targeting RIGHT NOW.
 
 The candidate is a sales professional targeting these roles: ${roles}
 Their target industries/verticals: ${inds}${niches ? `\nVertical niches of interest: ${niches}` : ''}${criteria.min_salary ? `\nOTE target: $${criteria.min_salary.toLocaleString()}+` : ''}
@@ -163,9 +135,46 @@ Find at least 14 total companies. Include real companies with real data — no h
 
 // ── Core generation ────────────────────────────────────────────────────────────
 
-// [Removed] Gemini Pre-IPO generation
-export async function generatePreIpo(_criteria: PreIpoCriteria): Promise<PreIpoResult> {
-  throw new Error('[Removed] Pre-IPO feature requires Gemini which has been removed');
+const CLAUDE_MODEL = 'claude-sonnet-4-6';
+
+export async function generatePreIpo(criteria: PreIpoCriteria): Promise<PreIpoResult> {
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
+
+  const client = new Anthropic({ apiKey });
+  const prompt = buildPreIpoPrompt(criteria);
+
+  console.log(`[PreIPO] Generating with ${CLAUDE_MODEL} + web search`);
+
+  const response = await client.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 8192,
+    tools: [{ type: 'web_search_20250305', name: 'web_search' }] as any[],
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  const rawText = response.content
+    .filter((b: any) => b.type === 'text')
+    .map((b: any) => b.text)
+    .join('\n');
+
+  const groundingCount = response.content.filter((b: any) => b.type === 'tool_use').length;
+
+  const start = rawText.indexOf('PREIPO_START');
+  const end   = rawText.indexOf('PREIPO_END');
+  if (start === -1 || end === -1) throw new Error('Markers not found in response');
+
+  const jsonStr = rawText.slice(start + 'PREIPO_START'.length, end).trim();
+  const parsed: PreIpoResult = JSON.parse(jsonStr);
+
+  parsed.model_used = CLAUDE_MODEL;
+  parsed.grounding_sources_count = groundingCount;
+
+  // Sort by momentum_score descending
+  parsed.companies.sort((a, b) => (b.momentum_score ?? 0) - (a.momentum_score ?? 0));
+
+  console.log(`[PreIPO] Success: ${parsed.companies.length} companies via ${CLAUDE_MODEL}`);
+  return parsed;
 }
 
 // ── DB helpers ─────────────────────────────────────────────────────────────────
