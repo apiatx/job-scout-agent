@@ -657,7 +657,7 @@ export async function runPerplexityScoutSearch(
         label: cd.label,
         query: queries.length === 1 ? queries[0] : queries,
         search_domain_filter: cd.domains,
-        max_results: 25,
+        max_results: 20,
       } as SearchRequest;
     });
 
