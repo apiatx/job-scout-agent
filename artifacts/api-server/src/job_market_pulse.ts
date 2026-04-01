@@ -153,23 +153,75 @@ Rules:
 - Each company must have at least one source_citation`;
 }
 
+// ── JSON repair helper ────────────────────────────────────────────────────────
+
+function repairTruncatedJson(raw: string): string {
+  let depth = 0, arrDepth = 0, lastGoodClose = -1;
+  let inStr = false, esc = false;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (esc)            { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"')      { inStr = !inStr; continue; }
+    if (inStr)          continue;
+    if (c === '[')      arrDepth++;
+    if (c === ']')      arrDepth = Math.max(0, arrDepth - 1);
+    if (c === '{')      depth++;
+    if (c === '}') { depth--; if (depth === 0 && arrDepth > 0) lastGoodClose = i; }
+  }
+  const base = lastGoodClose !== -1 ? raw.slice(0, lastGoodClose + 1) : raw;
+  const stack: string[] = [];
+  const closer: Record<string, string> = { '[': ']', '{': '}' };
+  inStr = false; esc = false;
+  for (const c of base) {
+    if (esc)             { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"')       { inStr = !inStr; continue; }
+    if (inStr)           continue;
+    if (c === '[' || c === '{') stack.push(c);
+    if ((c === ']' || c === '}') && stack.length > 0) stack.pop();
+  }
+  return base + [...stack].reverse().map(o => closer[o]).join('');
+}
+
 // ── Parser ────────────────────────────────────────────────────────────────────
 
 function parsePulseFromText(text: string): Partial<JobMarketPulseResult> | null {
-  const markerMatch = text.match(/PULSE_START\s*([\s\S]*?)\s*PULSE_END/);
-  if (markerMatch) {
-    try {
-      const p = JSON.parse(markerMatch[1].trim());
-      if (p?.companies) return p;
-    } catch { /* fall through */ }
+  // Strategy 1: PULSE_START / PULSE_END markers (PULSE_END may be absent if truncated)
+  const markerStart = text.indexOf('PULSE_START');
+  if (markerStart !== -1) {
+    const markerEnd = text.indexOf('PULSE_END');
+    const rawJson = markerEnd !== -1
+      ? text.slice(markerStart + 'PULSE_START'.length, markerEnd).trim()
+      : text.slice(markerStart + 'PULSE_START'.length).trim();
+    for (const attempt of [rawJson, repairTruncatedJson(rawJson)]) {
+      try {
+        const p = JSON.parse(attempt);
+        if (p?.companies) {
+          if (attempt !== rawJson) console.log(`[JobMarketPulse] Repaired truncated JSON — ${p.companies.length} companies`);
+          return p;
+        }
+      } catch { /* continue */ }
+    }
   }
-  const objMatches = (text.match(/\{[\s\S]*?"companies"\s*:\s*\[[\s\S]*?\]\s*\}/g) as string[] | null) ?? [];
-  for (const c of objMatches.sort((a, b) => b.length - a.length)) {
-    try {
-      const p = JSON.parse(c);
-      if (p?.companies?.length > 0) return p;
-    } catch { /* continue */ }
+
+  // Strategy 2: largest JSON blob with 'companies' key, with repair fallback
+  const jsonStart = text.indexOf('{');
+  if (jsonStart !== -1) {
+    const candidate = text.slice(jsonStart);
+    if (candidate.includes('"companies"')) {
+      for (const attempt of [candidate, repairTruncatedJson(candidate)]) {
+        try {
+          const p = JSON.parse(attempt);
+          if (p?.companies?.length > 0) {
+            if (attempt !== candidate) console.log(`[JobMarketPulse] Repaired truncated JSON — ${p.companies.length} companies`);
+            return p;
+          }
+        } catch { /* continue */ }
+      }
+    }
   }
+
   console.log('[JobMarketPulse] Could not parse JSON. Preview:', text.slice(0, 400));
   return null;
 }
@@ -233,7 +285,7 @@ export async function generateJobMarketPulse(
 
   const response = await client.messages.create({
     model: CLAUDE_MODEL,
-    max_tokens: 8192,
+    max_tokens: 16000,
     tools: [{ type: 'web_search_20250305', name: 'web_search' }] as any[],
     messages: [{ role: 'user', content: prompt }],
   });

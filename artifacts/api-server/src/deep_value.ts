@@ -117,6 +117,41 @@ export async function upsertCompanyJobScan(
   );
 }
 
+// ── JSON repair helper ────────────────────────────────────────────────────────
+// Recovers from truncated JSON by finding the last fully-closed array element
+// and closing any remaining open brackets, so partial responses still parse.
+
+function repairTruncatedJson(raw: string): string {
+  let depth = 0, arrDepth = 0, lastGoodClose = -1;
+  let inStr = false, esc = false;
+
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (esc)            { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"')      { inStr = !inStr; continue; }
+    if (inStr)          continue;
+    if (c === '[')      arrDepth++;
+    if (c === ']')      arrDepth = Math.max(0, arrDepth - 1);
+    if (c === '{')      depth++;
+    if (c === '}') { depth--; if (depth === 0 && arrDepth > 0) lastGoodClose = i; }
+  }
+
+  const base = lastGoodClose !== -1 ? raw.slice(0, lastGoodClose + 1) : raw;
+  const stack: string[] = [];
+  const closer: Record<string, string> = { '[': ']', '{': '}' };
+  inStr = false; esc = false;
+  for (const c of base) {
+    if (esc)             { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"')       { inStr = !inStr; continue; }
+    if (inStr)           continue;
+    if (c === '[' || c === '{') stack.push(c);
+    if ((c === ']' || c === '}') && stack.length > 0) stack.pop();
+  }
+  return base + [...stack].reverse().map(o => closer[o]).join('');
+}
+
 // ── Claude generation ──────────────────────────────────────────────────────────
 
 const CLAUDE_MODEL = 'claude-sonnet-4-6';
@@ -173,7 +208,7 @@ Return ONLY valid JSON — no markdown, no prose, no code blocks:
 
   const response = await client.messages.create({
     model: CLAUDE_MODEL,
-    max_tokens: 8192,
+    max_tokens: 16000,
     tools: [{ type: 'web_search_20250305', name: 'web_search' }] as any[],
     messages: [{ role: 'user', content: fullPrompt }],
   });
@@ -191,14 +226,21 @@ Return ONLY valid JSON — no markdown, no prose, no code blocks:
   let jsonStr = raw.trim();
   const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
-  const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+  const jsonMatch = jsonStr.match(/\{[\s\S]*/);
   if (!jsonMatch) throw new Error(`No JSON object found in response. Preview: ${raw.slice(0, 300)}`);
 
   let parsed: any;
   try {
     parsed = JSON.parse(jsonMatch[0]);
-  } catch (parseErr) {
-    throw new Error(`JSON parse failed: ${parseErr}. Preview: ${jsonMatch[0].slice(0, 300)}`);
+  } catch {
+    // Response was truncated — repair and retry
+    console.warn(`[DeepValue] JSON truncated, attempting repair…`);
+    try {
+      parsed = JSON.parse(repairTruncatedJson(jsonMatch[0]));
+      console.log(`[DeepValue] Repair succeeded — recovered ${parsed.companies?.length ?? 0} companies`);
+    } catch (repairErr) {
+      throw new Error(`JSON parse failed even after repair: ${repairErr}. Preview: ${jsonMatch[0].slice(0, 300)}`);
+    }
   }
 
   const companies: DeepValueCompany[] = (parsed.companies || []).map((c: any) => ({

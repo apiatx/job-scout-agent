@@ -133,6 +133,37 @@ action values: "apply_now" | "watch_closely" | "network_in" | "monitor"
 Find at least 14 total companies. Include real companies with real data — no hypothetical or generic examples.`;
 }
 
+// ── JSON repair helper ────────────────────────────────────────────────────────
+
+function repairTruncatedJson(raw: string): string {
+  let depth = 0, arrDepth = 0, lastGoodClose = -1;
+  let inStr = false, esc = false;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (esc)            { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"')      { inStr = !inStr; continue; }
+    if (inStr)          continue;
+    if (c === '[')      arrDepth++;
+    if (c === ']')      arrDepth = Math.max(0, arrDepth - 1);
+    if (c === '{')      depth++;
+    if (c === '}') { depth--; if (depth === 0 && arrDepth > 0) lastGoodClose = i; }
+  }
+  const base = lastGoodClose !== -1 ? raw.slice(0, lastGoodClose + 1) : raw;
+  const stack: string[] = [];
+  const closer: Record<string, string> = { '[': ']', '{': '}' };
+  inStr = false; esc = false;
+  for (const c of base) {
+    if (esc)             { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"')       { inStr = !inStr; continue; }
+    if (inStr)           continue;
+    if (c === '[' || c === '{') stack.push(c);
+    if ((c === ']' || c === '}') && stack.length > 0) stack.pop();
+  }
+  return base + [...stack].reverse().map(o => closer[o]).join('');
+}
+
 // ── Core generation ────────────────────────────────────────────────────────────
 
 const CLAUDE_MODEL = 'claude-sonnet-4-6';
@@ -148,7 +179,7 @@ export async function generatePreIpo(criteria: PreIpoCriteria): Promise<PreIpoRe
 
   const response = await client.messages.create({
     model: CLAUDE_MODEL,
-    max_tokens: 8192,
+    max_tokens: 16000,
     tools: [{ type: 'web_search_20250305', name: 'web_search' }] as any[],
     messages: [{ role: 'user', content: prompt }],
   });
@@ -161,11 +192,26 @@ export async function generatePreIpo(criteria: PreIpoCriteria): Promise<PreIpoRe
   const groundingCount = response.content.filter((b: any) => b.type === 'tool_use').length;
 
   const start = rawText.indexOf('PREIPO_START');
-  const end   = rawText.indexOf('PREIPO_END');
-  if (start === -1 || end === -1) throw new Error('Markers not found in response');
+  if (start === -1) throw new Error('PREIPO_START marker not found in response');
 
-  const jsonStr = rawText.slice(start + 'PREIPO_START'.length, end).trim();
-  const parsed: PreIpoResult = JSON.parse(jsonStr);
+  // PREIPO_END may be missing if output was truncated — slice to end if absent
+  const end = rawText.indexOf('PREIPO_END');
+  const rawJson = end !== -1
+    ? rawText.slice(start + 'PREIPO_START'.length, end).trim()
+    : rawText.slice(start + 'PREIPO_START'.length).trim();
+
+  let parsed: PreIpoResult;
+  try {
+    parsed = JSON.parse(rawJson);
+  } catch {
+    console.warn('[PreIPO] JSON truncated, attempting repair…');
+    try {
+      parsed = JSON.parse(repairTruncatedJson(rawJson));
+      console.log(`[PreIPO] Repair succeeded — ${parsed.companies?.length ?? 0} companies`);
+    } catch (repairErr) {
+      throw new Error(`JSON parse failed even after repair: ${repairErr}. Preview: ${rawJson.slice(0, 300)}`);
+    }
+  }
 
   parsed.model_used = CLAUDE_MODEL;
   parsed.grounding_sources_count = groundingCount;

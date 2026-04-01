@@ -154,6 +154,37 @@ Rules:
 - Prefer companies hiring for roles matching: ${roles}`;
 }
 
+// ── JSON repair helper ────────────────────────────────────────────────────────
+
+function repairTruncatedJson(raw: string): string {
+  let depth = 0, arrDepth = 0, lastGoodClose = -1;
+  let inStr = false, esc = false;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (esc)            { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"')      { inStr = !inStr; continue; }
+    if (inStr)          continue;
+    if (c === '[')      arrDepth++;
+    if (c === ']')      arrDepth = Math.max(0, arrDepth - 1);
+    if (c === '{')      depth++;
+    if (c === '}') { depth--; if (depth === 0 && arrDepth > 0) lastGoodClose = i; }
+  }
+  const base = lastGoodClose !== -1 ? raw.slice(0, lastGoodClose + 1) : raw;
+  const stack: string[] = [];
+  const closer: Record<string, string> = { '[': ']', '{': '}' };
+  inStr = false; esc = false;
+  for (const c of base) {
+    if (esc)             { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"')       { inStr = !inStr; continue; }
+    if (inStr)           continue;
+    if (c === '[' || c === '{') stack.push(c);
+    if ((c === ']' || c === '}') && stack.length > 0) stack.pop();
+  }
+  return base + [...stack].reverse().map(o => closer[o]).join('');
+}
+
 // ── Response parser ───────────────────────────────────────────────────────────
 
 function parseIntelFromText(text: string): Omit<CareerIntelResult, 'model_used' | 'grounding_sources_count'> | null {
@@ -163,16 +194,33 @@ function parseIntelFromText(text: string): Omit<CareerIntelResult, 'model_used' 
     try {
       const parsed = JSON.parse(markerMatch[1].trim());
       if (parsed && parsed.companies) return parsed;
-    } catch { /* fall through */ }
+    } catch {
+      // Marker content may be truncated — try repair
+      try {
+        const parsed = JSON.parse(repairTruncatedJson(markerMatch[1].trim()));
+        if (parsed && Array.isArray(parsed.companies) && parsed.companies.length > 0) {
+          console.log(`[CareerIntel] Repaired truncated marker JSON — ${parsed.companies.length} companies`);
+          return parsed;
+        }
+      } catch { /* fall through */ }
+    }
   }
 
-  // Strategy 2: largest JSON object with 'companies' key
-  const objMatches = (text.match(/\{[\s\S]*?"companies"\s*:\s*\[[\s\S]*?\]\s*\}/g) as string[] | null) ?? [];
-  for (const candidate of objMatches.sort((a, b) => b.length - a.length)) {
-    try {
-      const parsed = JSON.parse(candidate);
-      if (parsed && Array.isArray(parsed.companies) && parsed.companies.length > 0) return parsed;
-    } catch { /* continue */ }
+  // Strategy 2: Find JSON starting at first '{' with 'companies' key, try repair if needed
+  const jsonStart = text.indexOf('{');
+  if (jsonStart !== -1) {
+    const candidate = text.slice(jsonStart);
+    if (candidate.includes('"companies"')) {
+      for (const attempt of [candidate, repairTruncatedJson(candidate)]) {
+        try {
+          const parsed = JSON.parse(attempt);
+          if (parsed && Array.isArray(parsed.companies) && parsed.companies.length > 0) {
+            if (attempt !== candidate) console.log(`[CareerIntel] Repaired truncated JSON — ${parsed.companies.length} companies`);
+            return parsed;
+          }
+        } catch { /* continue */ }
+      }
+    }
   }
 
   console.log('[CareerIntel] Could not parse structured output. Preview:', text.slice(0, 500));
@@ -246,7 +294,7 @@ export async function generateCareerIntel(criteria: CareerIntelCriteria): Promis
 
   const response = await client.messages.create({
     model: CLAUDE_MODEL,
-    max_tokens: 8192,
+    max_tokens: 16000,
     tools: [{ type: 'web_search_20250305', name: 'web_search' }] as any[],
     messages: [{ role: 'user', content: prompt }],
   });
