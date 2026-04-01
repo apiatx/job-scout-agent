@@ -2149,6 +2149,28 @@ app.delete('/api/jobs/:id/save', async (req: Request, res: Response) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+app.delete('/api/jobs/bulk', async (req: Request, res: Response) => {
+  try {
+    const { tier } = req.body as { tier: string };
+    const validTiers = ['Top Target', 'Fast Win', 'Stretch Role', 'Probably Skip'];
+    if (!tier || !validTiers.includes(tier)) { res.status(400).json({ error: 'Invalid tier' }); return; }
+    const { rows } = await pool.query(
+      `DELETE FROM jobs WHERE opportunity_tier = $1 AND saved_at IS NULL RETURNING id`, [tier]
+    );
+    console.log(`[Delete] Bulk deleted ${rows.length} jobs from tier: ${tier}`);
+    res.json({ ok: true, deleted: rows.length });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.delete('/api/jobs/:id', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
+    await pool.query('DELETE FROM jobs WHERE id = $1', [id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 // ── User action tracking (applied, interested, skipped, etc.) ─────────────
 app.put('/api/jobs/:id/action', async (req: Request, res: Response) => {
   try {
@@ -6100,6 +6122,11 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .card.card-fast-win{border-left:3px solid #00c86e}
 .card.card-stretch-role{border-left:3px solid #7c8dff}
 .card.card-probably-skip{border-left:3px solid #444;opacity:.85}
+.card-delete-btn{background:transparent;border:none;color:#444;font-size:13px;cursor:pointer;padding:3px 5px;border-radius:4px;line-height:1;transition:color .15s,background .15s;flex-shrink:0}
+.card-delete-btn:hover{color:#e55353;background:rgba(229,83,83,.14)}
+.bulk-delete-bar{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.bulk-delete-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:6px;border:1px solid rgba(229,83,83,.35);background:transparent;color:#e55353;font-size:11px;font-weight:600;cursor:pointer;transition:background .15s,border-color .15s}
+.bulk-delete-btn:hover{background:rgba(229,83,83,.14);border-color:rgba(229,83,83,.55)}
 .sub-scores{padding:10px 18px;border-bottom:1px solid #1e1e1e;display:none}
 .sub-scores.open{display:block}
 .sub-score-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px 16px}
@@ -6999,6 +7026,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="inner-tab tier-skip" id="jtab-skip" onclick="showJobsTab('skip')">&#x1F6AB; Probably Skip <span id="jtab-count-skip" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
     <div class="inner-tab" id="jtab-all" onclick="showJobsTab('all')">All <span id="jtab-count-all" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
   </div>
+  <div id="bulk-delete-bar" class="bulk-delete-bar" style="display:none"></div>
   <div class="sec-title" id="jobs-count">Loading jobs&hellip;</div>
   <div class="jobs-grid" id="jobs-grid"></div>
 </div>
@@ -8997,11 +9025,16 @@ function renderJobCard(j, opts) {
     }
   }
 
+  var deleteBtn = opts.showSavedDate ? '' : '<button class="card-delete-btn" data-jid="' + j.id + '" onclick="deleteJob(this.dataset.jid,this)" title="Remove from board">\u2715</button>';
+
   return '<div class="card ' + tierClass + '">' +
-    // ── Tier row: badge + score chip
+    // ── Tier row: badge + (delete btn + score chip)
     '<div class="card-tier-row">' +
       '<span>' + tBadge + '</span>' +
-      '<span class="' + scoreChipClass + '">' + esc(j.match_score) + '</span>' +
+      '<span style="display:flex;align-items:center;gap:7px">' +
+        deleteBtn +
+        '<span class="' + scoreChipClass + '">' + esc(j.match_score) + '</span>' +
+      '</span>' +
     '</div>' +
     // ── Title block
     '<div class="card-title-block">' +
@@ -9074,18 +9107,21 @@ function updateTabCounts() {
 function renderJobs() {
   var grid = document.getElementById('jobs-grid');
   var cnt  = document.getElementById('jobs-count');
+  var bbar = document.getElementById('bulk-delete-bar');
   var jobs;
 
   updateTabCounts();
 
   var unsavedJobs = _allJobs.filter(function(j) { return !j.saved_at; });
 
+  var tierMapBulk = { target:'Top Target', win:'Fast Win', stretch:'Stretch Role', skip:'Probably Skip' };
+
   if (_currentJobsTab === 'all') {
     jobs = sortJobs(unsavedJobs);
     cnt.textContent = jobs.length + ' job' + (jobs.length !== 1 ? 's' : '') + ' total';
+    if (bbar) bbar.style.display = 'none';
   } else {
-    var tierMap = { target:'Top Target', win:'Fast Win', stretch:'Stretch Role', skip:'Probably Skip' };
-    var tierLabel = tierMap[_currentJobsTab];
+    var tierLabel = tierMapBulk[_currentJobsTab];
     jobs = sortJobs(unsavedJobs.filter(function(j) { return tierKey(j) === _currentJobsTab; }));
     var emptyMsg = {
       target: 'No Top Target roles yet \\u2014 run the scout or score your library',
@@ -9096,16 +9132,56 @@ function renderJobs() {
     if (!jobs.length) {
       cnt.textContent = emptyMsg[_currentJobsTab] || 'No jobs in this tier';
       grid.innerHTML = '<div style="padding:48px 24px;text-align:center;color:var(--muted);font-size:13px">' + (emptyMsg[_currentJobsTab] || 'No jobs in this tier') + '</div>';
+      if (bbar) bbar.style.display = 'none';
       return;
     }
     var newCount = jobs.filter(isNew).length;
     cnt.textContent = jobs.length + ' ' + (tierLabel || _currentJobsTab) + (jobs.length !== 1 ? ' roles' : ' role') + (newCount ? ' \\u2014 ' + newCount + ' new' : '');
+    if (bbar) {
+      bbar.style.display = 'flex';
+      bbar.innerHTML = '<button class="bulk-delete-btn" onclick="deleteBulkCurrentTab()">\uD83D\uDDD1 Delete All ' + jobs.length + ' ' + (tierLabel || _currentJobsTab) + ' jobs</button><span style="font-size:11px;color:var(--muted)">Permanently removes from your board and database</span>';
+    }
   }
   if (!jobs || !jobs.length) {
     grid.innerHTML = '<div style="padding:48px 24px;text-align:center;color:var(--muted);font-size:13px">No jobs yet \\u2014 run the scout to find matches</div>';
+    if (bbar) bbar.style.display = 'none';
     return;
   }
   grid.innerHTML = jobs.map(function(j) { return renderJobCard(j, { showNew: true }); }).join('');
+}
+
+async function deleteJob(jobId, btn) {
+  if (!confirm('Remove this job from your board? This cannot be undone.')) return;
+  try {
+    if (btn) btn.disabled = true;
+    var res = await fetch('/api/jobs/' + jobId, { method: 'DELETE' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    _allJobs = _allJobs.filter(function(j) { return String(j.id) !== String(jobId); });
+    renderJobs();
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function deleteBulkCurrentTab() {
+  var tierMapBulk2 = { target:'Top Target', win:'Fast Win', stretch:'Stretch Role', skip:'Probably Skip' };
+  var tier = tierMapBulk2[_currentJobsTab];
+  if (!tier) return;
+  var count = _allJobs.filter(function(j) { return !j.saved_at && tierKey(j) === _currentJobsTab; }).length;
+  if (!confirm('Permanently delete all ' + count + ' ' + tier + ' jobs? This cannot be undone.')) return;
+  try {
+    var res = await fetch('/api/jobs/bulk', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tier: tier })
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    _allJobs = _allJobs.filter(function(j) { return j.saved_at || tierKey(j) !== _currentJobsTab; });
+    renderJobs();
+  } catch (e) {
+    alert('Bulk delete failed: ' + e.message);
+  }
 }
 
 var _hideLowConfidence = false;
