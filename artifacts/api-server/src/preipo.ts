@@ -71,7 +71,10 @@ function isModelUnavailableError(err: unknown): boolean {
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
   return msg.includes('model not found') || msg.includes('404') || msg.includes('not found') ||
     msg.includes('not available') || msg.includes('unsupported model') ||
-    msg.includes('invalid model') || msg.includes('deprecated');
+    msg.includes('invalid model') || msg.includes('deprecated') ||
+    msg.includes('503') || msg.includes('unavailable') || msg.includes('high demand') ||
+    msg.includes('try again later') || msg.includes('overloaded') ||
+    msg.includes('resource_exhausted') || msg.includes('429');
 }
 
 function buildCandidateChain(): ModelCandidate[] {

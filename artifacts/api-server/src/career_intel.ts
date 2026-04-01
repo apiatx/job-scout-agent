@@ -97,7 +97,14 @@ function isModelUnavailableError(err: unknown): boolean {
     msg.includes('not available') ||
     msg.includes('unsupported model') ||
     msg.includes('invalid model') ||
-    msg.includes('deprecated')
+    msg.includes('deprecated') ||
+    msg.includes('503') ||
+    msg.includes('unavailable') ||
+    msg.includes('high demand') ||
+    msg.includes('try again later') ||
+    msg.includes('overloaded') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('429')
   );
 }
 
