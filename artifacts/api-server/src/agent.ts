@@ -215,10 +215,12 @@ COMPONENT 1 — roleFit (0-30 points):
 
 COMPONENT 2 — companyQuality (0-25 points):
   Use momentum context above if provided.
-  25: Pre-approved AND elite momentum (funding/growth/IPO)
-  20: Pre-approved, solid established company
-  16: Not pre-approved, but safe and respectable
-  10: Small unknown company, no signals
+  CRITICAL RULE FIRST: If this company's primary business is in an EXCLUDED INDUSTRY NICHE listed in the criteria above (healthcare, pharma, banking, government/defense/SLED, insurance, medical devices, building materials, paving, electrical distribution, etc.), the companyQuality MUST be capped at 8 regardless of company size, reputation, or momentum. The user explicitly does not want to work in those industries.
+  25: Pre-approved AND elite momentum (funding/growth/IPO) AND in target industry
+  20: Pre-approved, solid established company in target industry
+  16: Not pre-approved, but safe and respectable — only if company is in or adjacent to target industries (AI, hardware, semiconductors, data infrastructure, networking, etc.)
+  10: Small unknown company, no signals, or company is in a neutral/unrelated industry
+  8 or below: Company primarily serves an EXCLUDED NICHE VERTICAL (healthcare, pharma, government/SLED/federal/defense, banking/FSI, insurance, building materials, etc.) — hard cap, do not score above 8
   0:  AI disruption risk, layoff signals, or company in decline
 
 COMPONENT 3 — compensationFit (0-20 points):
@@ -423,9 +425,11 @@ export function computeTier(
     if (matchScore < stretchScore) return 'Probably Skip';
 
     // Vertical niche / above-level detection (same as v1)
-    const nicheList = (settings?.verticalNiches && settings.verticalNiches.length > 0)
-      ? settings.verticalNiches.map((n) => n.toLowerCase().trim())
-      : DEFAULT_VERTICAL_NICHES;
+    // Always merge DEFAULT list with user's custom list so "gsi", "hyperscaler", etc. are always caught
+    const nicheList = [
+      ...DEFAULT_VERTICAL_NICHES,
+      ...(settings?.verticalNiches ?? []).map((n: string) => n.toLowerCase().trim()),
+    ];
     const hasVerticalNiche = nicheList.some((niche) => {
       const escaped = niche.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       return new RegExp(`\\b${escaped}\\b`, 'i').test(title.toLowerCase());
@@ -450,9 +454,10 @@ export function computeTier(
     const directorAbove     = maxRank < 3 ? isDirector      : false;
     const principalAbove    = isPrincipal;
 
-    // Niche keywords alone do NOT push a role above level — only seniority signals do.
-    // hasVerticalNiche is kept as a computed value for future use but excluded from isAboveLevel.
-    void hasVerticalNiche;
+    // Niche vertical keyword in job title → hard Probably Skip
+    // (user has background in these industries but actively wants to avoid them)
+    if (hasVerticalNiche) return 'Probably Skip';
+
     const isAboveLevel = namedAbove || enterpriseAbove || srEnterpriseAbove ||
       strategicAbove || directorAbove || principalAbove;
 
@@ -486,9 +491,11 @@ export function computeTier(
   if (s.realVsFake < 5) return 'Probably Skip';
   if (matchScore < 50) return 'Probably Skip';
 
-  const nicheList = (settings?.verticalNiches && settings.verticalNiches.length > 0)
-    ? settings.verticalNiches.map((n) => n.toLowerCase().trim())
-    : DEFAULT_VERTICAL_NICHES;
+  // Always merge DEFAULT list with user's custom list so "gsi", "hyperscaler", etc. are always caught
+  const nicheList = [
+    ...DEFAULT_VERTICAL_NICHES,
+    ...(settings?.verticalNiches ?? []).map((n: string) => n.toLowerCase().trim()),
+  ];
   const hasVerticalNiche = nicheList.some((niche) => {
     const escaped = niche.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     return new RegExp(`\\b${escaped}\\b`, 'i').test(title.toLowerCase());
@@ -513,8 +520,10 @@ export function computeTier(
   const directorAbove     = maxRank < 3 ? isDirector      : false;
   const principalAbove    = isPrincipal;
 
-  // Niche keywords alone do NOT push a role above level — only seniority signals do.
-  void hasVerticalNiche;
+  // Niche vertical keyword in job title → hard Probably Skip
+  // (user has background in these industries but actively wants to avoid them)
+  if (hasVerticalNiche) return 'Probably Skip';
+
   const isAboveLevel = namedAbove || enterpriseAbove || srEnterpriseAbove ||
     strategicAbove || directorAbove || principalAbove;
   const isAccessibleRole = !isAboveLevel;
@@ -683,10 +692,14 @@ export async function scoreJobsWithClaude(
     ? `Accepted sales segments (seniority levels): ${segmentLines.join('; ')}`
     : '';
 
+  const nicheVerticals: string[] = (criteria.tierSettings?.verticalNiches && criteria.tierSettings.verticalNiches.length > 0)
+    ? criteria.tierSettings.verticalNiches
+    : [];
+
   const criteriaText = [
     criteria.targetRoles.length ? `Target roles: ${criteria.targetRoles.join(', ')}` : '',
     segmentText,
-    criteria.industries.length ? `Target industries: ${criteria.industries.join(', ')}` : '',
+    criteria.industries.length ? `Target industries (company MUST primarily operate in one of these): ${criteria.industries.join(', ')}` : '',
     criteria.locations.length ? `Preferred locations: ${criteria.locations.join(', ')}` : '',
     (() => {
       const modes: string[] = criteria.allowedWorkModes ?? [];
@@ -699,6 +712,9 @@ export async function scoreJobsWithClaude(
     criteria.mustHave.length ? `Must have: ${criteria.mustHave.join(', ')}` : '',
     criteria.niceToHave.length ? `Nice to have: ${criteria.niceToHave.join(', ')}` : '',
     criteria.avoid.length ? `Avoid (strong negative signal — reduce score significantly, but do not automatically eliminate): ${criteria.avoid.join(', ')}` : '',
+    nicheVerticals.length
+      ? `EXCLUDED INDUSTRY NICHES — candidate has background in these but actively does NOT want roles here. If the company's PRIMARY business is in one of these verticals, set companyQuality to max 8 (treat it like a company in decline regardless of size). If the job TITLE contains any of these niche terms (e.g. "SLED Account Executive", "Federal AE", "Healthcare AM", "GSI", "Public Sector"), set roleFit to max 5. These verticals are excluded: ${nicheVerticals.join(', ')}`
+      : '',
   ].filter(Boolean).join('\n');
 
   let preApprovedSection = '';

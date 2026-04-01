@@ -2092,14 +2092,6 @@ app.post('/api/jobs/custom', async (req: Request, res: Response) => {
     const { rows: companyRows } = await pool.query('SELECT name FROM companies');
     const companyNames = companyRows.map((r: any) => r.name as string);
 
-    const criteriaText = [
-      criteria.target_roles?.length ? `Target roles: ${criteria.target_roles.join(', ')}` : '',
-      criteria.industries?.length ? `Target industries: ${criteria.industries.join(', ')}` : '',
-      criteria.locations?.length ? `Preferred locations: ${criteria.locations.join(', ')}` : '',
-      criteria.must_have?.length ? `Must have: ${criteria.must_have.join(', ')}` : '',
-      criteria.nice_to_have?.length ? `Nice to have: ${criteria.nice_to_have.join(', ')}` : '',
-    ].filter(Boolean).join('\n');
-
     const tierSettings = {
       verticalNiches: criteria.vertical_niches ?? [],
       topTargetScore: criteria.top_target_score ?? 65,
@@ -2107,6 +2099,18 @@ app.post('/api/jobs/custom', async (req: Request, res: Response) => {
       stretchScore: criteria.stretch_score ?? 55,
       experienceLevels: criteria.experience_levels ?? ['senior'],
     };
+
+    const _customNiches: string[] = criteria.vertical_niches ?? [];
+    const criteriaText = [
+      criteria.target_roles?.length ? `Target roles: ${criteria.target_roles.join(', ')}` : '',
+      criteria.industries?.length ? `Target industries (company MUST primarily operate in one of these): ${criteria.industries.join(', ')}` : '',
+      criteria.locations?.length ? `Preferred locations: ${criteria.locations.join(', ')}` : '',
+      criteria.must_have?.length ? `Must have: ${criteria.must_have.join(', ')}` : '',
+      criteria.nice_to_have?.length ? `Nice to have: ${criteria.nice_to_have.join(', ')}` : '',
+      _customNiches.length
+        ? `EXCLUDED INDUSTRY NICHES — candidate has background in these but actively does NOT want roles here. If the company's PRIMARY business is in one of these verticals, set companyQuality to max 8. If the job TITLE contains any of these niche terms, set roleFit to max 5. Excluded: ${_customNiches.join(', ')}`
+        : '',
+    ].filter(Boolean).join('\n');
 
     const preApprovedSection = companyNames.length > 0
       ? `PRE-APPROVED COMPANIES:\n${companyNames.join(', ')}`
@@ -3805,9 +3809,10 @@ app.post('/api/jobs/rescore-all', async (req, res: Response) => {
       stretchScore: criteria.stretch_score ?? 55,
       experienceLevels: criteria.experience_levels ?? ['senior'],
     };
+    const _rescoreNiches: string[] = criteria.vertical_niches ?? [];
     const criteriaText = [
       criteria.target_roles?.length ? `Target roles: ${criteria.target_roles.join(', ')}` : '',
-      criteria.industries?.length ? `Target industries: ${criteria.industries.join(', ')}` : '',
+      criteria.industries?.length ? `Target industries (company MUST primarily operate in one of these): ${criteria.industries.join(', ')}` : '',
       criteria.locations?.length ? `Preferred locations: ${criteria.locations.join(', ')}` : '',
       (() => {
         const modes: string[] = criteria.allowed_work_modes ?? [];
@@ -3820,6 +3825,9 @@ app.post('/api/jobs/rescore-all', async (req, res: Response) => {
       criteria.must_have?.length ? `Must have: ${criteria.must_have.join(', ')}` : '',
       criteria.nice_to_have?.length ? `Nice to have: ${criteria.nice_to_have.join(', ')}` : '',
       criteria.avoid?.length ? `Avoid (automatic disqualifier): ${criteria.avoid.join(', ')}` : '',
+      _rescoreNiches.length
+        ? `EXCLUDED INDUSTRY NICHES — candidate has background in these but actively does NOT want roles here. If the company's PRIMARY business is in one of these verticals, set companyQuality to max 8. If the job TITLE contains any of these niche terms, set roleFit to max 5. Excluded: ${_rescoreNiches.join(', ')}`
+        : '',
     ].filter(Boolean).join('\n');
     const preApprovedSection = companyNames.length > 0
       ? `PRE-APPROVED COMPANIES:\nThe user has manually vetted and approved these employers as targets.\nPre-approved companies: ${companyNames.join(', ')}`
@@ -5187,7 +5195,7 @@ async function generateScoutCompanyList(criteria: Record<string, unknown>): Prom
 USER SETTINGS:
 - Target roles: ${roles}
 - Experience levels: ${levels}
-- Industries: ${industries}
+- TARGET INDUSTRIES (company MUST be in one of these — this is the primary filter): ${industries}
 - Locations: ${locations}
 - Work modes: ${workModes}
 - Min base salary: ${minSalary}
@@ -5196,7 +5204,7 @@ USER SETTINGS:
 - Employee count: ${empBands}
 - Revenue bands: ${revBands}
 - Funding stages: ${funding}
-- Vertical niches: ${niches}
+- EXCLUDED VERTICALS — DO NOT suggest companies whose primary business is in these industries (the candidate has background here but does NOT want to work in them): ${niches}
 - Must-have keywords: ${mustHave}
 - Avoid keywords: ${avoid}
 
@@ -5206,7 +5214,7 @@ Each object must have exactly these fields:
   "name": "Company Name",
   "ats_type": "greenhouse" | "workday" | "lever" | "plain",
   "identifier": "the slug, career site ID, or full URL",
-  "reason": "one sentence why this company matches the settings"
+  "reason": "one sentence why this company matches the TARGET INDUSTRIES above"
 }
 
 For greenhouse: identifier is the board token slug (e.g. "purestorage", "databricks", "coreweave")
@@ -5219,11 +5227,11 @@ Only specify ats_type greenhouse if you are highly confident in the exact Greenh
 Only include companies you are highly confident about.
 Do not guess ATS details. If unsure of the ATS type or identifier for a company, use plain with their known careers URL.
 
-Focus on companies that are:
-- In the user's target industries
-- Likely to have roles matching the user's target roles
-- Appropriate size/stage based on user settings
-- Strong presence in the user's target locations
+CRITICAL TARGETING RULES:
+- ONLY include companies whose primary product/business is in the TARGET INDUSTRIES above (AI infrastructure, semiconductors, photonics, optics, electronic components, servers, data centers, networking, databases, infrastructure security)
+- HARD EXCLUDE: Do NOT include healthcare, pharma, medical devices, biotech, government/defense/SLED contractors, banking, financial services, insurance, building materials, retail, or consumer companies — even if they have sales roles
+- A company like Thermo Fisher, Hologic, Nuvation Bio, Azalea Health, BlueLinx, or similar does NOT belong — they are in excluded verticals
+- Focus on: semiconductor fabs/fabless, network hardware OEMs, data center operators/builders, AI chip companies, optical networking, server/storage vendors, database software, cloud infrastructure providers, cybersecurity hardware
 - Hardware, infrastructure, AI, semiconductor, or data platform companies (not pure SaaS at risk of AI disruption unless they are category leaders)`;
 
   try {

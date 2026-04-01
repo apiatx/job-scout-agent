@@ -1,0 +1,121 @@
+Search Criteria
+Minimum Base Pay Hard gate — jobs below this base are skipped
+$
+120000
+Minimum OTE On-Target Earnings (base + commission at quota)
+$
+350000
+Work Modes (select all that apply)
+
+Remote-US
+Work from anywhere in the US — no city attached
+
+Remote-in-territory
+Remote but must live near a specific city (enter territory cities in Locations below)
+
+On-site
+Physical office jobs — only shown if city matches your locations
+Locations (press Enter to add)
+e.g. Atlanta GA, Charlotte NC, Nashville TN
+Remote
+×
+south carolina
+×
+north carolina
+×
+georgia
+×
+florida
+×
+Target Roles (press Enter to add)
+e.g. Account Executive, Account Manager
+Account Executive
+×
+Account Manager
+×
+Industries (press Enter to add)
+e.g. AI Infrastructure, Semiconductors
+AI infrastructure
+×
+semiconductors
+×
+photonics
+×
+optics
+×
+electronic components
+×
+servers
+×
+data center
+×
+networking
+×
+database
+×
+infrastructure security
+×
+Must-Have Keywords (press Enter to add)
+e.g. enterprise sales, quota carrying
+Nice-to-Have Keywords (press Enter to add)
+e.g. AI, data center, GPU
+Avoid Keywords (press Enter to add)
+e.g. SDR, BDR, inbound only
+Your Name
+Aidan
+Your Email
+test@test.com
+Proxy URL — Required to unlock Glassdoor & ZipRecruiter (both Cloudflare-blocked without a proxy)
+http://user:pass@host:port  (residential or datacenter proxy)
+Without a proxy: LinkedIn + Indeed (~1,200+ jobs/run)  |  With a proxy: + Glassdoor + ZipRecruiter (~1,600+ jobs/run).
+Comma-separate multiple proxies for rotation: http://u:p@h1:p1,http://u:p@h2:p2
+Tier Scoring Engine
+These settings control how jobs are classified into tiers. Adjust thresholds and lists to tune what shows up as Top Target vs Fast Win vs Stretch.
+Experience Level (check all levels you want to target — affects what counts as "above level")
+Jobs at levels above your highest checked level will be classified as Stretch. Select multiple to broaden your search.
+
+Junior
+SMB, commercial at a mid-tier company
+
+Mid
+Commercial at good-fit company, Corporate, MM
+
+Senior
+Sr./Senior, Named, Enterprise
+
+Strategic
+Strategic, Sr. Enterprise, Account Director, Major, Majors
+Top Target Score
+
+65
+Fast Win Score
+
+55
+Stretch Score
+
+55
+Vertical Niche Keywords (industry segments in your background — used to improve scoring context, does NOT affect tier classification)
+e.g. federal, SLED, healthcare, FSI
+federal
+×
+government
+×
+SLED
+×
+FSI
+×
+DOD
+×
+defense
+×
+public sector
+×
+healthcare
+×
+pharma
+×
+banking
+×
+financial services
+×
+Company Size & Stage
