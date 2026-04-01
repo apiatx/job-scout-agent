@@ -30,7 +30,7 @@ import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude,
 import type { MomentumScore } from './agent.js';
 import type { SubScores, OpportunityTier, TierSettings, TailoringAnalysis } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
-import { classifyJob, getFilterDecision, mapUserIndustriesToCategories, type JobClassification } from './company_classifier.js';
+import { classifyJob, getFilterDecision, mapUserIndustriesToCategories, hasPreferredIndustrySignal, type JobClassification } from './company_classifier.js';
 // RepVue: link-out only (no scraping — RepVue blocks automated requests)
 
 const { Pool } = pg;
@@ -5611,6 +5611,37 @@ async function runScoutInBackground(
       preFiltered = classified;
     }
 
+    // ── Description-relevance gate — Perplexity (Quick Search) jobs ONLY ────────
+    // Normal Search scrapes the user's hand-picked watchlist companies → always on-target.
+    // Quick Search asks Perplexity to find jobs on open ATS platforms (Greenhouse, Lever,
+    // etc.) → any company on those platforms can appear, including ones completely outside
+    // the user's target industries (construction firms, ad agencies, healthcare SaaS, etc.).
+    //
+    // This gate drops a Perplexity job if its combined title+description snippet contains
+    // ZERO signals from the user's preferred industry categories.  It is built dynamically
+    // from the user's saved industries setting — no company names are hardcoded here.
+    // Jobs with very short descriptions (<100 chars) pass through (not enough to judge).
+    let droppedByDescRelevance = 0;
+    if (preferredCategories.size > 0) {
+      const before = preFiltered.length;
+      const descFiltered: typeof preFiltered = [];
+      for (const j of preFiltered) {
+        // Only gate Perplexity-discovered jobs — ATS scrapes are pre-qualified by watchlist
+        if (j.source !== 'Perplexity') { descFiltered.push(j); continue; }
+        const desc = (j.description ?? '').trim();
+        // Too short to judge → pass through (let Claude handle it)
+        if (desc.length < 100) { descFiltered.push(j); continue; }
+        const combinedText = `${j.title} ${desc}`;
+        if (hasPreferredIndustrySignal(combinedText, preferredCategories)) {
+          descFiltered.push(j);
+        } else {
+          console.log(`  [DescRelevance] DROP no industry signal in description: "${j.company}" — ${j.title}`);
+          droppedByDescRelevance++;
+        }
+      }
+      preFiltered = descFiltered;
+    }
+
     let droppedByKnownComp = 0; // reserved for future use
 
     console.log(`\n──── PRE-FILTERS (before Claude scoring) ───────────────────`);
@@ -5622,6 +5653,7 @@ async function runScoutInBackground(
     console.log(`  Dropped by territory mismatch: ${droppedByTerritory}`);
     console.log(`  Dropped by company type (staffing/healthcare/job_board): ${droppedByCompanyType}`);
     console.log(`  Dropped by industry category (generic_saas/healthcare — not in preferred): ${droppedByIndustryCategory}`);
+    console.log(`  Dropped by desc-relevance (Perplexity only — no industry signal in description): ${droppedByDescRelevance}`);
     if (preferredCategories.size > 0) {
       console.log(`  Preferred industry categories: ${Array.from(preferredCategories).join(', ')}`);
     }
