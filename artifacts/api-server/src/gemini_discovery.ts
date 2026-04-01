@@ -235,11 +235,13 @@ export async function runGeminiJobDiscovery(
           console.log(`───────────────────────────────────────────────────────────`);
           return { jobs: validated, queriesUsed: [], totalGroundingSources: 0, modelUsed: 'perplexity/sonar-pro', skipped: false };
         }
+        console.warn(`[Discovery] Perplexity returned 0 parseable jobs (${text.length} chars). Response preview: "${text.slice(0, 300)}"`);
         throw new Error(`Perplexity returned 0 parseable jobs (${text.length} chars)`);
       }
-      throw new Error(`Perplexity HTTP ${plxResp.status}`);
+      const errBody = await plxResp.text().catch(() => '');
+      throw new Error(`Perplexity HTTP ${plxResp.status}: ${errBody.slice(0, 120)}`);
     } catch (plxErr) {
-      console.warn('[Discovery] Perplexity failed, falling back to Gemini:', plxErr instanceof Error ? plxErr.message.slice(0, 100) : plxErr);
+      console.warn('[Discovery] Perplexity failed, falling back to Gemini:', plxErr instanceof Error ? plxErr.message.slice(0, 150) : plxErr);
     }
   }
 
@@ -494,40 +496,40 @@ Rules:
 - Do NOT include expired or filled roles`;
   }
 
-  // ── Standard broad search (LinkedIn-first, uncapped) ─────────────────────
-  return `You are a job search assistant with live web access. Your goal is to find as many currently open job postings as possible matching the criteria below. Search exhaustively across all available sources.
+  // ── Standard broad search — ATS-first (what Perplexity can actually search) ─
+  const role0 = roles.split(',')[0]?.trim() || 'Account Executive';
+  const role1 = roles.split(',')[1]?.trim() || 'Account Manager';
+  const skill0 = mustHave.split(',')[0]?.trim() || 'SaaS';
+  const loc0   = locations.split(',')[0]?.trim() || 'Remote';
 
-TARGET ROLES: ${roles}
+  return `You are a job search assistant with live Google Search access. Find currently open B2B sales roles by running these SPECIFIC Google searches right now:
+
+SEARCH QUERY 1: site:boards.greenhouse.io "${role0}" ${workType === 'remote only' ? 'remote' : loc0}
+SEARCH QUERY 2: site:jobs.lever.co "${role0}" ${workType === 'remote only' ? 'remote' : loc0}
+SEARCH QUERY 3: site:jobs.ashbyhq.com "${role0}" ${workType === 'remote only' ? 'remote' : ''}
+SEARCH QUERY 4: site:jobs.lever.co "${role1}" ${workType === 'remote only' ? 'remote' : loc0}
+SEARCH QUERY 5: site:boards.greenhouse.io "${skill0} ${role0}"
+SEARCH QUERY 6: site:jobs.ashbyhq.com "${role1}"
+SEARCH QUERY 7: site:myworkdayjobs.com "${role0}" remote
+SEARCH QUERY 8: site:linkedin.com/jobs/view "${role0}" "${skill0}"
+
+TARGET ROLES (must match one): ${roles}
 WORK TYPE: ${workType} | LOCATIONS: ${locations}
-KEY SKILLS / KEYWORDS: ${mustHave || 'enterprise sales, SaaS, B2B'}
+KEY SKILLS: ${mustHave || 'enterprise sales, SaaS, B2B'}
 ${industries ? `INDUSTRIES: ${industries}` : ''}
 ${salaryNote}
 
-Search ALL of these sources — run multiple queries per source to maximize results:
-
-1. LinkedIn Jobs (PRIMARY — search these queries on linkedin.com/jobs):
-   - "${roles.split(',')[0]?.trim()}" remote
-   - "${roles.split(',')[1]?.trim() || roles.split(',')[0]?.trim()}" ${locations.split(',')[0]?.trim() || 'United States'}
-   - "${mustHave.split(',')[0]?.trim() || 'SaaS'} ${roles.split(',')[0]?.trim()}"
-   ${industries ? `- "${industries.split(',')[0]?.trim()} ${roles.split(',')[0]?.trim()}"` : ''}
-
-2. Greenhouse (site:boards.greenhouse.io OR site:greenhouse.io)
-3. Lever (site:jobs.lever.co OR site:lever.co)
-4. Ashby (site:jobs.ashbyhq.com OR site:ashbyhq.com)
-5. Workday (site:myworkdayjobs.com)
-6. Direct company careers pages (company.com/careers or company.com/jobs)
-
-Return EVERY open position you find — no limit on count. I want the maximum number of unique, real job postings.
+Run ALL 8 queries and collect every unique job posting URL you find. Aim for 20+ results.
 
 For each job output a JSON object with these exact keys:
 - title: exact job title from the posting
 - company: company name
 - location: city/state or "Remote"
-- url: direct URL to the job posting (linkedin.com/jobs/view/..., boards.greenhouse.io/..., etc.)
+- url: direct URL to the job posting (boards.greenhouse.io/..., jobs.lever.co/..., jobs.ashbyhq.com/..., linkedin.com/jobs/view/...)
 - description: 1–2 sentence snippet from the posting
 - salary: salary range string if shown, otherwise ""
 
-Output ONLY a JSON array between JOBS_START and JOBS_END markers. No other text outside:
+Output ONLY a JSON array between JOBS_START and JOBS_END markers. No other text outside these markers:
 
 JOBS_START
 [
@@ -535,7 +537,7 @@ JOBS_START
     "title": "Enterprise Account Executive",
     "company": "Acme Corp",
     "location": "Remote",
-    "url": "https://www.linkedin.com/jobs/view/123456789/",
+    "url": "https://boards.greenhouse.io/acmecorp/jobs/1234567",
     "description": "Lead enterprise sales cycles for Fortune 500 accounts...",
     "salary": "$150,000 - $180,000"
   }
@@ -543,12 +545,10 @@ JOBS_START
 JOBS_END
 
 Rules:
-- Include LinkedIn URLs (linkedin.com/jobs/view/...) — these are fully valid
-- Include ATS URLs (greenhouse, lever, ashby, workday)
-- Do NOT include LinkedIn search results pages or company homepage URLs
-- Do NOT fabricate jobs — only include postings you can verify exist via live search
+- Use DIRECT posting URLs only (not search result pages or company homepages)
+- Do NOT fabricate jobs — only include postings you verified via live search
 - Do NOT include expired or filled roles
-- Maximize unique results — search broadly across many companies and roles`;
+- Include LinkedIn URLs only if they are job VIEW pages (linkedin.com/jobs/view/...) not search pages`;
 }
 
 // ── Response parser ───────────────────────────────────────────────────────────

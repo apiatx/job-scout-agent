@@ -1,0 +1,43 @@
+════════════════════════════════════════════════════════════
+  Companies by ATS type: { plain: 62, workday: 28, greenhouse: 10, lever: 1 }
+[Scout] Mode: Open Search [Fast Search — Perplexity only]
+
+──── JOB DISCOVERY ─────────────────────────────────────────
+[Discovery] Max results: 30 | Timeout: 90s
+[Discovery] Roles: Account Executive, Account Manager
+[Discovery] Locations: Remote, south carolina, north carolina, georgia, florida
+[Discovery] Trying Perplexity sonar-pro (LinkedIn + ATS, uncapped)
+[Discovery] Perplexity failed, falling back to Gemini: Perplexity returned 0 parseable jobs (22 chars)
+[Discovery] Gemini chain: gemini-3-flash-preview → gemini-3.1-pro-preview → gemini-flash-latest → gemini-pro-latest
+[Gemini] Trying: gemini-3-flash-preview (Gemini 3 Flash — speed/cost default; googleSearch grounding ✅) [tool: googleSearch]
+[Gemini] ✗ gemini-3-flash-preview failed (non-availability error): {"error":{"code":503,"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.","status":"UNAVAILABLE"}}
+[Gemini] Continuing with JobSpy/ATS results only
+───────────────────────────────────────────────────────────
+[Gemini] Skipped: gemini-3-flash-preview: {"error":{"code":503,"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.","status":"UNAVAILABLE"}}
+
+──── SCRAPE RESULTS ────────────────────────────────────────
+Total scraped: 0 raw listings from 0 companies
+  Companies WITH jobs (0):
+  Companies with ZERO jobs (0):
+───────────────────────────────────────────────────────────
+
+──── TITLE FILTER ──────────────────────────────────────────
+Title filter regex: (Account\s+Executive|\bAE\b|Account\s+Manager|\bAM\b)...
+Title filter: 0 total → 0 passed (0 dropped)
+  Passed title filter by company:
+───────────────────────────────────────────────────────────
+
+──── PRE-FILTERS (before Claude scoring) ───────────────────
+  After title filter: 0
+  Dropped by location: 0
+  Dropped by avoid keywords: 0
+  Dropped by salary below $120,000: 0
+  Dropped by territory mismatch: 0
+  Dropped by known comp below minimum: 0
+  Remaining for Claude scoring: 0
+───────────────────────────────────────────────────────────
+
+──── NEW JOB FILTER ─────────────────────────────────────────
+  Already in DB (skipped): 0
+  Genuinely new → Claude:  0
+───────────────────────────────────────────────────────────
