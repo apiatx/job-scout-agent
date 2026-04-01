@@ -12376,7 +12376,7 @@ async function scanForRoles(source) {
       var isCapacity = reason.includes('unavailable') || reason.includes('503') || reason.includes('timeout') || reason.includes('candidates') || reason.includes('demand') || reason.includes('429');
       if (isCapacity) {
         if (errBox) {
-          errBox.innerHTML = '<strong>Gemini is temporarily at capacity</strong> \u2014 this is a Google-side issue that usually clears in 1\u20132 minutes.<br><button style="margin-top:8px;padding:4px 14px;background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.3);border-radius:6px;cursor:pointer;font-size:12px" onclick="runTargetedScan(\'' + source + '\')">Retry</button>';
+          errBox.innerHTML = '<strong>Gemini is temporarily at capacity</strong> \u2014 this is a Google-side issue that usually clears in 1\u20132 minutes.<br><button style="margin-top:8px;padding:4px 14px;background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.3);border-radius:6px;cursor:pointer;font-size:12px" onclick="runTargetedScan(this.dataset.src)" data-src="' + source + '">Retry</button>';
           errBox.style.display = '';
         }
         return;
