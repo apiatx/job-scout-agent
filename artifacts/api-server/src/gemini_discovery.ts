@@ -287,20 +287,117 @@ export async function runGeminiJobDiscovery(
         continue; // advance to next candidate
       }
 
-      // Non-availability error (timeout, rate limit, content error, etc.)
-      // Don't fall through to next model — fail fast and keep using JobSpy only
-      console.error(`[Gemini] ✗ ${modelName} failed (non-availability error): ${msg}`);
-      console.log(`[Gemini] Continuing with JobSpy/ATS results only`);
+      // Non-availability error — try Claude before giving up on this candidate
+      console.warn(`[Gemini] ✗ ${modelName} failed (non-capacity error): ${msg}`);
+      console.log('[Gemini] Trying Claude Sonnet web search fallback…');
       console.log(`───────────────────────────────────────────────────────────`);
+      const claudeResult1 = await claudeJobSearchFallback(criteria, maxResults);
+      if (!claudeResult1.skipped) return claudeResult1;
       return { jobs: [], queriesUsed: [], totalGroundingSources: 0, modelUsed: null, skipped: true, skipReason: `${modelName}: ${msg}` };
     }
   }
 
-  // All candidates exhausted
+  // All Gemini candidates exhausted — try Claude Sonnet with web search as last resort
   const tried = candidates.map(c => c.modelName).join(', ');
-  console.error(`[Gemini] All candidates exhausted (tried: ${tried}) — skipping Gemini discovery`);
+  console.warn(`[Gemini] All candidates exhausted (tried: ${tried}) — trying Claude Sonnet web search fallback…`);
+  console.log(`───────────────────────────────────────────────────────────`);
+  const claudeResult2 = await claudeJobSearchFallback(criteria, maxResults);
+  if (!claudeResult2.skipped) return claudeResult2;
+
+  console.error(`[Gemini] All fallbacks exhausted (Gemini + Claude)`);
   console.log(`───────────────────────────────────────────────────────────`);
   return { jobs: [], queriesUsed: [], totalGroundingSources: 0, modelUsed: null, skipped: true, skipReason: `All model candidates unavailable: ${tried}` };
+}
+
+// ── Claude Sonnet web search fallback ─────────────────────────────────────────
+// Fires when all Gemini model candidates are exhausted due to capacity/timeouts.
+// Uses Anthropic's built-in web_search tool (server-side, no round-trips needed).
+// Results are parsed with the same parseJobsFromText + normalizeGeminiJobs pipeline.
+
+async function claudeJobSearchFallback(
+  criteria: GeminiDiscoveryCriteria,
+  maxResults: number,
+): Promise<GeminiDiscoveryResult> {
+  const anthropicKey = (process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '').trim();
+  if (!anthropicKey) {
+    console.warn('[Claude Fallback] No Anthropic API key — skipping Claude fallback');
+    return { jobs: [], queriesUsed: [], totalGroundingSources: 0, modelUsed: null, skipped: true, skipReason: 'No Anthropic key for Claude fallback' };
+  }
+
+  const prompt = buildSearchPrompt(criteria, Math.min(maxResults, 20));
+
+  // Try Sonnet first (best web search quality), then Haiku as secondary
+  const claudeModels = ['claude-sonnet-4-5', 'claude-haiku-4-5'];
+
+  for (const claudeModel of claudeModels) {
+    try {
+      console.log(`[Claude Fallback] Trying ${claudeModel} with web_search tool…`);
+      const { default: Anthropic } = await import('@anthropic-ai/sdk');
+      const claude = new Anthropic({ apiKey: anthropicKey });
+
+      const response = await claude.messages.create({
+        model: claudeModel,
+        max_tokens: 4096,
+        tools: [{ type: 'web_search_20250305' as any, name: 'web_search', max_uses: 5 }],
+        messages: [{ role: 'user', content: prompt }],
+      });
+
+      // Web search results are already woven into the text blocks by Anthropic's server
+      const text = response.content
+        .filter(b => b.type === 'text')
+        .map(b => (b as any).text as string)
+        .join('');
+
+      if (!text || text.length < 80) {
+        console.warn(`[Claude Fallback] ${claudeModel} returned empty/short response (${text.length} chars)`);
+        continue;
+      }
+
+      console.log(`[Claude Fallback] ${claudeModel} returned ${text.length} chars`);
+      const rawJobs = parseJobsFromText(text);
+      console.log(`[Claude Fallback] Parsed ${rawJobs.length} raw jobs`);
+      if (rawJobs.length === 0) continue;
+
+      const normalized: GeminiJob[] = [];
+      for (const raw of rawJobs) {
+        const url = (raw.url ?? raw.apply_url ?? '').trim();
+        const title = (raw.title ?? '').trim();
+        const company = (raw.company ?? '').trim();
+        if (!url || !title || !company || !url.startsWith('http')) continue;
+        normalized.push({
+          title,
+          company,
+          location:            (raw.location ?? '').trim() || guessLocation(criteria),
+          salary:              raw.salary ?? undefined,
+          applyUrl:            normalizeUrl(url),
+          description:         raw.description ?? undefined,
+          source:              'Claude',
+          geminiGroundingMetadata: {} as any,
+          geminiSources:       [],
+          geminiWebSearchQueries: [`Claude web search (${claudeModel})`],
+          ingestionConfidence: scoreConfidence(raw),
+        });
+      }
+
+      const limited = normalized.slice(0, maxResults);
+      console.log(`[Claude Fallback] ✓ ${limited.length} valid jobs via ${claudeModel} web search`);
+      console.log(`───────────────────────────────────────────────────────────`);
+      return {
+        jobs: limited,
+        queriesUsed: [`Claude web search (${claudeModel})`],
+        totalGroundingSources: 0,
+        modelUsed: `claude-fallback:${claudeModel}`,
+        skipped: false,
+      };
+
+    } catch (err: any) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[Claude Fallback] ${claudeModel} failed: ${msg.slice(0, 120)}`);
+    }
+  }
+
+  console.warn('[Claude Fallback] All Claude models failed');
+  return { jobs: [], queriesUsed: [], totalGroundingSources: 0, modelUsed: null, skipped: true, skipReason: 'Claude web search fallback failed' };
 }
 
 // ── Prompt builder ────────────────────────────────────────────────────────────
