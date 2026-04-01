@@ -3986,19 +3986,21 @@ app.get('/api/scout/status', async (_req, res: Response) => {
 
 let scoutRunning = false;
 
-app.post('/api/scout/run', async (_req, res: Response) => {
+app.post('/api/scout/run', async (req: Request, res: Response) => {
   if (scoutRunning) {
     res.status(409).json({ error: 'A scout run is already in progress.' });
     return;
   }
   try {
+    const searchMode: 'watchlist' | 'open' = req.body?.search_mode === 'open' ? 'open' : 'watchlist';
+    const fastSearch: boolean = req.body?.fast_search === true;
     const { rows } = await pool.query(
       "INSERT INTO scout_runs (status, jobs_found) VALUES ('running', 0) RETURNING *"
     );
     const run = rows[0];
-    res.json({ runId: run.id, message: 'Scout run started' });
+    res.json({ runId: run.id, message: 'Scout run started', searchMode, fastSearch });
     scoutRunning = true;
-    runScoutInBackground(run.id).catch(console.error).finally(() => { scoutRunning = false; });
+    runScoutInBackground(run.id, { searchMode, fastSearch }).catch(console.error).finally(() => { scoutRunning = false; });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -5043,7 +5045,11 @@ async function checkUrlHealthInBackground(jobIds?: number[]): Promise<void> {
   }
 }
 
-async function runScoutInBackground(runId: number): Promise<void> {
+async function runScoutInBackground(
+  runId: number,
+  opts: { searchMode?: 'watchlist' | 'open'; fastSearch?: boolean } = {}
+): Promise<void> {
+  const { searchMode = 'watchlist', fastSearch = false } = opts;
   try {
     const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
     if (cRows.length === 0) {
@@ -5086,17 +5092,20 @@ async function runScoutInBackground(runId: number): Promise<void> {
     let companiesScanned = 0;
     const perCompanyStats: { name: string; type: string; jobs: number; error?: string }[] = [];
 
-    await setStage(`Scraping ${companies.length} ATS job boards…`);
+    const modeLabel = searchMode === 'open' ? 'Open Search' : 'Watchlist';
+    const fastLabel = fastSearch ? ' [Fast Search — Perplexity only]' : '';
+    console.log(`[Scout] Mode: ${modeLabel}${fastLabel}`);
 
-    // Build title filter once before the ATS loop so Greenhouse/Lever can apply it
-    // at the source — this prevents hundreds of irrelevant jobs (engineering, finance,
-    // HR, etc.) from entering the pipeline just to be dropped later.
+    // Build title filter regardless — used by ATS loop and as a reference
     const atsTitleFilter = buildTitleFilter(criteria.target_roles);
-    if (atsTitleFilter) {
+    if (atsTitleFilter && searchMode !== 'open') {
       console.log(`ATS title filter active: ${criteria.target_roles.slice(0, 5).join(', ')}${criteria.target_roles.length > 5 ? '…' : ''}`);
     }
 
-    // ── Stage 2a: Scrape Greenhouse, Lever, and Workday companies ──
+    // ── Stage 2a: Scrape Greenhouse, Lever, and Workday companies ─────────────
+    // Skip if Open Search mode (user wants criteria-only, not watchlist companies)
+    if (searchMode !== 'open') {
+    await setStage(`Scraping ${companies.length} ATS job boards…`);
     for (const c of companies) {
       const co = c as { id: number; name: string; ats_type: string; ats_slug: string | null; careers_url: string | null; scan_failures: number; ats_types_tried: string[] };
       try {
@@ -5151,10 +5160,13 @@ async function runScoutInBackground(runId: number): Promise<void> {
         companiesScanned++;
       }
     }
+    } // end if (searchMode !== 'open')
 
+    // ── Stage 2b: JobSpy — LinkedIn + Indeed + (Glassdoor/ZipRecruiter via proxy) ──
+    // Skip entirely when Fast Search is active
+    if (!fastSearch) {
     await setStage(`ATS done (${allJobs.length} found) — searching LinkedIn & Indeed via JobSpy…`);
     await pool.query(`UPDATE scout_runs SET jobs_in_pipeline=$1 WHERE id=$2`, [allJobs.length, runId]).catch(() => {});
-    // ── Stage 2b: JobSpy — LinkedIn + Indeed + (Glassdoor/ZipRecruiter via proxy) ──
     try {
       const jobSpyResults = await runJobSpyScraper({
         target_roles: criteria.target_roles ?? [],
@@ -5197,13 +5209,23 @@ async function runScoutInBackground(runId: number): Promise<void> {
       const sourceByUrl = new Map(jobSpyJobs.map(j => [j.applyUrl, j.source]));
       allJobs.push(...safeJobSpyJobs.map(j => ({ ...j, source: sourceByUrl.get(j.applyUrl) ?? 'JobSpy' })));
     }
+    } // end if (!fastSearch)
 
-    await setStage(`JobSpy done (${allJobs.length} total) — running Perplexity discovery…`);
+    // ── Stage 2c: Perplexity + Gemini grounding — supplemental discovery ───────
+    const discoveryStageLabel = fastSearch
+      ? `Running Perplexity Fast Search (${modeLabel})…`
+      : `JobSpy done (${allJobs.length} total) — running Perplexity discovery…`;
+    await setStage(discoveryStageLabel);
     await pool.query(`UPDATE scout_runs SET jobs_in_pipeline=$1 WHERE id=$2`, [allJobs.length, runId]).catch(() => {});
-    // ── Stage 2c: Gemini + Google Search grounding — supplemental discovery ──
+
     let geminiJobsFound = 0;
     let geminiDeduped = 0;
     try {
+      // For Watchlist + Fast Search: focus Perplexity on the watchlist companies
+      const discoveryCompanyFocus = (fastSearch && searchMode === 'watchlist')
+        ? companyNames.slice(0, 30)
+        : undefined;
+
       const geminiResult = await runGeminiJobDiscovery({
         target_roles:  criteria.target_roles ?? [],
         locations:     criteria.locations ?? [],
@@ -5213,6 +5235,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
         avoid:         criteria.avoid ?? [],
         industries:    criteria.industries ?? [],
         min_salary:    criteria.min_salary ?? null,
+        ...(discoveryCompanyFocus ? { company_focus: discoveryCompanyFocus } : {}),
       });
 
       if (!geminiResult.skipped && geminiResult.jobs.length > 0) {
@@ -5934,6 +5957,21 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .run-stage{font-size:11px;color:var(--gold);margin-left:4px;font-style:italic}
 .run-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .auto-run-badge{font-size:11px;color:var(--muted);padding:3px 9px;border:1px solid #2a2a2a;border-radius:20px;margin-left:auto;white-space:nowrap}
+/* Scout options popup */
+.scout-opts-wrap{position:relative;display:inline-flex}
+.scout-opts-btn{background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:7px;padding:8px 10px;font-size:12px;cursor:pointer;line-height:1;transition:color .15s,border-color .15s}
+.scout-opts-btn:hover{color:var(--text);border-color:#444}
+.scout-opts-btn.active{color:var(--gold);border-color:var(--gold)}
+.scout-popup{display:none;position:absolute;top:calc(100% + 6px);left:0;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;min-width:240px;z-index:9000;box-shadow:0 8px 32px rgba(0,0,0,.5)}
+.scout-popup.open{display:block}
+.scout-popup-title{font-size:10px;font-weight:700;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px}
+.scout-mode-btns{display:flex;gap:6px;margin-bottom:12px}
+.scout-mode-btn{flex:1;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;text-align:center}
+.scout-mode-btn.selected{background:rgba(197,155,75,.15);border-color:var(--gold);color:var(--gold)}
+.scout-fast-row{display:flex;align-items:center;gap:8px;padding-top:10px;border-top:1px solid var(--border)}
+.scout-fast-chk{width:15px;height:15px;accent-color:var(--gold);cursor:pointer;flex-shrink:0}
+.scout-fast-label{font-size:12px;color:var(--text);cursor:pointer;user-select:none}
+.scout-fast-sub{font-size:10px;color:var(--muted);margin-top:2px}
 /* Quick-link job site pills */
 .quick-links{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .quick-link-sep{width:1px;height:16px;background:var(--border);flex-shrink:0;margin:0 2px}
@@ -6745,6 +6783,23 @@ textarea:focus,input:focus{border-color:var(--gold)}
 
 <div class="run-bar">
   <button class="btn btn-gold" id="run-btn" onclick="runScout()">&#9654; Run Scout Now</button>
+  <div class="scout-opts-wrap">
+    <button class="scout-opts-btn" id="scout-opts-btn" onclick="toggleScoutOpts(event)" title="Search options">&#9881;</button>
+    <div class="scout-popup" id="scout-popup">
+      <div class="scout-popup-title">Search Mode</div>
+      <div class="scout-mode-btns">
+        <button class="scout-mode-btn selected" id="mode-btn-watchlist" onclick="setScoutMode('watchlist')">&#x1F3AF; Watchlist Cos.</button>
+        <button class="scout-mode-btn" id="mode-btn-open" onclick="setScoutMode('open')">&#x1F30E; Open Search</button>
+      </div>
+      <div class="scout-fast-row">
+        <input type="checkbox" class="scout-fast-chk" id="fast-search-chk">
+        <div>
+          <label class="scout-fast-label" for="fast-search-chk">&#x26A1; Fast Search</label>
+          <div class="scout-fast-sub">Perplexity only &mdash; skips JobSpy</div>
+        </div>
+      </div>
+    </div>
+  </div>
   <span class="run-msg" id="run-msg"></span>
   <span class="run-stage" id="run-stage" style="display:none"></span>
   <span class="quick-link-sep"></span>
@@ -10829,6 +10884,30 @@ async function saveToWatchlist(name, website, btn) {
   }
 }
 
+// ── scout options popup ───────────────────────────────────────────────────
+var _scoutMode = 'watchlist';
+function toggleScoutOpts(e) {
+  e.stopPropagation();
+  var popup = document.getElementById('scout-popup');
+  var btn = document.getElementById('scout-opts-btn');
+  var isOpen = popup.classList.contains('open');
+  popup.classList.toggle('open', !isOpen);
+  btn.classList.toggle('active', !isOpen);
+}
+function setScoutMode(mode) {
+  _scoutMode = mode;
+  document.getElementById('mode-btn-watchlist').classList.toggle('selected', mode === 'watchlist');
+  document.getElementById('mode-btn-open').classList.toggle('selected', mode === 'open');
+}
+document.addEventListener('click', function(e) {
+  var popup = document.getElementById('scout-popup');
+  var wrap = document.getElementById('scout-opts-btn')?.closest('.scout-opts-wrap');
+  if (popup && wrap && !wrap.contains(e.target)) {
+    popup.classList.remove('open');
+    document.getElementById('scout-opts-btn').classList.remove('active');
+  }
+});
+
 // ── run scout ─────────────────────────────────────────────────────────────
 var pollTimer = null;
 async function runScout() {
@@ -10836,11 +10915,21 @@ async function runScout() {
   var msg = document.getElementById('run-msg');
   var stageEl = document.getElementById('run-stage');
   var autoEl = document.getElementById('auto-run-badge');
+  var fastSearch = document.getElementById('fast-search-chk')?.checked || false;
+  // Close the popup
+  document.getElementById('scout-popup')?.classList.remove('open');
+  document.getElementById('scout-opts-btn')?.classList.remove('active');
   btn.disabled = true;
   stageEl.style.display = 'none';
-  msg.textContent = 'Starting\u2026';
+  var modeDisplay = _scoutMode === 'open' ? 'Open Search' : 'Watchlist';
+  var fastDisplay = fastSearch ? ' \u26A1 Fast' : '';
+  msg.textContent = 'Starting\u2026 (' + modeDisplay + fastDisplay + ')';
   try {
-    var res = await fetch('/api/scout/run', { method:'POST' });
+    var res = await fetch('/api/scout/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ search_mode: _scoutMode, fast_search: fastSearch }),
+    });
     if (!res.ok) {
       var d = await res.json();
       msg.textContent = d.error || 'Error starting run';
@@ -10854,7 +10943,7 @@ async function runScout() {
   }
   document.getElementById('dot').className = 'dot running';
   if (autoEl) autoEl.style.display = 'none';
-  msg.textContent = 'Scouting\u2026';
+  msg.textContent = 'Scouting\u2026 (' + modeDisplay + fastDisplay + ')';
   var jobRefreshTimer = null;
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(async function() {
