@@ -5096,7 +5096,7 @@ async function runScoutInBackground(
     const perCompanyStats: { name: string; type: string; jobs: number; error?: string }[] = [];
 
     const modeLabel = searchMode === 'open' ? 'Open Search' : 'Watchlist';
-    const fastLabel = fastSearch ? ' [Fast Search — Perplexity only]' : '';
+    const fastLabel = fastSearch ? ' [Quick Search — Perplexity only]' : '';
     console.log(`[Scout] Mode: ${modeLabel}${fastLabel}`);
 
     // Build title filter regardless — used by ATS loop and as a reference
@@ -6806,13 +6806,13 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="scout-popup" id="scout-popup">
       <div class="scout-popup-title">Search Mode</div>
       <div class="scout-mode-btns">
-        <button class="scout-mode-btn selected" id="mode-btn-watchlist" onclick="setScoutMode('watchlist')">&#x1F3AF; Watchlist Cos.</button>
+        <button class="scout-mode-btn selected" id="mode-btn-watchlist" onclick="setScoutMode('watchlist')">&#x1F3AF; Watchlist Search</button>
         <button class="scout-mode-btn" id="mode-btn-open" onclick="setScoutMode('open')">&#x1F30E; Open Search</button>
       </div>
       <div class="scout-fast-row">
         <input type="checkbox" class="scout-fast-chk" id="fast-search-chk">
         <div>
-          <label class="scout-fast-label" for="fast-search-chk">&#x26A1; Fast Search</label>
+          <label class="scout-fast-label" for="fast-search-chk">&#x26A1; Quick Search</label>
           <div class="scout-fast-sub">Perplexity only &mdash; skips JobSpy</div>
         </div>
       </div>
@@ -10940,7 +10940,7 @@ async function runScout() {
   btn.disabled = true;
   stageEl.style.display = 'none';
   var modeDisplay = _scoutMode === 'open' ? 'Open Search' : 'Watchlist';
-  var fastDisplay = fastSearch ? ' \u26A1 Fast' : '';
+  var fastDisplay = fastSearch ? ' \u26A1 Quick' : '';
   msg.textContent = 'Starting\u2026 (' + modeDisplay + fastDisplay + ')';
   try {
     var res = await fetch('/api/scout/run', {
