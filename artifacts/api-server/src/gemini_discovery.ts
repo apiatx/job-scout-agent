@@ -217,23 +217,23 @@ export async function runGeminiJobDiscovery(
   const plxKey = process.env.PERPLEXITY_API_KEY?.trim();
   if (plxKey) {
     try {
-      console.log('[Discovery] Trying Perplexity sonar-pro');
+      console.log('[Discovery] Trying Perplexity sonar-pro (LinkedIn + ATS, uncapped)');
+      const plxPrompt = buildPerplexitySearchPrompt(criteria);
       const plxResp = await fetch('https://api.perplexity.ai/chat/completions', {
         method: 'POST',
         headers: { Authorization: `Bearer ${plxKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'sonar-pro', messages: [{ role: 'user', content: prompt }], max_tokens: 8192, temperature: 0.1 }),
+        body: JSON.stringify({ model: 'sonar-pro', messages: [{ role: 'user', content: plxPrompt }], max_tokens: 16000, temperature: 0.1 }),
       });
       if (plxResp.ok) {
         const plxData = await plxResp.json() as any;
         const text: string = plxData.choices?.[0]?.message?.content ?? '';
         const rawJobs = parseJobsFromText(text);
         if (rawJobs.length > 0) {
-          const normalized = normalizeGeminiJobs(rawJobs, {}, [], [], criteria);
+          const normalized = normalizeGeminiJobs(rawJobs, {}, [], [], criteria, 'Perplexity');
           const validated = await validateGreenhouseUrls(normalized);
-          const limited = validated.slice(0, maxResults);
-          console.log(`[Discovery] Perplexity: ${limited.length} valid jobs (${rawJobs.length} parsed)`);
+          console.log(`[Discovery] Perplexity: ${validated.length} valid jobs (${rawJobs.length} parsed, no cap)`);
           console.log(`───────────────────────────────────────────────────────────`);
-          return { jobs: limited, queriesUsed: [], totalGroundingSources: 0, modelUsed: 'perplexity/sonar-pro', skipped: false };
+          return { jobs: validated, queriesUsed: [], totalGroundingSources: 0, modelUsed: 'perplexity/sonar-pro', skipped: false };
         }
         throw new Error(`Perplexity returned 0 parseable jobs (${text.length} chars)`);
       }
@@ -433,6 +433,124 @@ Rules:
 - Do not fabricate jobs — only include roles you can verify exist via search`;
 }
 
+// ── Perplexity-specific prompt (LinkedIn-first, uncapped) ─────────────────────
+
+function buildPerplexitySearchPrompt(criteria: GeminiDiscoveryCriteria): string {
+  const roles      = criteria.target_roles.slice(0, 10).join(', ') || 'account executive, sales manager';
+  const locations  = criteria.locations.join(', ') || 'Remote';
+  const workType   = criteria.work_type === 'remote'  ? 'remote only'
+                   : criteria.work_type === 'hybrid'  ? 'remote or hybrid'
+                   : criteria.work_type === 'onsite'  ? 'on-site'
+                   : 'remote, hybrid, or on-site';
+  const mustHave   = criteria.must_have.slice(0, 8).join(', ');
+  const industries = criteria.industries.slice(0, 5).join(', ');
+  const salaryNote = criteria.min_salary ? `Minimum salary: $${criteria.min_salary.toLocaleString()}` : '';
+
+  // ── Company-focused mode ──────────────────────────────────────────────────
+  if (criteria.company_focus && criteria.company_focus.length > 0) {
+    const companyList = criteria.company_focus.slice(0, 20).join(', ');
+    return `You are a job search assistant with live web access. Search LinkedIn Jobs, company careers pages, Greenhouse, Lever, and Ashby for currently open roles at THESE SPECIFIC COMPANIES: ${companyList}
+
+TARGET ROLES (must match one): ${roles}
+WORK TYPE: ${workType} | LOCATIONS: ${locations}
+KEY SKILLS: ${mustHave || 'enterprise sales, SaaS, B2B'}
+${salaryNote}
+
+Search strategy — run ALL of these queries:
+1. Search LinkedIn Jobs: site:linkedin.com/jobs "${roles.split(',')[0]?.trim()}" at each company
+2. Search ATS boards: site:greenhouse.io OR site:lever.co OR site:ashbyhq.com for each company name
+3. Search direct careers pages for each company
+
+Return EVERY open position you find — no limit on count. I want as many as possible.
+
+For each job output a JSON object with these exact keys:
+- title: exact job title from the posting
+- company: company name (must be from the list above)
+- location: city/state or "Remote"
+- url: the direct URL to the job posting (linkedin.com/jobs/view/..., boards.greenhouse.io/..., etc.)
+- description: 1–2 sentence snippet from the posting
+- salary: salary range string if shown, otherwise ""
+
+Output ONLY a JSON array between JOBS_START and JOBS_END markers:
+
+JOBS_START
+[
+  {
+    "title": "Enterprise Account Executive",
+    "company": "Acme Corp",
+    "location": "Remote",
+    "url": "https://www.linkedin.com/jobs/view/123456789/",
+    "description": "Lead enterprise sales cycles for Fortune 500 accounts...",
+    "salary": "$150,000 - $180,000"
+  }
+]
+JOBS_END
+
+Rules:
+- Only include companies from the list above
+- Only include roles matching the target roles
+- Include LinkedIn URLs (linkedin.com/jobs/view/...) — these are valid and preferred
+- Do NOT fabricate jobs — only include postings you can verify via live search
+- Do NOT include expired or filled roles`;
+  }
+
+  // ── Standard broad search (LinkedIn-first, uncapped) ─────────────────────
+  return `You are a job search assistant with live web access. Your goal is to find as many currently open job postings as possible matching the criteria below. Search exhaustively across all available sources.
+
+TARGET ROLES: ${roles}
+WORK TYPE: ${workType} | LOCATIONS: ${locations}
+KEY SKILLS / KEYWORDS: ${mustHave || 'enterprise sales, SaaS, B2B'}
+${industries ? `INDUSTRIES: ${industries}` : ''}
+${salaryNote}
+
+Search ALL of these sources — run multiple queries per source to maximize results:
+
+1. LinkedIn Jobs (PRIMARY — search these queries on linkedin.com/jobs):
+   - "${roles.split(',')[0]?.trim()}" remote
+   - "${roles.split(',')[1]?.trim() || roles.split(',')[0]?.trim()}" ${locations.split(',')[0]?.trim() || 'United States'}
+   - "${mustHave.split(',')[0]?.trim() || 'SaaS'} ${roles.split(',')[0]?.trim()}"
+   ${industries ? `- "${industries.split(',')[0]?.trim()} ${roles.split(',')[0]?.trim()}"` : ''}
+
+2. Greenhouse (site:boards.greenhouse.io OR site:greenhouse.io)
+3. Lever (site:jobs.lever.co OR site:lever.co)
+4. Ashby (site:jobs.ashbyhq.com OR site:ashbyhq.com)
+5. Workday (site:myworkdayjobs.com)
+6. Direct company careers pages (company.com/careers or company.com/jobs)
+
+Return EVERY open position you find — no limit on count. I want the maximum number of unique, real job postings.
+
+For each job output a JSON object with these exact keys:
+- title: exact job title from the posting
+- company: company name
+- location: city/state or "Remote"
+- url: direct URL to the job posting (linkedin.com/jobs/view/..., boards.greenhouse.io/..., etc.)
+- description: 1–2 sentence snippet from the posting
+- salary: salary range string if shown, otherwise ""
+
+Output ONLY a JSON array between JOBS_START and JOBS_END markers. No other text outside:
+
+JOBS_START
+[
+  {
+    "title": "Enterprise Account Executive",
+    "company": "Acme Corp",
+    "location": "Remote",
+    "url": "https://www.linkedin.com/jobs/view/123456789/",
+    "description": "Lead enterprise sales cycles for Fortune 500 accounts...",
+    "salary": "$150,000 - $180,000"
+  }
+]
+JOBS_END
+
+Rules:
+- Include LinkedIn URLs (linkedin.com/jobs/view/...) — these are fully valid
+- Include ATS URLs (greenhouse, lever, ashby, workday)
+- Do NOT include LinkedIn search results pages or company homepage URLs
+- Do NOT fabricate jobs — only include postings you can verify exist via live search
+- Do NOT include expired or filled roles
+- Maximize unique results — search broadly across many companies and roles`;
+}
+
 // ── Response parser ───────────────────────────────────────────────────────────
 
 function parseJobsFromText(text: string): RawGeminiJobRecord[] {
@@ -529,6 +647,7 @@ function normalizeGeminiJobs(
   sources: GeminiSource[],
   webSearchQueries: string[],
   criteria: GeminiDiscoveryCriteria,
+  sourceLabel = 'Gemini',
 ): GeminiJob[] {
   const seen = new Set<string>();
   const results: GeminiJob[] = [];
@@ -551,7 +670,7 @@ function normalizeGeminiJobs(
       salary:      raw.salary ?? undefined,
       applyUrl:    normalUrl || url,
       description: raw.description ?? undefined,
-      source:      'Gemini',
+      source:      sourceLabel,
       geminiGroundingMetadata: groundingMeta,
       geminiSources:           sources,
       geminiWebSearchQueries:  webSearchQueries,
