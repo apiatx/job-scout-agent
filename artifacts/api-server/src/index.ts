@@ -1462,7 +1462,7 @@ function buildRankExplanation(job: Record<string, unknown>, detScore: number): s
 
   const src = job.source as string ?? '';
   if (['Greenhouse','Lever','Workday'].includes(src)) parts.push(`found via direct ${src} ATS`);
-  else if (src === 'Gemini') parts.push('discovered via Gemini + Google Search grounding');
+  else if (src === 'Gemini') parts.push('discovered via AI web search');
 
   return parts.join('; ');
 }
@@ -7075,12 +7075,12 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="nav-group">
     <div class="nav-group-label">Search</div>
     <div class="tab active" id="tab-jobs" onclick="showTab('jobs')" data-tooltip="Your scored job board. Claude rates every listing Top Target / Fast Win / Stretch / Probably Skip against your resume and settings.">Scout</div>
-    <div class="tab" id="tab-intel" onclick="showTab('intel')" data-tooltip="Gemini scans the web daily for companies actively hiring in your space. Market trends, emerging themes, hot companies to target now.">Career Intel</div>
-    <div class="tab" id="tab-pulse" onclick="showTab('pulse')" data-tooltip="Job Market Pulse — which companies are hiring most aggressively, what roles are trending, salary patterns from your scout data, and Gemini's verdict: true growth or hype?">Job Market Pulse</div>
+    <div class="tab" id="tab-intel" onclick="showTab('intel')" data-tooltip="Claude scans the web daily for companies actively hiring in your space. Market trends, emerging themes, hot companies to target now.">Career Intel</div>
+    <div class="tab" id="tab-pulse" onclick="showTab('pulse')" data-tooltip="Job Market Pulse — which companies are hiring most aggressively, what roles are trending, salary patterns from your scout data, and Claude's verdict: true growth or hype?">Job Market Pulse</div>
     <div class="tab" id="tab-leaders" onclick="showTab('leaders')" data-tooltip="Claude-ranked top 5-10 sales-led companies per sector — SaaS, Cybersecurity, AI Infrastructure, Networking and more. The gold standard companies to target for your next move.">Industry Leaders</div>
-    <div class="tab" id="tab-deepvalue" onclick="showTab('deepvalue')" data-tooltip="Gemini finds the cutting-edge infrastructure companies with the clearest 'why you need this' value prop — AI Infra, HPC, Semiconductors, Photonics, Networking, Data Center and more.">Deep Value</div>
+    <div class="tab" id="tab-deepvalue" onclick="showTab('deepvalue')" data-tooltip="Claude finds the cutting-edge infrastructure companies with the clearest 'why you need this' value prop — AI Infra, HPC, Semiconductors, Photonics, Networking, Data Center and more.">Deep Value</div>
     <div class="tab" id="tab-preipo" onclick="showTab('preipo')" data-tooltip="Explosive pre-IPO companies worth joining NOW. Series B is the sweet spot — proven PMF, scaling sales motion, meaningful equity. Ranked by momentum score using real funding data.">Pre-IPO</div>
-    <div class="tab" id="tab-news" onclick="showTab('news')" data-tooltip="Live B2B tech news feed — fresh articles from top sources analyzed by Gemini. See which companies are funding, hiring, or expanding sales teams right now.">Industry News</div>
+    <div class="tab" id="tab-news" onclick="showTab('news')" data-tooltip="Live B2B tech news feed — fresh articles from top sources analyzed by Claude. See which companies are funding, hiring, or expanding sales teams right now.">Industry News</div>
     <div class="tab" id="tab-clawd" onclick="showTab('clawd')" data-tooltip="Embedded interview and career coaching tool.">DeathByClawd</div>
     <div class="tab" id="tab-email" onclick="showTab('email')" data-tooltip="Weekly Scout Report — sent every Monday morning. Top 10 ranked matches from the past week with a Claude-written briefing. Preview, test send, and manage your Gmail connection here.">Weekly Report</div>
   </div>
@@ -7095,7 +7095,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="nav-group-label">Settings</div>
     <div class="tab" id="tab-settings" onclick="showTab('settings')" data-tooltip="Controls what the scout actually searches for: target roles, industries, locations, must-have skills, things to avoid, and salary floor. The scout won't run without this configured.">User Search Settings</div>
     <div class="tab" id="tab-positioning" onclick="showTab('positioning')" data-tooltip="Content studio — separate from the job search. Generates your LinkedIn headline, pitches, bios, and objection prep from your intake form. Never affects scoring or discovery.">Positioning Intake</div>
-    <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Your Company Watchlist — tracks open roles at each company daily using Gemini search. Also tells the scraper which ATS pages to hit and boosts their score.">Company Watchlist</div>
+    <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Your Company Watchlist — tracks open roles at each company daily using Claude AI search. Also tells the scraper which ATS pages to hit and boosts their score.">Company Watchlist</div>
     <div class="tab" id="tab-runs" onclick="showTab('runs')" data-tooltip="Full log of every scout run — jobs found, matches scored, errors, and timing. Use this to debug why a run found too many or too few results.">Run History</div>
   </div>
 </nav>
@@ -7357,7 +7357,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="intel-header">
     <div>
       <div class="sec-title" style="margin-bottom:4px">Career Intel</div>
-      <div class="intel-meta" id="intel-meta">Powered by Gemini + Google Search grounding &mdash; refreshes daily</div>
+      <div class="intel-meta" id="intel-meta">Powered by Claude + Web Search &mdash; refreshes daily</div>
     </div>
     <button class="btn btn-gold btn-sm" id="intel-refresh-btn" onclick="refreshCareerIntel()">Refresh Intel</button>
   </div>
@@ -7378,7 +7378,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="intel-loading" style="display:none">
     <div class="intel-loading-wrap">
       <div class="intel-spinner"></div>
-      <div class="intel-loading-msg">Gemini is searching and synthesising company signals&hellip;<br><span style="font-size:11px;color:var(--muted)">This typically takes 30&ndash;60 seconds</span></div>
+      <div class="intel-loading-msg">Claude is searching and synthesising company signals&hellip;<br><span style="font-size:11px;color:var(--muted)">This typically takes 30&ndash;60 seconds</span></div>
     </div>
   </div>
 
@@ -7438,7 +7438,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="pulse-header">
     <div>
       <div class="sec-title" style="margin-bottom:4px">Job Market Pulse</div>
-      <div class="intel-meta" id="pulse-meta">Scout data + Gemini search &mdash; hiring trends and signal analysis for your target companies</div>
+      <div class="intel-meta" id="pulse-meta">Scout data + Claude web search &mdash; hiring trends and signal analysis for your target companies</div>
     </div>
     <button class="btn btn-gold btn-sm" id="pulse-refresh-btn" onclick="refreshJobMarketPulse()">&#x26A1; Refresh Pulse</button>
   </div>
@@ -7446,7 +7446,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="pulse-loading" style="display:none">
     <div class="intel-loading-wrap">
       <div class="intel-spinner"></div>
-      <div class="intel-loading-msg">Gemini is analyzing hiring signals across your target companies&hellip;<br><span style="font-size:11px;color:var(--muted)">Assessing growth vs hype for each company &mdash; 30&ndash;90 seconds</span></div>
+      <div class="intel-loading-msg">Claude is analyzing hiring signals across your target companies&hellip;<br><span style="font-size:11px;color:var(--muted)">Assessing growth vs hype for each company &mdash; 30&ndash;90 seconds</span></div>
     </div>
   </div>
 
@@ -7493,7 +7493,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="dv-header">
     <div>
       <div class="sec-title" style="margin-bottom:4px">Deep Value</div>
-      <div class="dv-meta" id="dv-meta">Gemini finds cutting-edge infrastructure companies with the clearest customer value prop &mdash; plus open roles</div>
+      <div class="dv-meta" id="dv-meta">Claude searches for cutting-edge infrastructure companies with the clearest customer value prop &mdash; plus open roles</div>
     </div>
     <button class="btn btn-gold btn-sm" id="dv-refresh-btn" onclick="refreshDeepValue()">Refresh Intel</button>
   </div>
@@ -7501,12 +7501,12 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="dv-loading" style="display:none">
     <div class="dv-loading-wrap">
       <div class="dv-spinner"></div>
-      <div class="dv-loading-msg">Gemini is searching for the most compelling infrastructure companies with undeniable value props&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;60 seconds</span></div>
+      <div class="dv-loading-msg">Claude is searching for the most compelling infrastructure companies with undeniable value props&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;60 seconds</span></div>
     </div>
   </div>
 
   <div id="dv-empty" style="display:none">
-    <div class="dv-empty">No Deep Value data yet.<br>Click &ldquo;Refresh Intel&rdquo; to have Gemini search for cutting-edge infrastructure companies with the clearest &ldquo;why you need this&rdquo; value props &mdash; plus any open roles at each.</div>
+    <div class="dv-empty">No Deep Value data yet.<br>Click &ldquo;Refresh Intel&rdquo; to have Claude search for cutting-edge infrastructure companies with the clearest &ldquo;why you need this&rdquo; value props &mdash; plus any open roles at each.</div>
   </div>
 
   <div id="dv-error" style="display:none" class="dv-error-box"></div>
@@ -7522,7 +7522,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="preipo-header">
     <div>
       <div class="sec-title" style="margin-bottom:4px">Pre-IPO Opportunity Radar</div>
-      <div class="preipo-meta" id="preipo-meta">Powered by Gemini + Google Search &mdash; identifies hypergrowth companies by funding stage</div>
+      <div class="preipo-meta" id="preipo-meta">Powered by Claude + Web Search &mdash; identifies hypergrowth companies by funding stage</div>
     </div>
     <button class="btn btn-gold btn-sm" id="preipo-refresh-btn" onclick="refreshPreIpo()">Refresh Radar</button>
   </div>
@@ -7530,7 +7530,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="preipo-loading" style="display:none">
     <div class="preipo-loading-wrap">
       <div class="preipo-spinner"></div>
-      <div class="preipo-loading-msg">Gemini is scanning funding data, growth signals, and hiring intelligence&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;90 seconds</span></div>
+      <div class="preipo-loading-msg">Claude is scanning funding data, growth signals, and hiring intelligence&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;90 seconds</span></div>
     </div>
   </div>
 
@@ -7641,14 +7641,14 @@ textarea:focus,input:focus{border-color:var(--gold)}
 <div class="panel" id="panel-companies">
   <div style="margin-bottom:20px">
     <div class="sec-title" style="margin-bottom:4px">Company Watchlist</div>
-    <div style="font-size:12px;color:var(--muted)">Gemini searches for open sales roles at each company daily. Green = matching roles found. Also boosts each company&rsquo;s score in your job board.</div>
+    <div style="font-size:12px;color:var(--muted)">Claude searches for open sales roles at each company daily. Green = matching roles found. Also boosts each company&rsquo;s score in your job board.</div>
   </div>
 
   <!-- Watchlist scan controls -->
   <div class="cw-scan-header">
     <div>
       <div style="font-size:13px;font-weight:700;color:var(--text)">Daily Job Scan</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:2px" id="cw-scan-status">Gemini checks for open roles at each company daily &mdash; automatically</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:2px" id="cw-scan-status">Claude checks for open roles at each company daily &mdash; automatically</div>
     </div>
     <button class="btn btn-ghost btn-sm" id="cw-scan-btn" onclick="runWatchlistScan()">&#x1F50D; Scan Now</button>
   </div>
@@ -8114,7 +8114,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="news-topbar">
       <div>
         <div class="news-title">&#x1F4F0; Industry News</div>
-        <div class="news-subtitle">Live B2B tech news &mdash; analyzed by Gemini for hiring signals, funding, and sales opportunity</div>
+        <div class="news-subtitle">Live B2B tech news &mdash; analyzed by Claude for hiring signals, funding, and sales opportunity</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
         <div id="news-meta" class="news-status"></div>
@@ -9093,7 +9093,7 @@ function renderJobCard(j, opts) {
       var hmPhoneHtml = j.hm_phone ? '<div style="font-size:11px;color:var(--muted);margin-top:1px">' + esc(j.hm_phone) + '</div>' : '';
       // Enrichment source tag
       var hmSrcRaw = j.hm_enrichment_source || '';
-      var hmSrcLabel = hmSrcRaw === 'gemini+apollo' ? 'via Gemini+Apollo' : hmSrcRaw === 'apollo' ? 'via Apollo' : hmSrcRaw === 'gemini' ? 'via Gemini' : hmSrcRaw === 'cache' ? 'From cache' : (hmSrcRaw ? 'via ' + hmSrcRaw : '');
+      var hmSrcLabel = hmSrcRaw === 'gemini+apollo' ? 'via AI+Apollo' : hmSrcRaw === 'apollo' ? 'via Apollo' : hmSrcRaw === 'gemini' ? 'via AI search' : hmSrcRaw === 'cache' ? 'From cache' : (hmSrcRaw ? 'via ' + hmSrcRaw : '');
       var hmSrcHtml = hmSrcLabel ? '<span style="display:inline-block;padding:0 5px;border-radius:3px;font-size:9px;color:var(--muted);border:1px solid #333">' + esc(hmSrcLabel) + '</span>' : '';
       // LI message status badge
       var liStatusBadge = '';
@@ -12236,7 +12236,7 @@ function renderCareerIntel(data, generatedAt, stale) {
   intelEl('intel-footer').innerHTML = 'Last refreshed: ' + ts + modelNote + ' &nbsp;&middot;&nbsp; ' + (data.grounding_sources_count || 0) + ' grounding sources' + staleNotice;
 
   // Update meta line
-  intelEl('intel-meta').innerHTML = 'Powered by Gemini + Google Search grounding &mdash; refreshes daily';
+  intelEl('intel-meta').innerHTML = 'Powered by Claude + Web Search &mdash; refreshes daily';
 
   setIntelState('content');
 }
@@ -12369,7 +12369,7 @@ function renderPreIpo(data, generatedAt, stale) {
   });
 
   // Footer
-  pEl('preipo-footer').textContent = 'Data sourced via Gemini + Google Search grounding. Verify funding details independently before acting.';
+  pEl('preipo-footer').textContent = 'Data sourced via Claude + Web Search. Verify funding details independently before acting.';
 }
 
 function filterPreIpo(stage) {
@@ -12567,7 +12567,7 @@ async function scanForRoles(source) {
       var isCapacity = reason.includes('unavailable') || reason.includes('503') || reason.includes('timeout') || reason.includes('candidates') || reason.includes('demand') || reason.includes('429');
       if (isCapacity) {
         if (errBox) {
-          errBox.innerHTML = '<strong>Gemini is temporarily at capacity</strong> \u2014 this is a Google-side issue that usually clears in 1\u20132 minutes.<br><button style="margin-top:8px;padding:4px 14px;background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.3);border-radius:6px;cursor:pointer;font-size:12px" onclick="runTargetedScan(this.dataset.src)" data-src="' + source + '">Retry</button>';
+          errBox.innerHTML = '<strong>AI service is temporarily at capacity</strong> \u2014 this usually clears in 1\u20132 minutes.<br><button style="margin-top:8px;padding:4px 14px;background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.3);border-radius:6px;cursor:pointer;font-size:12px" onclick="runTargetedScan(this.dataset.src)" data-src="' + source + '">Retry</button>';
           errBox.style.display = '';
         }
         return;
@@ -12719,7 +12719,7 @@ function renderJobMarketPulse(data, generatedAt, stale) {
   el('pulse-content').style.display = '';
 
   var genDate = generatedAt ? new Date(generatedAt).toLocaleString() : '';
-  el('pulse-meta').textContent = 'Generated ' + genDate + (stale ? ' \u2014 \u26A0\uFE0F Stale (>24h old), refresh for latest' : ' \u2014 Powered by Gemini + Google Search');
+  el('pulse-meta').textContent = 'Generated ' + genDate + (stale ? ' \u2014 \u26A0\uFE0F Stale (>24h old), refresh for latest' : ' \u2014 Powered by Claude + Web Search');
 
   // Mood banner
   var moodMap = {
@@ -12943,7 +12943,7 @@ async function loadNews(force) {
       if (!_newsData.length) {
         footerEl.textContent = 'No articles yet \u2014 click Refresh Feed to pull fresh B2B news';
       } else {
-        footerEl.textContent = _newsData.length + ' articles \u00B7 powered by Gemini + Google Search grounding';
+        footerEl.textContent = _newsData.length + ' articles \u00B7 powered by Claude + Web Search';
       }
     }
   } catch(e) {
@@ -13046,9 +13046,9 @@ async function refreshNews() {
   var btn = newsEl('news-refresh-btn');
   var metaEl = newsEl('news-meta');
   if (btn) { btn.disabled = true; btn.textContent = 'Fetching\u2026'; }
-  if (metaEl) metaEl.textContent = 'Pulling RSS feeds and analyzing with Gemini\u2026';
+  if (metaEl) metaEl.textContent = 'Pulling RSS feeds and analyzing with Claude\u2026';
   var grid = newsEl('news-grid');
-  if (grid) grid.innerHTML = '<div class="news-loading">\uD83E\uDD16 Gemini is reading the news\u2026 (30-60 seconds)</div>';
+  if (grid) grid.innerHTML = '<div class="news-loading">\uD83E\uDD16 Claude is reading the news\u2026 (30-60 seconds)</div>';
   try {
     var startRes = await fetch('/api/industry-news/refresh', { method: 'POST' });
     var startData = await startRes.json();
@@ -13081,7 +13081,7 @@ async function refreshNews() {
             metaEl.textContent = ts ? 'Updated ' + ts : '';
           }
           var footerEl = newsEl('news-footer');
-          if (footerEl) footerEl.textContent = _newsData.length + ' articles \u00B7 powered by Gemini + Google Search grounding';
+          if (footerEl) footerEl.textContent = _newsData.length + ' articles \u00B7 powered by Claude + Web Search';
           if (btn) { btn.disabled = false; btn.textContent = '\u21BB Refresh Feed'; }
         }
       } catch { /* keep polling */ }
@@ -13161,12 +13161,12 @@ function renderDvData(data, stale) {
   var metaParts = [];
   if (genAt) metaParts.push('Last updated ' + genAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }));
   if (stale) metaParts.push('\u26A0\uFE0F Stale \u2014 click Refresh Intel');
-  metaParts.push('Powered by Gemini + Google Search');
+  metaParts.push('Powered by Claude + Web Search');
   dvEl('dv-meta').textContent = metaParts.join(' \u2014 ');
 
   var cos = data.companies || [];
   dvEl('dv-footer').textContent =
-    cos.length + ' companies \u2014 ' + cos.filter(function(c) { return c.has_open_roles; }).length + ' with open roles \u2014 ' + (data.model_used || 'Gemini');
+    cos.length + ' companies \u2014 ' + cos.filter(function(c) { return c.has_open_roles; }).length + ' with open roles \u2014 ' + (data.model_used || 'Claude');
 
   dvEl('dv-loading').style.display = 'none';
   dvEl('dv-empty').style.display = 'none';
@@ -13259,7 +13259,7 @@ async function runWatchlistScan() {
   var btn = document.getElementById('cw-scan-btn');
   var statusEl = document.getElementById('cw-scan-status');
   if (btn) { btn.disabled = true; btn.textContent = 'Scanning\u2026'; }
-  if (statusEl) statusEl.textContent = 'Gemini is searching for open roles at each company\u2026 (30-90s per company)';
+  if (statusEl) statusEl.textContent = 'Claude is searching for open roles at each company\u2026 (30-90s per company)';
   try {
     var res = await fetch('/api/companies/scan-jobs', { method: 'POST' });
     var data = await res.json();
