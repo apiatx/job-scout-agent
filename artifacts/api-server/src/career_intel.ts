@@ -104,7 +104,8 @@ function isModelUnavailableError(err: unknown): boolean {
     msg.includes('try again later') ||
     msg.includes('overloaded') ||
     msg.includes('resource_exhausted') ||
-    msg.includes('429')
+    msg.includes('429') ||
+    msg.includes('timeout')
   );
 }
 
@@ -282,7 +283,7 @@ export async function generateCareerIntel(criteria: CareerIntelCriteria): Promis
   const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
 
-  const timeoutMs = parseInt(process.env.GEMINI_TIMEOUT_SECONDS ?? '120', 10) * 1000;
+  const timeoutMs = parseInt(process.env.GEMINI_TIMEOUT_SECONDS ?? '45', 10) * 1000;
   const candidates = buildCandidateChain();
   const prompt = buildIntelPrompt(criteria);
   const ai = new GoogleGenAI({ apiKey });

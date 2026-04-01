@@ -177,7 +177,8 @@ function isModelUnavailableError(err: unknown): boolean {
     msg.includes('try again later') ||
     msg.includes('overloaded') ||
     msg.includes('resource_exhausted') ||
-    msg.includes('429')
+    msg.includes('429') ||
+    msg.includes('timeout')
   );
 }
 
@@ -199,7 +200,7 @@ export async function runGeminiJobDiscovery(
   }
 
   const maxResults = parseInt(process.env.GEMINI_MAX_RESULTS ?? '30', 10);
-  const timeoutMs  = parseInt(process.env.GEMINI_TIMEOUT_SECONDS ?? '90', 10) * 1000;
+  const timeoutMs  = parseInt(process.env.GEMINI_TIMEOUT_SECONDS ?? '45', 10) * 1000;
 
   // Build the candidate list — user override goes first if set.
   // If the env model matches a built-in name, remove the duplicate from the

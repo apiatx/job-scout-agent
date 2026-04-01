@@ -245,7 +245,7 @@ export async function generateJobMarketPulse(
   const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
 
-  const timeoutMs = parseInt(process.env.GEMINI_TIMEOUT_SECONDS ?? '120', 10) * 1000;
+  const timeoutMs = parseInt(process.env.GEMINI_TIMEOUT_SECONDS ?? '45', 10) * 1000;
   const chain = candidateChain();
   const prompt = buildPulsePrompt(scoutStats, criteria);
   const ai = new GoogleGenAI({ apiKey });
