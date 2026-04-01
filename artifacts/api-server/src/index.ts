@@ -110,6 +110,55 @@ const US_STATE_ABBREVS = /\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|
 // International 2-letter country codes that must be treated as territory (not fully-remote)
 const INTL_COUNTRY_CODES = /\b(uk|gb|eu|de|fr|es|it|au|nz|sg|hk|jp|kr|cn|nl|be|ch|se|no|dk|ie|pt|pl|cz|at|gr|ro|hu|fi|sk|bg|hr|si|lt|lv|ee|cy|lu|mt)\b/i;
 
+// ── International location detection ─────────────────────────────────────────
+// Used for hard-dropping explicitly out-of-country jobs regardless of "Remote" label.
+
+const INTL_CITY_PATTERN = /\b(barcelona|madrid|london|berlin|paris|amsterdam|munich|zurich|geneva|stockholm|oslo|copenhagen|helsinki|dublin|brussels|rome|milan|vienna|warsaw|prague|budapest|lisbon|athens|bucharest|sofia|zagreb|vilnius|riga|tallinn|nicosia|luxembourg|valletta|tokyo|beijing|shanghai|singapore|sydney|melbourne|auckland|toronto|montreal|vancouver|calgary|dubai|abu\s+dhabi|tel\s+aviv|cape\s+town|johannesburg|nairobi|bogota|lima|santiago|buenos\s+aires|mexico\s+city|guadalajara|mumbai|delhi|bangalore|bengaluru|hyderabad|seoul|hong\s+kong|taipei|jakarta|bangkok|kuala\s+lumpur|manila|ho\s+chi\s+minh|lagos)\b/i;
+
+const INTL_REGION_PATTERN = /\b(emea|apac|latam|mena|europe(?:an)?\s*(region|team|hub)?|asia[\s-]pacific|united\s+kingdom(?:\s+and\s+ireland)?|middle\s+east|sub[\s-]saharan\s+africa|canada(?:ian)?|australia(?:n)?|germany|german\s+market|france|french\s+market|spain|italy|netherlands|sweden|norway|denmark|finland|switzerland|austria|poland|ireland|portugal|belgium|israel)\b/i;
+
+/**
+ * Extracts a city/country name embedded in the job title in parentheses.
+ * e.g., "Mid-Market AE (Barcelona)" → "Barcelona"
+ * Returns null for non-location parentheticals like "(Mid-Market)" or "(SLED)".
+ */
+function extractTitleEmbeddedCity(title: string): string | null {
+  const m = title.match(/\(([^)]{2,40})\)/g);
+  if (!m) return null;
+  for (const match of m) {
+    const inner = match.slice(1, -1).trim();
+    // Skip obvious non-location parentheticals
+    if (/^(mid[\s-]?market|commercial|enterprise|smb|strategic|global|sled|public\s+sector|healthcare|federal|fintech|saas|startup|series\s+[a-e]|seed|stealth|\d+)$/i.test(inner)) continue;
+    // If it looks like a location: contains a known intl city, region, or country code
+    if (INTL_CITY_PATTERN.test(inner) || INTL_REGION_PATTERN.test(inner) || INTL_COUNTRY_CODES.test(inner)) return inner;
+    // Multi-word that isn't a sales segment — could be a city
+    if (/^[A-Z][a-z]+(?:[\s,]+[A-Za-z]+)*$/.test(inner) && inner.split(/\s+/).length <= 4) {
+      // Only return if it actually matches a known intl signal pattern
+      if (INTL_CITY_PATTERN.test(inner) || INTL_REGION_PATTERN.test(inner)) return inner;
+    }
+  }
+  return null;
+}
+
+/**
+ * Detects if a job has an explicit international location that mismatches a US-only user.
+ * Checks both the location field AND the job title (for embedded cities like "(Barcelona)").
+ */
+function detectInternationalMismatch(title: string, jobLocation: string): { mismatch: boolean; reason: string } {
+  // Check explicit international city in location field (non-remote)
+  if (jobLocation && !/^(remote|unknown|n\/a|tbd|)$/i.test(jobLocation.trim())) {
+    if (INTL_CITY_PATTERN.test(jobLocation)) return { mismatch: true, reason: `intl_city_in_location:${jobLocation}` };
+    if (INTL_REGION_PATTERN.test(jobLocation)) return { mismatch: true, reason: `intl_region_in_location:${jobLocation}` };
+    if (INTL_COUNTRY_CODES.test(jobLocation) && !/\b(us|usa|united states)\b/i.test(jobLocation)) return { mismatch: true, reason: `intl_country_code_in_location:${jobLocation}` };
+  }
+  // Check for international city embedded in the title — e.g., "(Barcelona)"
+  const titleCity = extractTitleEmbeddedCity(title);
+  if (titleCity) return { mismatch: true, reason: `intl_city_in_title:${titleCity}` };
+  // Check for EMEA/APAC/LATAM in the title itself (not just in location)
+  if (INTL_REGION_PATTERN.test(title)) return { mismatch: true, reason: `intl_region_in_title:${title.match(INTL_REGION_PATTERN)?.[0] ?? ''}` };
+  return { mismatch: false, reason: '' };
+}
+
 // Single directional words that are too vague for location pattern matching
 // (User has "South"/"South East" to describe *themselves*, not as a job location keyword)
 const VAGUE_DIRECTIONALS = new Set(['south', 'north', 'east', 'west', 'southern', 'northern', 'eastern', 'western']);
@@ -3894,7 +3943,16 @@ async function reclassifyJobsLocally(): Promise<number> {
   const _isSEUser = _userLocLower.some((l: string) => /south.?carolina|north.?carolina|georgia|florida|southeast|se\b/.test(l));
   const _TERRITORY_EXCLUDE = /\b(northeast|new\s+england|mid[\s-]atlantic|midwest|great\s+lakes|north\s+central|northwest|pacific\s+northwest|pnw|west\s+coast|southwest|tola|mountain\s+west|rocky\s+mountain|plains|upper\s+midwest)\b/i;
   const _TERRITORY_SE_OK   = /\b(southeast|southern|carolinas?|florida|georgia|sc\b|nc\b|fl\b|ga\b)\b/i;
-  function _isExcludedTerritory(title: string): boolean {
+  const _userIsUsOnly = (userLocations).every((loc: string) => {
+    const l = loc.toLowerCase().trim();
+    return !INTL_CITY_PATTERN.test(l) && !INTL_REGION_PATTERN.test(l) && !INTL_COUNTRY_CODES.test(l);
+  });
+  function _isExcludedTerritory(title: string, jobLoc = ''): boolean {
+    // International city/region in the title is always a hard drop for US-only users
+    if (_userIsUsOnly) {
+      const intl = detectInternationalMismatch(title, jobLoc);
+      if (intl.mismatch) return true;
+    }
     if (!_isSEUser) return false;
     if (!_TERRITORY_EXCLUDE.test(title)) return false;
     if (_TERRITORY_SE_OK.test(title)) return false;
@@ -3967,8 +4025,8 @@ async function reclassifyJobsLocally(): Promise<number> {
       // Hard filter 4: salary (only when salary is EXPLICITLY listed AND known below min)
       const belowSalary = salaryKnownBelow(j.salary);
 
-      // Hard filter 5: territory mismatch only (segment is NOT a hard block — comp handles it)
-      const badTerritory = _isExcludedTerritory(j.title ?? '');
+      // Hard filter 5: territory mismatch + international hard-drop
+      const badTerritory = _isExcludedTerritory(j.title ?? '', loc);
 
       if (!titleMatches || hasAvoid || !locationOk || belowSalary || badTerritory) {
         tier = 'Probably Skip';
@@ -5377,9 +5435,20 @@ async function runScoutInBackground(
     const hasLocationPrefs = criteria.locations.length > 0;
     const allowedWorkModes: string[] = criteria.allowed_work_modes ?? [];
 
-    function jobMatchesLocation(jobLocation: string): boolean {
+    // Determine if user has a US-only location profile (no international preferences).
+    // When true, any job with an explicit international location signal is hard-dropped.
+    const userIsUsOnly = (criteria.locations ?? []).every(loc => {
+      const l = loc.toLowerCase().trim();
+      return !INTL_CITY_PATTERN.test(l) && !INTL_REGION_PATTERN.test(l) && !INTL_COUNTRY_CODES.test(l);
+    });
+
+    // jobMatchesLocation uses the stored location field plus the title-embedded city override
+    function jobMatchesLocation(jobTitle: string, jobLocation: string): boolean {
       if (!hasLocationPrefs && allowedWorkModes.length === 0) return true;
-      return checkJobLocation(jobLocation, criteria.locations, false, allowedWorkModes);
+      // If the title embeds an international city, treat that as the effective location
+      const titleCity = extractTitleEmbeddedCity(jobTitle);
+      const effectiveLoc = titleCity ?? jobLocation;
+      return checkJobLocation(effectiveLoc, criteria.locations, false, allowedWorkModes);
     }
 
     // 2. Avoid keywords hard filter — exclude jobs whose title or description contains avoid keywords
@@ -5425,18 +5494,24 @@ async function runScoutInBackground(
       return SEGMENT_ROLE_CTX.test(title); // only block when it's clearly the sales segment
     }
 
-    // 5. Territory filter — block job titles with an explicit regional territory
-    //    that is clearly OUTSIDE the user's preferred locations.
-    //    e.g., user is SE/Remote → "(Northeast)" in title = hard mismatch.
+    // 5. Territory + international filter — block job titles with an explicit regional territory
+    //    clearly OUTSIDE the user's preferred locations, including international cities.
     const userLocLower = (criteria.locations ?? []).map((l: string) => l.toLowerCase());
     const isSEUser = userLocLower.some(l => /south.?carolina|north.?carolina|georgia|florida|southeast|se\b/.test(l));
     const TERRITORY_EXCLUDE = /\b(northeast|new\s+england|mid[\s-]atlantic|midwest|great\s+lakes|north\s+central|northwest|pacific\s+northwest|pnw|west\s+coast|southwest|tola|mountain\s+west|rocky\s+mountain|plains|upper\s+midwest)\b/i;
     const TERRITORY_SE_OK   = /\b(southeast|southern|carolinas?|florida|georgia|sc\b|nc\b|fl\b|ga\b)\b/i;
 
     function isExcludedTerritory(title: string): boolean {
-      if (!isSEUser) return false; // only apply if user is clearly SE-based
+      // Defense-in-depth: always block international city names in the title,
+      // regardless of whether the user is SE-based. This catches embedded cities
+      // like "(Barcelona)" that the location field missed.
+      if (userIsUsOnly) {
+        const intl = detectInternationalMismatch(title, '');
+        if (intl.mismatch) return true;
+      }
+      if (!isSEUser) return false; // US territory check only applies to SE-based users
       if (!TERRITORY_EXCLUDE.test(title)) return false;
-      // If it also mentions SE territory, let it through (e.g., "SE + Northeast" hybrid)
+      // If it also mentions SE territory, let it through
       if (TERRITORY_SE_OK.test(title)) return false;
       return true;
     }
@@ -5447,10 +5522,38 @@ async function runScoutInBackground(
     let droppedByAvoid = 0;
     let droppedBySalary = 0;
     let droppedByTerritory = 0;
+    let droppedByInternational = 0;
 
+    // 1a. International hard-drop — runs BEFORE regular location filter
+    //     Hard-drops any job with an explicit international location signal
+    //     (checked in both location field AND job title).
+    //     Fails closed: even "Remote" location jobs are dropped when the title
+    //     embeds an international city like "(Barcelona)".
+    if (userIsUsOnly) {
+      const before = preFiltered.length;
+      preFiltered = preFiltered.filter(j => {
+        const intl = detectInternationalMismatch(j.title, j.location);
+        if (intl.mismatch) {
+          console.log(`  [Location] HARD-DROP international: "${j.company}" — ${j.title} | ${j.location} | reason: ${intl.reason}`);
+          return false;
+        }
+        return true;
+      });
+      droppedByInternational = before - preFiltered.length;
+    }
+
+    // 1b. Location filter — uses title-embedded city as effective location override
     if (hasLocationPrefs) {
       const before = preFiltered.length;
-      preFiltered = preFiltered.filter(j => jobMatchesLocation(j.location));
+      preFiltered = preFiltered.filter(j => {
+        const pass = jobMatchesLocation(j.title, j.location);
+        if (!pass) {
+          const titleCity = extractTitleEmbeddedCity(j.title);
+          const effectiveLoc = titleCity ?? j.location;
+          console.log(`  [Location] DROP location mismatch: "${j.company}" — effective_loc="${effectiveLoc}" title="${j.title}"`);
+        }
+        return pass;
+      });
       droppedByLocation = before - preFiltered.length;
     }
     if (avoidPatterns.length > 0) {
@@ -5464,10 +5567,14 @@ async function runScoutInBackground(
       droppedBySalary = before - preFiltered.length;
     }
 
-    // Apply territory filter only (segment is NOT a hard block — compensation handles it)
+    // Apply territory filter (US regions + international defense-in-depth)
     {
       const before = preFiltered.length;
-      preFiltered = preFiltered.filter(j => !isExcludedTerritory(j.title));
+      preFiltered = preFiltered.filter(j => {
+        const excluded = isExcludedTerritory(j.title);
+        if (excluded) console.log(`  [Location] DROP territory mismatch: "${j.company}" — ${j.title}`);
+        return !excluded;
+      });
       droppedByTerritory = before - preFiltered.length;
     }
 
@@ -5508,7 +5615,8 @@ async function runScoutInBackground(
 
     console.log(`\n──── PRE-FILTERS (before Claude scoring) ───────────────────`);
     console.log(`  After title filter: ${toScore.length}`);
-    console.log(`  Dropped by location: ${droppedByLocation}`);
+    console.log(`  Dropped by international location (hard): ${droppedByInternational}${userIsUsOnly ? ' [US-only profile]' : ''}`);
+    console.log(`  Dropped by location mismatch: ${droppedByLocation}`);
     console.log(`  Dropped by avoid keywords: ${droppedByAvoid}`);
     console.log(`  Dropped by salary below $${criteria.min_salary?.toLocaleString() ?? 'n/a'}: ${droppedBySalary}`);
     console.log(`  Dropped by territory mismatch: ${droppedByTerritory}`);
@@ -5665,10 +5773,18 @@ async function runScoutInBackground(
       const loc = (m.location ?? '').trim();
       let finalTier: string;
 
-      // Apply location check + deterministic tier logic using our computeTier
+      // Apply location check + deterministic tier logic using our computeTier.
+      // Location mismatch OVERRIDES company attractiveness — a great company in
+      // the wrong geography cannot become a Top Target.
       const locationOk = checkJobLocation(loc, criteria.locations, false, allowedWorkModes);
-      if (!locationOk) {
+      // Defense-in-depth: also check for international signals in the Claude-returned title/location.
+      // This catches cases where Claude adjusted the location field in its response.
+      const intlCheck = userIsUsOnly ? detectInternationalMismatch(m.title ?? '', loc) : { mismatch: false, reason: '' };
+      if (!locationOk || intlCheck.mismatch) {
         finalTier = 'Probably Skip';
+        if (intlCheck.mismatch) {
+          console.log(`  [PostScore] Override to Probably Skip — international mismatch: ${m.company} | ${m.title} | ${'reason' in intlCheck ? intlCheck.reason : ''}`);
+        }
       } else if (m.subScores && m.matchScore) {
         finalTier = computeTier(m.matchScore, m.aiRisk, m.subScores, m.title, m.company, loc, tierSettings);
       } else {

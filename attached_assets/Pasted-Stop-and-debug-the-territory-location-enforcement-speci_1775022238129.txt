@@ -1,0 +1,97 @@
+Stop and debug the territory/location enforcement specifically before anything else.
+
+The latest Quick Search results prove that out-of-territory jobs are still reaching the final jobs page and even being labeled as Top Targets / new recommendations.
+
+Examples from the latest run:
+
+* Mid-Market Account Executive (Barcelona) was returned even though it is a hard geographic mismatch
+* Remote jobs are being shown, but they may not actually satisfy my “remote-in-territory” requirements
+* Company/industry fit is overpowering location mismatch when it should not
+
+This means the current location / territory logic is still not working correctly at the final recommendation level.
+
+I need a focused audit and fix for location handling.
+
+Please inspect and report first:
+
+1. Exactly how location is parsed for Quick Search / Perplexity jobs
+
+   * raw location text
+   * normalized location fields
+   * remote flags
+   * territory/state/region parsing
+   * what happens when location is just "Remote"
+
+2. Exactly how the current territory filter works
+
+   * what inputs it reads
+   * whether it is a hard filter or only a scoring penalty
+   * what happens when parsed location data is missing or ambiguous
+   * what happens for "Remote"
+   * what happens for "Remote - US"
+   * what happens for "Remote - specific states"
+   * what happens for international locations like Barcelona
+
+3. Why these jobs were not excluded:
+
+   * Arista Networks Account Manager
+   * Tigerdata Mid-Market Account Executive (Barcelona)
+   * TensorWave Account Executive
+
+For each one, tell me:
+
+* what normalized location fields were present
+* whether territory logic ran
+* whether it passed or failed
+* why it still reached final display
+* why it was allowed to get its current tier/score
+
+Then fix the logic so it behaves like this:
+
+A. HARD LOCATION FAILS
+Jobs should be hard-dropped before final ranking/display when:
+
+* explicit international location mismatch
+* explicit out-of-territory mismatch
+* explicit wrong state/region mismatch
+* on-site/hybrid location outside allowed geography
+
+B. REMOTE LOGIC MUST BE MORE PRECISE
+Differentiate clearly between:
+
+* remote_anywhere
+* remote_us
+* remote_us_specific_states
+* remote_in_territory
+* remote_unknown
+
+Do not treat all "Remote" jobs as valid by default.
+
+C. FAIL CLOSED, NOT OPEN
+If location is ambiguous or insufficiently parsed, do not let it become a Top Target by default.
+Either:
+
+* downgrade strongly
+* mark as location_unknown
+* or exclude until clarified
+
+D. LOCATION MUST OVERRIDE COMPANY ATTRACTIVENESS
+A great company in the wrong geography should not become a Top Target.
+Location mismatch should override company score and most other positives.
+
+E. EXPLAINABILITY
+For every final displayed job, expose a location pass reason such as:
+
+* matched_territory
+* matched_remote_in_territory
+* matched_remote_us
+* location_unknown
+* out_of_territory_rejected
+
+After fixing, report:
+
+1. root cause of why these out-of-territory jobs survived
+2. exact code changes made
+3. whether location mismatch is now a hard filter
+4. how remote jobs are now classified
+5. whether the example jobs would now be excluded or downgraded
