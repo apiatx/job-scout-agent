@@ -4006,6 +4006,15 @@ app.get('/api/scout/status', async (_req, res: Response) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+app.get('/api/scout-runs/latest', async (_req, res: Response) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT id, started_at, completed_at, jobs_found, matches_found FROM scout_runs WHERE status='completed' ORDER BY completed_at DESC LIMIT 1"
+    );
+    res.json(rows.length > 0 ? rows[0] : null);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 let scoutRunning = false;
 
 app.post('/api/scout/run', async (req: Request, res: Response) => {
@@ -6113,6 +6122,8 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .inner-tab.tier-win.active{color:#00c86e;border-bottom-color:#00c86e}
 .inner-tab.tier-stretch.active{color:#7c8dff;border-bottom-color:#7c8dff}
 .inner-tab.tier-skip.active{color:#888;border-bottom-color:#888}
+.inner-tab.tier-new{color:#a78bfa}
+.inner-tab.tier-new.active{color:#a78bfa;border-bottom-color:#a78bfa}
 .tier-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
 .tier-top-target{background:rgba(245,200,66,.15);color:#f5c842;border:1px solid rgba(245,200,66,.35)}
 .tier-fast-win{background:rgba(0,200,110,.13);color:#00c86e;border:1px solid rgba(0,200,110,.3)}
@@ -7024,6 +7035,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="inner-tab tier-win" id="jtab-win" onclick="showJobsTab('win')">&#x26A1; Fast Wins <span id="jtab-count-win" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
     <div class="inner-tab tier-stretch" id="jtab-stretch" onclick="showJobsTab('stretch')">&#x1F680; Stretch <span id="jtab-count-stretch" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
     <div class="inner-tab tier-skip" id="jtab-skip" onclick="showJobsTab('skip')">&#x1F6AB; Probably Skip <span id="jtab-count-skip" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
+    <div class="inner-tab tier-new" id="jtab-new" onclick="showJobsTab('new')" style="display:none">&#x2728; New <span id="jtab-count-new" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
     <div class="inner-tab" id="jtab-all" onclick="showJobsTab('all')">All <span id="jtab-count-all" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
   </div>
   <div id="bulk-delete-bar" class="bulk-delete-bar" style="display:none"></div>
@@ -8399,6 +8411,7 @@ var _jobsById = {};
 var _allJobs = [];
 var _currentJobsTab = 'target';
 var _jobsRetries = 0;
+var _latestRunId = null;
 function isRemoteInTerritory(loc) {
   if (!loc || !/remote/i.test(loc)) return false;
   var stripped = loc
@@ -8783,7 +8796,7 @@ function sortJobs(jobs) {
 
 function showJobsTab(tab) {
   _currentJobsTab = tab;
-  ['target','win','stretch','skip','all'].forEach(function(t) {
+  ['target','win','stretch','skip','new','all'].forEach(function(t) {
     var el = document.getElementById('jtab-' + t);
     if (el) el.classList.toggle('active', t === tab);
   });
@@ -9102,6 +9115,15 @@ function updateTabCounts() {
   });
   var allEl = document.getElementById('jtab-count-all');
   if (allEl) allEl.textContent = allCount > 0 ? '(' + allCount + ')' : '';
+
+  // "New" tab — jobs from the latest scout run
+  var newTab = document.getElementById('jtab-new');
+  var newCount = document.getElementById('jtab-count-new');
+  var newJobs = _latestRunId ? _allJobs.filter(function(j) { return !j.saved_at && String(j.scout_run_id) === String(_latestRunId); }) : [];
+  if (newTab) {
+    newTab.style.display = newJobs.length > 0 ? '' : 'none';
+  }
+  if (newCount) newCount.textContent = newJobs.length > 0 ? '(' + newJobs.length + ')' : '';
 }
 
 function renderJobs() {
@@ -9119,6 +9141,19 @@ function renderJobs() {
   if (_currentJobsTab === 'all') {
     jobs = sortJobs(unsavedJobs);
     cnt.textContent = jobs.length + ' job' + (jobs.length !== 1 ? 's' : '') + ' total';
+    if (bbar) bbar.style.display = 'none';
+  } else if (_currentJobsTab === 'new') {
+    // Jobs from the most recent scout run
+    jobs = _latestRunId
+      ? unsavedJobs.filter(function(j) { return String(j.scout_run_id) === String(_latestRunId); }).sort(function(a,b) { return new Date(b.found_at||0).getTime() - new Date(a.found_at||0).getTime(); })
+      : [];
+    if (!jobs.length) {
+      cnt.textContent = 'No new jobs from the latest scout run';
+      grid.innerHTML = '<div style="padding:48px 24px;text-align:center;color:var(--muted);font-size:13px">Run the scout to see new results here</div>';
+      if (bbar) bbar.style.display = 'none';
+      return;
+    }
+    cnt.textContent = jobs.length + ' new job' + (jobs.length !== 1 ? 's' : '') + ' from the latest run';
     if (bbar) bbar.style.display = 'none';
   } else {
     var tierLabel = tierMapBulk[_currentJobsTab];
@@ -9201,13 +9236,13 @@ function toggleConfidenceFilter() {
 async function loadJobs() {
   try {
     var url = '/api/jobs?min_score=50' + (_hideLowConfidence ? '&hide_low_confidence=true' : '');
-    var res = await fetch(url);
-    if (!res.ok) {
-      var body = '';
-      try { body = JSON.stringify(await res.json()); } catch(_){}
-      throw new Error('HTTP ' + res.status + (body ? ': ' + body : ''));
-    }
-    var jobs = await res.json();
+    var results = await Promise.all([
+      fetch(url).then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }),
+      fetch('/api/scout-runs/latest').then(function(r) { return r.ok ? r.json() : null; }).catch(function() { return null; })
+    ]);
+    var jobs = results[0];
+    var latestRun = results[1];
+    _latestRunId = latestRun ? latestRun.id : null;
     _allJobs = jobs;
     _jobsById = {};
     jobs.forEach(function(j) { _jobsById[j.id] = j; });
@@ -11066,6 +11101,11 @@ async function runScout() {
           loadJobs().then(function() {
             if (_allJobs.length > found) {
               msg.textContent = 'Done! ' + found + ' new match' + (found !== 1 ? 'es' : '') + ' (\u2022 ' + _allJobs.length + ' total)';
+            }
+            // Auto-switch to New tab if there are results from this run
+            var newTabJobs = _latestRunId ? _allJobs.filter(function(j) { return !j.saved_at && String(j.scout_run_id) === String(_latestRunId); }) : [];
+            if (newTabJobs.length > 0 && document.getElementById('panel-jobs') && document.getElementById('panel-jobs').classList.contains('active')) {
+              showJobsTab('new');
             }
           });
         } else {
