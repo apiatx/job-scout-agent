@@ -504,10 +504,36 @@ export async function runPerplexityScoutSearch(
   }
 
   const { mode, companyNames = [] } = opts;
-  const role0  = criteria.target_roles[0]?.trim()  || 'Account Executive';
-  const role1  = criteria.target_roles[1]?.trim()  || 'Account Manager';
-  const skill0 = criteria.must_have[0]?.trim()     || 'SaaS';
-  const skill1 = criteria.must_have[1]?.trim()     || 'B2B';
+
+  // ── Derive targeted keyword list from user settings ────────────────────────
+  // Priority: industries (specific) → must_have (explicit) → generic fallback
+  const rawIndustries = (criteria.industries ?? []).filter(Boolean);
+  const rawMustHave   = (criteria.must_have   ?? []).filter(Boolean);
+  const allKeywords   = [...rawIndustries, ...rawMustHave.filter(k => !rawIndustries.includes(k))];
+  // Pad to at least 5 slots with tech-neutral fallbacks so queries stay sensible
+  const KW_FALLBACKS  = ['enterprise software', 'B2B technology', 'infrastructure', 'technology', 'SaaS'];
+  while (allKeywords.length < 5) allKeywords.push(KW_FALLBACKS[allKeywords.length] ?? 'technology');
+
+  // Round-robin through keywords to distribute across query slots
+  const kw = (i: number) => allKeywords[i % allKeywords.length];
+
+  const role0 = (criteria.target_roles[0] ?? 'Account Executive').trim();
+  const role1 = (criteria.target_roles[1] ?? 'Account Manager').trim();
+
+  // ── Derive location terms for Remote-in-Territory searches ────────────────
+  // "Remote" / "remote" entries in locations mean pure remote-US; state/city
+  // names mean Remote-in-Territory — include them in searches.
+  const territoryLocs = (criteria.locations ?? [])
+    .filter(l => l.toLowerCase() !== 'remote')
+    .map(l => l.trim())
+    .filter(Boolean);
+  // Build a short "location suffix" that adds territory context when relevant
+  const locSuffix = territoryLocs.length > 0
+    ? ` (${territoryLocs.slice(0, 3).join(' OR ')})`
+    : '';
+
+  console.log(`[PerplexityScout] Using keywords: ${allKeywords.slice(0, 6).join(', ')}${allKeywords.length > 6 ? '…' : ''}`);
+  if (territoryLocs.length > 0) console.log(`[PerplexityScout] Territory locations: ${territoryLocs.join(', ')}`);
 
   interface SearchRequest {
     label: string;
@@ -523,15 +549,18 @@ export async function runPerplexityScoutSearch(
       console.warn('[PerplexityScout] Watchlist mode but no companies — falling back to open search');
     }
     console.log('[PerplexityScout] Open Search — 3 parallel Search API calls (Greenhouse/Lever | Ashby/Workday | LinkedIn)');
+
+    // Build 5 queries per ATS bucket, rotating through the user's actual industry keywords
+    // Each bucket targets a different ATS domain family
     searchRequests = [
       {
         label: 'Greenhouse + Lever',
         query: [
-          `"${role0}" remote ${skill0}`,
-          `"${role0}" remote ${skill1}`,
-          `"${role1}" remote ${skill0}`,
-          `enterprise "${role0}" SaaS remote`,
-          `"${role1}" B2B remote enterprise`,
+          `"${role0}" "${kw(0)}" remote`,
+          `"${role0}" "${kw(1)}" remote`,
+          `"${role1}" "${kw(2)}" remote`,
+          `"${role0}" "${kw(3)}" remote`,
+          `"${role1}" "${kw(4)}" remote${locSuffix}`,
         ],
         search_domain_filter: ['boards.greenhouse.io', 'jobs.lever.co'],
         max_results: 10,
@@ -539,11 +568,11 @@ export async function runPerplexityScoutSearch(
       {
         label: 'Ashby + Workday',
         query: [
-          `"${role0}" remote ${skill0}`,
-          `"${role0}" enterprise remote`,
-          `"${role1}" remote B2B`,
-          `"${role0}" SaaS remote ${skill1}`,
-          `"${role1}" remote ${skill0} enterprise`,
+          `"${role0}" "${kw(0)}" remote`,
+          `"${role0}" "${kw(2)}" remote`,
+          `"${role1}" "${kw(1)}" remote`,
+          `"${role0}" "${kw(4)}" remote`,
+          `"${role1}" "${kw(3)}" remote${locSuffix}`,
         ],
         search_domain_filter: ['jobs.ashbyhq.com', 'myworkdayjobs.com'],
         max_results: 10,
@@ -551,9 +580,9 @@ export async function runPerplexityScoutSearch(
       {
         label: 'LinkedIn Jobs',
         query: [
-          `"${role0}" remote ${skill0} ${skill1}`,
-          `enterprise "${role0}" SaaS remote`,
-          `"${role1}" remote enterprise software`,
+          `"${role0}" "${kw(0)}" "${kw(1)}" remote`,
+          `"${role0}" "${kw(2)}" remote`,
+          `"${role1}" "${kw(3)}" remote${locSuffix}`,
         ],
         search_domain_filter: ['linkedin.com'],
         max_results: 10,
@@ -561,6 +590,7 @@ export async function runPerplexityScoutSearch(
     ];
   } else {
     // Watchlist mode: group companies 3-per-query, 5 queries per request, 3 parallel = 45 max
+    // Alternate between role0/role1 and rotate through top industry keywords
     const PER_QUERY   = 3;
     const PER_REQUEST = 5;
     const PER_BATCH   = PER_QUERY * PER_REQUEST; // 15
@@ -573,9 +603,9 @@ export async function runPerplexityScoutSearch(
       const groups  = chunkArray(batch, PER_QUERY);
       const queries = groups.slice(0, PER_REQUEST).map((g, qi) => {
         const names = g.map(c => `"${c}"`).join(' OR ');
-        return qi % 2 === 0
-          ? `(${names}) "${role0}" remote`
-          : `(${names}) "${role1}" remote`;
+        const role  = qi % 2 === 0 ? role0 : role1;
+        const kword = kw(qi);
+        return `(${names}) "${role}" "${kword}" remote`;
       });
       return {
         label: `Watchlist batch ${i + 1} (${batch.length} companies)`,
