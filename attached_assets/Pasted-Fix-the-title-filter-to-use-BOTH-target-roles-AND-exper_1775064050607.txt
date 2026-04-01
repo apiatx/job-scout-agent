@@ -1,0 +1,69 @@
+Fix the title filter to use BOTH target_roles AND experience_level 
+from settings together. Do not change anything else.
+
+HOW IT WORKS:
+
+Read target_roles from settings. Example: ["Account Executive", "Account Manager"]
+Read experience_levels from settings. Example: ["mid", "senior"] (currently checked)
+
+Each experience level maps to these title prefixes/keywords:
+- junior: "" (no prefix), "SMB", "Commercial"
+- mid: "Commercial", "Corporate", "Mid-Market", "MM"  
+- senior: "Sr.", "Senior", "Named", "Enterprise"
+- strategic: "Strategic", "Sr. Enterprise", "Account Director", "Major", "Majors"
+
+Build the title filter dynamically by combining EVERY saved role 
+with EVERY modifier from EVERY checked experience level.
+
+Example with roles ["Account Executive", "Account Manager"] 
+and levels ["mid", "senior"]:
+
+The filter passes a job if its title contains ANY of:
+- "Account Executive" (base match, always included)
+- "Account Manager" (base match, always included)
+- "Commercial Account Executive"
+- "Corporate Account Executive"
+- "Mid-Market Account Executive"
+- "Enterprise Account Executive"
+- "Senior Account Executive"
+- "Sr. Account Executive"
+- "Named Account Executive"
+- "Commercial Account Manager"
+- "Corporate Account Manager"
+- "Mid-Market Account Manager"
+- "Enterprise Account Manager"
+- "Senior Account Manager"
+- "Sr. Account Manager"
+- "Named Account Manager"
+
+If "strategic" is also checked, additionally pass:
+- "Strategic Account Executive"
+- "Account Director" (standalone — from strategic level definition)
+- "Major Account Executive"
+- "Sr. Enterprise Account Executive"
+
+STRICT RULE: If a job title does not match any combination 
+of saved roles + checked experience levels, it is dropped. 
+No exceptions. No smart inference. No fallback allowlists.
+
+"Regional Sales Director" → dropped (not a saved role)
+"Strategic Revenue Manager" → dropped (not a saved role)
+"Channel Sales Executive" → dropped (not a saved role)
+"Enterprise Account Executive" → passes (Account Executive + Senior)
+"Named Account Manager" → passes (Account Manager + Senior)
+"Account Director" → passes only if Strategic is checked
+
+Apply this same filter logic to both the ATS scraper 
+title filter and the main post-collection pipeline.
+
+If target_roles is empty, pass all jobs through.
+If experience_levels is empty, use base role match only.
+
+Read everything from the settings table at runtime. 
+Never hardcode role titles or level mappings.
+
+Store the experience level → keyword mapping as a 
+configuration constant at the top of the file so it 
+is easy to update if the settings page changes.
+
+Push to feature branch when done.

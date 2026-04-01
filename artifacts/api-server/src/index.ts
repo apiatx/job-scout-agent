@@ -5019,6 +5019,49 @@ function buildTitleFilter(targetRoles: string[]): RegExp | null {
   return new RegExp(`(${unique.join('|')})`, 'i');
 }
 
+// ── Role × Experience-level title filter ────────────────────────────────────
+// Maps each experience level (as stored in the DB) to the set of title-prefix
+// modifiers that correspond to that level.  Update this constant when the
+// experience-level definitions on the Settings page change.
+const EXPERIENCE_LEVEL_MODIFIERS: Record<string, { modifiers: string[]; standalone?: string[] }> = {
+  junior:    { modifiers: ['SMB', 'Commercial'] },                                 // '' (no prefix) = base match, always included
+  mid:       { modifiers: ['Commercial', 'Corporate', 'Mid-Market', 'MM'] },
+  senior:    { modifiers: ['Sr.', 'Senior', 'Named', 'Enterprise'] },
+  strategic: { modifiers: ['Strategic', 'Sr. Enterprise', 'Major', 'Majors'], standalone: ['Account Director'] },
+};
+
+// Builds a title filter RegExp from the user's saved target_roles and
+// experience_levels settings.  The resulting pattern passes a job title if it
+// contains ANY combination of (modifier + role) for every checked level, plus
+// the base role match (always included).
+// Returns null when targetRoles is empty → all titles pass.
+function buildRoleExperienceFilter(targetRoles: string[], experienceLevels: string[]): RegExp | null {
+  if (!targetRoles || targetRoles.length === 0) return null;
+
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+
+  const patterns: string[] = [];
+  for (const role of targetRoles) {
+    const escapedRole = esc(role.trim());
+    patterns.push(escapedRole); // base match — always included
+
+    const levels = (experienceLevels ?? []).map(l => l.toLowerCase());
+    for (const level of levels) {
+      const cfg = EXPERIENCE_LEVEL_MODIFIERS[level];
+      if (!cfg) continue;
+      for (const mod of cfg.modifiers) {
+        patterns.push(`${esc(mod)}\\s+${escapedRole}`);
+      }
+      for (const s of cfg.standalone ?? []) {
+        patterns.push(esc(s));
+      }
+    }
+  }
+
+  const unique = [...new Set(patterns)];
+  return new RegExp(`(${unique.join('|')})`, 'i');
+}
+
 // ── Background URL health check ─────────────────────────────────────────────
 // Checks unchecked job URLs in batches of 12, marks url_ok true/false.
 // Runs entirely in the background — does not block the scout run.
@@ -5137,18 +5180,16 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
     await setStage(`Scraping ${companies.length} ATS job boards…`);
 
-    // Build ATS title filter for Greenhouse/Lever/Workday source-level filtering.
-    // Per spec: target_roles must NOT be used as a hard filter — use a broad B2B sales/GTM
-    // allowlist instead. This still blocks engineering, design, HR, finance, etc. from
-    // entering the pipeline while letting through all adjacent sales role titles.
-    // NOTE: isBroadSalesRole() is defined later in the pipeline; we build an equivalent
-    //       RegExp here so we can pass it to the ATS scraper functions that expect a RegExp.
-    // A broad B2B sales/GTM signal pattern — matches any sales, revenue, BD, CSM, or
-    // client-facing role title. Non-matching titles (clearly engineering, HR, finance, etc.)
-    // are dropped at the ATS source level. The full two-pass check (signal + non-sales block)
-    // is applied in the main pipeline's isBroadSalesRole() function after collection.
-    const atsTitleFilter: RegExp = /\b(account|sales|revenue|business\s+development|client\s+(executive|manager|director|success|partner)|customer\s+(success|acquisition|growth)|channel|partner\s*(manager|sales|director)?|territory|field\s+sales|inside\s+sales|enterprise\s+(sales|account)|commercial|strategic\s+(account|sales)|regional\s+(account|sales|manager)|national\s+(account|sales)|hunter|ae\b|am\b|sdr\b|bdr\b|csm\b|bdm\b|gtm|quota|pre[\s-]?sales|solution\s+(consultant|sales)|alliances|growth\s+(executive|manager|director)|outbound|closing|expansion|renewal|upsell)\b/i;
-    console.log(`ATS title filter: broad B2B sales/GTM allowlist (not limited to target roles)`);
+    // Build ATS title filter from target_roles × experience_levels (same filter used in
+    // the main post-collection pipeline).  Applied at the source level so Greenhouse/Lever
+    // scraping skips obviously irrelevant postings (engineering, HR, finance, etc.) without
+    // pulling them into memory first.
+    const atsTitleFilter = buildRoleExperienceFilter(criteria.target_roles ?? [], criteria.experience_levels ?? []);
+    if (atsTitleFilter) {
+      console.log(`ATS title filter: roles [${(criteria.target_roles ?? []).join(', ')}] × levels [${(criteria.experience_levels ?? []).join(', ')}] → ${atsTitleFilter.source.slice(0, 120)}…`);
+    } else {
+      console.log(`ATS title filter: none (no target roles configured — all titles pass)`);
+    }
 
     // ── Stage 2a: Scrape Greenhouse, Lever, and Workday companies ──
     for (const c of companies) {
@@ -5326,37 +5367,31 @@ async function runScoutInBackground(runId: number): Promise<void> {
     for (const s of companiesWithZero) console.log(`    ✗ ${s.name} (${s.type})${s.error ? ` — ERROR: ${s.error}` : ''}`);
     console.log(`───────────────────────────────────────────────────────────`);
 
-    // Per spec: target_roles must NOT be used as a hard post-search filter.
-    // Instead use a broad B2B sales/GTM allowlist — only block titles that are
-    // unambiguously non-sales (engineering, design, analytics, HR, finance, legal).
-    // When in doubt, PASS the job through to Claude — Claude is the intelligent layer.
-    const SALES_SIGNAL_PATTERN = /\b(account|sales|revenue|business\s+development|client\s+(executive|manager|director|success|partner)|customer\s+(success|acquisition|growth)|channel|partner\s*(manager|sales|director)?|territory|field\s+sales|inside\s+sales|enterprise\s+(sales|account)|commercial|strategic\s+(account|sales)|regional\s+(account|sales|manager)|national\s+(account|sales)|hunter|ae\b|am\b|sdr\b|bdr\b|csm\b|bdm\b|gtm|quota|pre[\s-]?sales|solution\s+(consultant|sales)|alliances|growth\s+(executive|manager|director)|outbound|closing|expansion|renewal|upsell)\b/i;
-    const NON_SALES_SIGNAL_PATTERN = /^(software\s+engineer|senior\s+software|staff\s+software|principal\s+software|backend\s+engineer|frontend\s+engineer|full[\s-]?stack\s+engineer|data\s+engineer|data\s+scientist|data\s+analyst|machine\s+learning|ml\s+engineer|ai\s+engineer|devops\s+engineer|site\s+reliability|platform\s+engineer|mobile\s+engineer|ios\s+engineer|android\s+engineer|ux\s+designer|ui\s+designer|product\s+designer|graphic\s+designer|visual\s+designer|web\s+designer|recruiter\b|talent\s+acquisition|hr\s+generalist|hr\s+manager|hr\s+business\s+partner|human\s+resources\s+manager|financial\s+analyst|accounts\s+payable|accounts\s+receivable|bookkeeper|controller\b|tax\s+(manager|analyst|specialist|director|preparer)|payroll\s+specialist|legal\s+counsel|paralegal|attorney\b|lawyer\b|compliance\s+(analyst|manager|officer)|auditor\b|copywriter|content\s+(writer|creator|strategist|marketer)|technical\s+writer|journalist\b|it\s+support|help\s+desk|network\s+(admin|engineer|administrator)|systems\s+administrator|database\s+administrator|sysadmin)/i;
+    // Title filter: target_roles × experience_levels matrix.
+    // Each checked experience level contributes a set of title-prefix modifiers
+    // (see EXPERIENCE_LEVEL_MODIFIERS constant).  A job passes if its title contains
+    // ANY (modifier + role) combination, or the base role alone.
+    // Strict: no match → dropped.  If target_roles is empty → all pass.
+    const titleFilter = buildRoleExperienceFilter(criteria.target_roles ?? [], criteria.experience_levels ?? []);
 
-    function isBroadSalesRole(title: string): boolean {
-      // Pass if title contains a clear sales/GTM signal
-      if (SALES_SIGNAL_PATTERN.test(title)) return true;
-      // Block if title starts with a clearly non-sales function
-      if (NON_SALES_SIGNAL_PATTERN.test(title.trim())) return false;
-      // Ambiguous or unlabeled title — pass through; Claude will decide
-      return true;
-    }
+    console.log(`\n──── TITLE FILTER (roles × experience levels) ──────────────`);
+    console.log(`  Roles   : ${(criteria.target_roles ?? []).join(', ') || '(none — all pass)'}`);
+    console.log(`  Levels  : ${(criteria.experience_levels ?? []).join(', ') || '(none — base match only)'}`);
+    if (titleFilter) console.log(`  Pattern : ${titleFilter.source.slice(0, 200)}…`);
 
-    console.log(`\n──── TITLE FILTER (broad B2B sales/GTM allowlist) ──────────`);
     const droppedTitles: string[] = [];
     const toScore = allJobs.filter((j) => {
-      const pass = isBroadSalesRole(j.title);
+      const pass = !titleFilter || titleFilter.test(j.title);
       if (!pass) droppedTitles.push(`  ✗ [${j.company}] "${j.title}"`);
       return pass;
     });
     const droppedByTitle = allJobs.length - toScore.length;
-    console.log(`Title filter: ${allJobs.length} total → ${toScore.length} passed (${droppedByTitle} dropped as non-sales)`);
+    console.log(`  ${allJobs.length} total → ${toScore.length} passed (${droppedByTitle} dropped)`);
     if (droppedTitles.length > 0) {
-      console.log(`  Dropped titles (sample):`);
+      console.log(`  Dropped (sample):`);
       for (const t of droppedTitles.slice(0, 30)) console.log(t);
       if (droppedTitles.length > 30) console.log(`  … and ${droppedTitles.length - 30} more`);
     }
-    console.log(`  NOTE: target_roles used for search-building and Claude scoring only — not for pre-filtering`);
     console.log(`───────────────────────────────────────────────────────────`);
 
     // ── Hard pre-filters (before Claude scoring) to save API costs ──
