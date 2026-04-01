@@ -1,0 +1,118 @@
+Read all relevant files completely before making any changes.
+Understand the full current architecture first.
+
+THE CHANGE:
+Remove the dependency on the companies table for driving 
+ATS scraping in the main scout run. Instead, use Claude 
+to dynamically generate the list of companies to scrape 
+at the start of every scout run, based purely on what 
+the user has saved in their settings.
+
+HOW IT WORKS:
+
+At the start of every scout run, before any scraping begins,
+make one Claude API call with the following prompt:
+
+"You are a job search intelligence engine. Based on the 
+user's saved job search settings below, identify the top 
+50-75 companies that best match these criteria. For each 
+company, determine the best way to scrape their job 
+listings (Greenhouse, Workday, Lever, or plain career 
+page URL).
+
+USER SETTINGS:
+- Target roles: [roles from settings]
+- Experience levels: [levels from settings]  
+- Industries: [industries from settings]
+- Locations: [locations from settings]
+- Work modes: [work modes from settings]
+- Min base salary: [min_salary from settings]
+- Min OTE: [min_ote from settings]
+- Company type: [public/private from settings]
+- Employee count: [employee bands from settings]
+- Revenue bands: [revenue bands from settings]
+- Funding stages: [funding stages from settings]
+- Vertical niches: [vertical niches from settings]
+- Must-have keywords: [must_have from settings]
+- Avoid keywords: [avoid from settings]
+
+Return ONLY a valid JSON array. No explanation. No markdown.
+Each object must have exactly these fields:
+{
+  'name': 'Company Name',
+  'ats_type': 'greenhouse' | 'workday' | 'lever' | 'plain',
+  'identifier': 'the slug, career site ID, or full URL',
+  'reason': 'one sentence why this company matches the settings'
+}
+
+For greenhouse: identifier is the board token slug 
+  e.g. 'purestorage', 'databricks', 'coreweave'
+For workday: identifier is 'subdomain|careerSite' 
+  e.g. 'nvidia.wd5|NVIDIAExternalCareerSite'
+For lever: identifier is the company slug
+  e.g. 'extremenetworks'
+For plain: identifier is the full careers page URL
+  e.g. 'https://careers.cisco.com'
+
+Only include companies you are highly confident about.
+Do not guess ATS details. If unsure of the ATS type or 
+identifier for a company, use plain with their known 
+careers URL.
+
+Focus on companies that are:
+- In the user's target industries
+- Likely to have roles matching the user's target roles
+- Appropriate size/stage based on user settings
+- Strong presence in the user's target locations
+- Hardware, infrastructure, AI, semiconductor, or 
+  data platform companies (not pure SaaS at risk of 
+  AI disruption unless they are category leaders)"
+
+Use model claude-opus-4-6 for this call.
+Cache the result in a scout_company_list table:
+
+CREATE TABLE IF NOT EXISTS scout_company_list (
+  id SERIAL PRIMARY KEY,
+  settings_hash TEXT NOT NULL,
+  companies_json JSONB NOT NULL,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+The settings_hash is an MD5 of all the user's settings 
+values concatenated. If the hash matches a cached entry 
+less than 24 hours old, use the cached list instead of 
+calling Claude again. This means if settings haven't 
+changed, the company list is reused and the Claude call 
+is skipped entirely.
+
+If settings change (hash changes), regenerate the list.
+
+After getting the company list from Claude (or cache),
+run the existing Greenhouse/Workday/Lever/plain scrapers 
+on those companies exactly as they work today. The 
+scraping logic does not change — only the source of the 
+company list changes.
+
+ALSO: Remove isCompanySafe() and all Gemini momentum 
+checks from the scout run entirely. They are no longer 
+needed — Claude already vetted the companies when 
+building the list.
+
+ALSO: Keep the Company Watchlist page and its separate 
+search function completely intact and unchanged. The 
+Watchlist is now purely for the user to manually track 
+companies of interest. It no longer drives the scout run.
+
+ALSO: Keep JobSpy exactly as it is — it runs in parallel 
+with the ATS scraping as it does today.
+
+Log the Claude-generated company list at the start of 
+each scout run:
+"Claude selected X companies for this run:"
+followed by each company name and ATS type.
+
+If the Claude API call fails for any reason, fall back 
+to the existing companies table so the scout run still 
+completes.
+
+Push directly to main when done.

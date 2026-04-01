@@ -1,4 +1,5 @@
 import express, { type Request, type Response } from 'express';
+import { createHash } from 'crypto';
 import pg from 'pg';
 import multer from 'multer';
 import * as pdfParseLib from 'pdf-parse';
@@ -26,8 +27,7 @@ import {
   getOutputs, generateOutputs, getObjections, generateObjections,
   getNarrative, saveNarrative, draftNarrative
 } from './positioning.js';
-import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier, generateCoverLetterWithClaude, tailorResumeV2WithClaude, detectTerritory, analyzeTerritoryContext, getCompanyMomentum, DEFAULT_COVER_LETTER_INSTRUCTIONS } from './agent.js';
-import type { MomentumScore } from './agent.js';
+import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, rescoreJobOpportunity, computeTier, generateCoverLetterWithClaude, tailorResumeV2WithClaude, detectTerritory, analyzeTerritoryContext, DEFAULT_COVER_LETTER_INSTRUCTIONS } from './agent.js';
 import type { SubScores, OpportunityTier, TierSettings, TailoringAnalysis } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
 // RepVue: link-out only (no scraping — RepVue blocks automated requests)
@@ -371,6 +371,13 @@ async function initDb(): Promise<void> {
       signals       JSONB NOT NULL DEFAULT '[]',
       warning       TEXT,
       created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS scout_company_list (
+      id            SERIAL PRIMARY KEY,
+      settings_hash TEXT NOT NULL,
+      companies_json JSONB NOT NULL,
+      created_at    TIMESTAMP DEFAULT NOW()
     );
 
     -- Enhancement 1: API usage tracking
@@ -5251,6 +5258,150 @@ async function checkUrlHealthInBackground(jobIds?: number[]): Promise<void> {
   }
 }
 
+// ── Scout Company List: Claude-generated per-run company list ──────────────
+interface ScoutCompanyEntry {
+  name: string;
+  ats_type: 'greenhouse' | 'workday' | 'lever' | 'plain';
+  identifier: string;
+  reason: string;
+}
+
+function computeSettingsHash(c: Record<string, unknown>): string {
+  const parts = [
+    ((c.target_roles as string[]) ?? []).join(','),
+    ((c.industries as string[]) ?? []).join(','),
+    ((c.locations as string[]) ?? []).join(','),
+    ((c.allowed_work_modes as string[]) ?? []).join(','),
+    String(c.min_salary ?? ''),
+    String(c.min_ote ?? ''),
+    String(c.company_public ?? ''),
+    String(c.company_private ?? ''),
+    ((c.company_revenue_bands as string[]) ?? []).join(','),
+    ((c.company_employee_bands as string[]) ?? []).join(','),
+    ((c.company_funding_stages as string[]) ?? []).join(','),
+    ((c.vertical_niches as string[]) ?? []).join(','),
+    ((c.must_have as string[]) ?? []).join(','),
+    ((c.avoid as string[]) ?? []).join(','),
+    ((c.experience_levels as string[]) ?? []).join(','),
+  ].join('|');
+  return createHash('md5').update(parts).digest('hex');
+}
+
+async function generateScoutCompanyList(criteria: Record<string, unknown>): Promise<ScoutCompanyEntry[] | null> {
+  const hash = computeSettingsHash(criteria);
+
+  // Check DB cache (24 h TTL)
+  try {
+    const { rows } = await pool.query(
+      `SELECT companies_json FROM scout_company_list WHERE settings_hash = $1 AND created_at > NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 1`,
+      [hash]
+    );
+    if (rows.length > 0) {
+      const cached = rows[0].companies_json as ScoutCompanyEntry[];
+      console.log(`[CompanyList] Cache hit — reusing ${cached.length} companies (hash: ${hash.slice(0, 8)}…)`);
+      return cached;
+    }
+  } catch (e) {
+    console.error('[CompanyList] Cache lookup error:', e);
+  }
+
+  console.log(`[CompanyList] No cache — calling Claude to generate company list (hash: ${hash.slice(0, 8)}…)`);
+
+  const roles       = ((criteria.target_roles as string[]) ?? []).join(', ') || '(any)';
+  const levels      = ((criteria.experience_levels as string[]) ?? []).join(', ') || '(any)';
+  const industries  = ((criteria.industries as string[]) ?? []).join(', ') || '(any)';
+  const locations   = ((criteria.locations as string[]) ?? []).join(', ') || '(any)';
+  const workModes   = ((criteria.allowed_work_modes as string[]) ?? []).join(', ') || '(any)';
+  const minSalary   = criteria.min_salary ? `$${(criteria.min_salary as number).toLocaleString()}` : '(none)';
+  const minOte      = criteria.min_ote    ? `$${(criteria.min_ote as number).toLocaleString()}`    : '(none)';
+  const compType    = [
+    (criteria.company_public  ?? true) ? 'public'  : '',
+    (criteria.company_private ?? true) ? 'private' : '',
+  ].filter(Boolean).join(', ') || 'any';
+  const empBands    = ((criteria.company_employee_bands as string[])  ?? []).join(', ') || '(any)';
+  const revBands    = ((criteria.company_revenue_bands as string[])   ?? []).join(', ') || '(any)';
+  const funding     = ((criteria.company_funding_stages as string[])  ?? []).join(', ') || '(any)';
+  const niches      = ((criteria.vertical_niches as string[])         ?? []).join(', ') || '(any)';
+  const mustHave    = ((criteria.must_have as string[])               ?? []).join(', ') || '(none)';
+  const avoid       = ((criteria.avoid as string[])                   ?? []).join(', ') || '(none)';
+
+  const prompt = `You are a job search intelligence engine. Based on the user's saved job search settings below, identify the top 50-75 companies that best match these criteria. For each company, determine the best way to scrape their job listings (Greenhouse, Workday, Lever, or plain career page URL).
+
+USER SETTINGS:
+- Target roles: ${roles}
+- Experience levels: ${levels}
+- Industries: ${industries}
+- Locations: ${locations}
+- Work modes: ${workModes}
+- Min base salary: ${minSalary}
+- Min OTE: ${minOte}
+- Company type: ${compType}
+- Employee count: ${empBands}
+- Revenue bands: ${revBands}
+- Funding stages: ${funding}
+- Vertical niches: ${niches}
+- Must-have keywords: ${mustHave}
+- Avoid keywords: ${avoid}
+
+Return ONLY a valid JSON array. No explanation. No markdown.
+Each object must have exactly these fields:
+{
+  "name": "Company Name",
+  "ats_type": "greenhouse" | "workday" | "lever" | "plain",
+  "identifier": "the slug, career site ID, or full URL",
+  "reason": "one sentence why this company matches the settings"
+}
+
+For greenhouse: identifier is the board token slug (e.g. "purestorage", "databricks", "coreweave")
+For workday: identifier is "subdomain|careerSite" (e.g. "nvidia.wd5|NVIDIAExternalCareerSite")
+For lever: identifier is the company slug (e.g. "extremenetworks")
+For plain: identifier is the full careers page URL (e.g. "https://careers.cisco.com")
+
+Only include companies you are highly confident about.
+Do not guess ATS details. If unsure of the ATS type or identifier for a company, use plain with their known careers URL.
+
+Focus on companies that are:
+- In the user's target industries
+- Likely to have roles matching the user's target roles
+- Appropriate size/stage based on user settings
+- Strong presence in the user's target locations
+- Hardware, infrastructure, AI, semiconductor, or data platform companies (not pure SaaS at risk of AI disruption unless they are category leaders)`;
+
+  try {
+    const { default: Anthropic } = await import('@anthropic-ai/sdk');
+    const client = new Anthropic();
+    const message = await client.messages.create({
+      model: 'claude-opus-4-6',
+      max_tokens: 8192,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const block = message.content[0];
+    const rawText = block.type === 'text' ? block.text.trim() : '';
+    const cleaned = rawText.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(cleaned) as ScoutCompanyEntry[];
+
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      throw new Error('Claude returned empty or non-array company list');
+    }
+
+    // Persist to cache
+    try {
+      await pool.query(
+        `INSERT INTO scout_company_list (settings_hash, companies_json) VALUES ($1, $2)`,
+        [hash, JSON.stringify(parsed)]
+      );
+    } catch (cacheErr) {
+      console.error('[CompanyList] Cache write error (non-fatal):', cacheErr);
+    }
+
+    return parsed;
+  } catch (e) {
+    console.error('[CompanyList] Claude call failed — will fall back to companies table:', e);
+    return null;
+  }
+}
+
 async function runScoutInBackground(runId: number): Promise<void> {
   try {
     const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
@@ -5279,9 +5430,10 @@ async function runScoutInBackground(runId: number): Promise<void> {
       await pool.query(`UPDATE scout_runs SET current_stage=$1 WHERE id=$2`, [stage, runId]).catch(() => {});
     };
 
-    const { rows: companies } = await pool.query('SELECT * FROM companies');
+    // Load companies table for fallback only (Watchlist — no longer drives scout)
+    const { rows: companiesFallback } = await pool.query('SELECT * FROM companies');
     console.log(`\n════════════════════════════════════════════════════════════`);
-    console.log(`SCOUT RUN #${runId} — ${companies.length} companies loaded from database`);
+    console.log(`SCOUT RUN #${runId} — generating Claude company list…`);
     console.log(`════════════════════════════════════════════════════════════`);
     console.log(`\n──── CRITERIA READ FROM DB ─────────────────────────────────`);
     console.log(`  Target roles     : ${(criteria.target_roles ?? []).join(', ') || '(none)'}`);
@@ -5301,9 +5453,37 @@ async function runScoutInBackground(runId: number): Promise<void> {
     console.log(`  Funding stages   : ${((criteria as any).company_funding_stages ?? []).join(', ') || '(none)'}`);
     console.log(`  Tier thresholds  : Top Target≥${criteria.top_target_score ?? 65}  Fast Win≥${criteria.fast_win_score ?? 55}  Stretch≥${criteria.stretch_score ?? 55}`);
     console.log(`───────────────────────────────────────────────────────────`);
+
+    // ── Generate company list via Claude (or use cache) ──────────────────────
+    await setStage('Asking Claude to select target companies…');
+    let scoutList: ScoutCompanyEntry[] | null = await generateScoutCompanyList(criteria as unknown as Record<string, unknown>);
+    let usingClaudeList = true;
+    if (!scoutList) {
+      console.log(`[CompanyList] Falling back to companies table (${companiesFallback.length} entries)`);
+      usingClaudeList = false;
+      scoutList = companiesFallback.map((c: any) => {
+        let identifier = '';
+        if (c.ats_type === 'workday') {
+          // Reconstruct identifier from careers_url (subdomain) + ats_slug (boardSlug)
+          const sub = (c.careers_url ?? '').replace('.myworkdayjobs.com', '');
+          identifier = `${sub}|${c.ats_slug ?? ''}`;
+        } else {
+          identifier = c.ats_slug ?? c.careers_url ?? '';
+        }
+        return { name: c.name as string, ats_type: c.ats_type as ScoutCompanyEntry['ats_type'], identifier, reason: 'From companies watchlist' };
+      });
+    }
+
+    const listSource = usingClaudeList ? 'Claude' : 'Watchlist (fallback)';
+    console.log(`\n──── COMPANY LIST SOURCE: ${listSource} (${scoutList.length} companies) ──`);
+    console.log(`Claude selected ${scoutList.length} companies for this run:`);
+    for (const co of scoutList) {
+      console.log(`  • ${co.name} (${co.ats_type}): ${co.reason}`);
+    }
     const byType: Record<string, number> = {};
-    for (const c of companies) { byType[(c as any).ats_type] = (byType[(c as any).ats_type] || 0) + 1; }
+    for (const co of scoutList) { byType[co.ats_type] = (byType[co.ats_type] ?? 0) + 1; }
     console.log(`  Companies by ATS type:`, byType);
+    console.log(`───────────────────────────────────────────────────────────`);
 
     type Job = { title: string; company: string; location: string; salary?: string; applyUrl: string; description?: string; datePosted?: string; source: string; _fromJobSpy?: boolean; _fromGemini?: boolean };
     const allJobs: Job[] = [];
@@ -5312,7 +5492,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     let companiesScanned = 0;
     const perCompanyStats: { name: string; type: string; jobs: number; error?: string }[] = [];
 
-    await setStage(`Scraping ${companies.length} ATS job boards…`);
+    await setStage(`Scraping ${scoutList.length} ATS job boards…`);
 
     // Build ATS title filter from target_roles × experience_levels (same filter used in
     // the main post-collection pipeline).  Applied at the source level so Greenhouse/Lever
@@ -5326,57 +5506,46 @@ async function runScoutInBackground(runId: number): Promise<void> {
     }
 
     // ── Stage 2a: Scrape Greenhouse, Lever, and Workday companies ──
-    for (const c of companies) {
-      const co = c as { id: number; name: string; ats_type: string; ats_slug: string | null; careers_url: string | null; scan_failures: number; ats_types_tried: string[] };
+    // Uses the Claude-generated company list (or watchlist fallback)
+    for (const entry of scoutList) {
       try {
         let jobCount = 0;
         let scraped = false;
-        if (co.ats_type === 'greenhouse' && co.ats_slug) {
-          const jobs = await scrapeGreenhouseJobs(co.ats_slug, co.name, atsTitleFilter ?? undefined);
+        if (entry.ats_type === 'greenhouse' && entry.identifier) {
+          const jobs = await scrapeGreenhouseJobs(entry.identifier, entry.name, atsTitleFilter ?? undefined);
           jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Greenhouse' })));
-          perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
+          perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: jobCount });
           scraped = true;
-        } else if (co.ats_type === 'lever' && co.ats_slug) {
-          const jobs = await scrapeLeverJobs(co.ats_slug, co.name, atsTitleFilter ?? undefined);
+        } else if (entry.ats_type === 'lever' && entry.identifier) {
+          const jobs = await scrapeLeverJobs(entry.identifier, entry.name, atsTitleFilter ?? undefined);
           jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Lever' })));
-          perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
+          perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: jobCount });
           scraped = true;
-        } else if (co.ats_type === 'workday' && co.ats_slug && co.careers_url) {
-          const jobs = await scrapeWorkdayJobs(co.name, co.careers_url, co.ats_slug);
+        } else if (entry.ats_type === 'workday' && entry.identifier) {
+          // Identifier format: "subdomain|careerSiteName" e.g. "nvidia.wd5|NVIDIAExternalCareerSite"
+          const pipeIdx = entry.identifier.indexOf('|');
+          const rawSub  = pipeIdx >= 0 ? entry.identifier.slice(0, pipeIdx) : entry.identifier;
+          const boardSlug = pipeIdx >= 0 ? entry.identifier.slice(pipeIdx + 1) : '';
+          const subdomain = rawSub.includes('.myworkdayjobs.com') ? rawSub : `${rawSub}.myworkdayjobs.com`;
+          const jobs = await scrapeWorkdayJobs(entry.name, subdomain, boardSlug);
           // Workday already uses keyword search terms, but apply title filter as a safety pass
           const filteredWorkday = atsTitleFilter ? jobs.filter(j => atsTitleFilter.test(j.title)) : jobs;
           jobCount = filteredWorkday.length;
           allJobs.push(...filteredWorkday.map(j => ({ ...j, source: 'Workday' })));
-          perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
+          perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: jobCount });
           scraped = true;
         }
         // "plain" companies: covered by JobSpy broad search below
-        if (scraped) {
-          // Clear failure streak on success
-          if ((co.scan_failures ?? 0) > 0) {
-            await pool.query(
-              `UPDATE companies SET scan_failures=0, last_scan_error=NULL WHERE id=$1`,
-              [co.id]
-            ).catch(() => {});
-          }
+        if (!scraped && entry.ats_type !== 'plain') {
+          perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: 0, error: 'Missing or unrecognised identifier' });
         }
         companiesScanned++;
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e);
-        perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: 0, error: errMsg });
-        console.error(`Error scraping ${co.name}:`, e);
-        // Record failure for retry logic
-        await pool.query(
-          `UPDATE companies SET
-             scan_failures = scan_failures + 1,
-             last_scan_error = $1,
-             ats_types_tried = array_append(ats_types_tried, $2),
-             detect_status = CASE WHEN detect_status = 'detected' THEN 'failed' ELSE detect_status END
-           WHERE id = $3`,
-          [errMsg, co.ats_type, co.id]
-        ).catch(() => {});
+        perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: 0, error: errMsg });
+        console.error(`Error scraping ${entry.name}:`, e);
         companiesScanned++;
       }
     }
@@ -5407,26 +5576,8 @@ async function runScoutInBackground(runId: number): Promise<void> {
       console.error(`JobSpy scraper error:`, e);
     }
 
-    // ── Stage 2c: Filter out unsafe companies from all JobSpy-sourced results ──
-    const companyNames = companies.map((c: any) => c.name as string);
-    const jobSpyJobs = allJobs.filter(j => (j as any)._fromJobSpy);
-    const nonJobSpyJobs = allJobs.filter(j => !(j as any)._fromJobSpy);
-    if (jobSpyJobs.length > 0) {
-      const safeJobSpyJobs = await filterUnsafeCompanies(
-        jobSpyJobs.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
-        companyNames
-      );
-      const filteredOut = jobSpyJobs.length - safeJobSpyJobs.length;
-      // Count per source for logging
-      const srcCounts = jobSpyJobs.reduce((acc: Record<string, number>, j) => { acc[j.source] = (acc[j.source] ?? 0) + 1; return acc; }, {});
-      console.log(`Company safety filter: ${jobSpyJobs.length} jobs (${JSON.stringify(srcCounts)}) → ${safeJobSpyJobs.length} passed (${filteredOut} filtered out)`);
-      // Rebuild allJobs — preserve the per-source tag from above
-      allJobs.length = 0;
-      allJobs.push(...nonJobSpyJobs);
-      // Re-attach the correct source to each safe job using its applyUrl as key
-      const sourceByUrl = new Map(jobSpyJobs.map(j => [j.applyUrl, j.source]));
-      allJobs.push(...safeJobSpyJobs.map(j => ({ ...j, source: sourceByUrl.get(j.applyUrl) ?? 'JobSpy' })));
-    }
+    // Pre-approved company names from the Claude-generated list (for Claude scoring context)
+    const companyNames = scoutList.map(c => c.name);
 
     await setStage(`JobSpy done (${allJobs.length} total) — running Gemini discovery…`);
     await pool.query(`UPDATE scout_runs SET jobs_in_pipeline=$1 WHERE id=$2`, [allJobs.length, runId]).catch(() => {});
@@ -5746,71 +5897,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     const { rows: resumeSettingRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
     const candidateResume: string = resumeSettingRows[0]?.value ?? '';
 
-    // ── Company Momentum Pre-Check ──────────────────────────────────────────
-    // Run Gemini momentum check for all unique companies (in parallel, up to 10 at a time).
-    // Results feed directly into Claude's companyQuality scoring component.
-    const uniqueCompaniesForMomentum = Array.from(new Set(
-      newJobs.map(j => j.company.toLowerCase().trim())
-    ));
-
-    const momentumMap = new Map<string, MomentumScore>();
-    if (uniqueCompaniesForMomentum.length > 0) {
-      console.log(`\n──── MOMENTUM PRE-CHECK (${uniqueCompaniesForMomentum.length} companies) ──────────────────────────`);
-      await setStage(`Checking company momentum for ${uniqueCompaniesForMomentum.length} companies…`);
-
-      // Check DB cache first (48 h)
-      for (const rawName of uniqueCompaniesForMomentum) {
-        const realName = newJobs.find(j => j.company.toLowerCase().trim() === rawName)?.company ?? rawName;
-        try {
-          const { rows: cached } = await pool.query(
-            `SELECT momentum_score, signals, warning FROM company_momentum WHERE LOWER(company_name) = LOWER($1) AND created_at > NOW() - INTERVAL '48 hours' ORDER BY created_at DESC LIMIT 1`,
-            [realName]
-          );
-          if (cached.length > 0) {
-            const c = cached[0] as Record<string, unknown>;
-            const ms: MomentumScore = {
-              companyName: realName,
-              score: c.momentum_score as number,
-              signals: (c.signals ?? []) as string[],
-              warning: (c.warning ?? null) as string | null,
-              cached: true,
-            };
-            momentumMap.set(rawName, ms);
-            console.log(`  [Momentum] ${realName}: ${ms.score}/25 (DB cache)`);
-          }
-        } catch { /* DB not ready, skip cache */ }
-      }
-
-      // Run Gemini for companies not in cache (10 at a time)
-      const toFetch = uniqueCompaniesForMomentum.filter(k => !momentumMap.has(k));
-      const MOMENTUM_CONCURRENCY = 10;
-      for (let i = 0; i < toFetch.length; i += MOMENTUM_CONCURRENCY) {
-        const batch = toFetch.slice(i, i + MOMENTUM_CONCURRENCY);
-        const results = await Promise.allSettled(batch.map(async (rawName) => {
-          const realName = newJobs.find(j => j.company.toLowerCase().trim() === rawName)?.company ?? rawName;
-          const isPreApproved = companyNames.some(n => n.toLowerCase() === rawName);
-          const ms = await getCompanyMomentum(realName, isPreApproved);
-          momentumMap.set(rawName, ms);
-          // Persist to DB cache
-          try {
-            await pool.query(
-              `INSERT INTO company_momentum (company_name, momentum_score, signals, warning) VALUES ($1, $2, $3, $4)`,
-              [realName, ms.score, JSON.stringify(ms.signals), ms.warning]
-            );
-          } catch { /* ignore — non-critical */ }
-        }));
-        for (const r of results) {
-          if (r.status === 'rejected') console.log(`  [Momentum] Error: ${r.reason}`);
-        }
-      }
-
-      const warnings = Array.from(momentumMap.values()).filter(m => m.warning);
-      console.log(`  Momentum complete: ${momentumMap.size} companies checked, ${warnings.length} warnings`);
-      if (warnings.length) warnings.forEach(m => console.log(`    ⚠ ${m.companyName}: ${m.warning}`));
-      console.log(`───────────────────────────────────────────────────────────`);
-    }
-
-    // Pass pre-approved company names from the database to Claude scoring
+    // Pass Claude-vetted company names to Claude scoring as pre-approved list
     // Only send genuinely new jobs (URLs not already in DB) to Claude
     const matches = await scoreJobsWithClaude(
       newJobs.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
@@ -5829,7 +5916,6 @@ async function runScoutInBackground(runId: number): Promise<void> {
         candidateResume: candidateResume || undefined,
         acceptedExperienceLevels: criteria.experience_levels ?? ['senior'],
       },
-      momentumMap,
     );
 
     console.log(`\n──── CLAUDE SCORING RESULTS ────────────────────────────────`);
@@ -5861,8 +5947,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
       // Look up Gemini-specific metadata for this job (if it came from Gemini)
       const geminiMeta = geminiMetaByUrl.get(m.applyUrl);
-      // Look up momentum warning for this company (if checked)
-      const momWarning = momentumMap.get(m.company.toLowerCase().trim())?.warning ?? null;
+      const momWarning: string | null = null;
       await pool.query(
         `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, original_url, original_title, original_description, description, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_score, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
