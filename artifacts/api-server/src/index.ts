@@ -12224,7 +12224,7 @@ function renderCareerIntel(data, generatedAt, stale) {
       (citations ? '<div class="intel-card-section"><div class="intel-card-label">Sources</div><div class="intel-citations">' + citations + '</div></div>' : '') +
 
       '<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:2px">' +
-        '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(c.company_name) + ',' + JSON.stringify(c.company_url || '') + ',this)">\u2605 Save Company Profile</button>' +
+        '<button class="save-watchlist-btn" data-name="' + esc(c.company_name) + '" data-url="' + esc(c.company_url || '') + '" onclick="saveToWatchlist(this.dataset.name,this.dataset.url,this)">\u2605 Save to Watchlist</button>' +
       '</div>' +
     '</div>';
   }).join('');
@@ -12485,7 +12485,7 @@ function buildPreIpoCard(c) {
     (cites ? '<div class="preipo-card-section"><div class="preipo-lbl">Sources</div><div class="preipo-cites">' + cites + '</div></div>' : '') +
 
     '<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:4px">' +
-      '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(c.company_name) + ',' + JSON.stringify(c.company_url || '') + ',this)">\u2605 Save Company Profile</button>' +
+      '<button class="save-watchlist-btn" data-name="' + esc(c.company_name) + '" data-url="' + esc(c.company_url || '') + '" onclick="saveToWatchlist(this.dataset.name,this.dataset.url,this)">\u2605 Save to Watchlist</button>' +
     '</div>' +
   '</div>';
 }
@@ -12643,7 +12643,7 @@ function renderLeaderCard(c) {
     (c.ote_range ? '<div><div class="leaders-lbl">Rep OTE Range</div><div class="leaders-ote">' + esc(c.ote_range) + '</div></div>' : '') +
     '<div><div class="leaders-lbl">Rep Profile</div><div class="leaders-val">' + esc(c.rep_quality) + '</div></div>' +
     '<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:8px">' +
-      '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(c.name) + ',' + JSON.stringify(websiteUrl || '') + ',this)">\u2605 Save Company Profile</button>' +
+      '<button class="save-watchlist-btn" data-name="' + esc(c.name) + '" data-url="' + esc(websiteUrl || '') + '" onclick="saveToWatchlist(this.dataset.name,this.dataset.url,this)">\u2605 Save to Watchlist</button>' +
     '</div>' +
   '</div>';
 }
@@ -12828,7 +12828,7 @@ function renderPulseCard(c) {
     (c.hiring_driver ? '<div><div class="pulse-section-label">Hiring Driver</div><div class="pulse-section-value" style="color:var(--muted)">' + esc(c.hiring_driver) + '</div></div>' : '') +
     (citationsHtml ? citationsHtml : '') +
     '<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:6px">' +
-      '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(c.company_name) + ',' + JSON.stringify(c.company_url || '') + ',this)">\u2605 Save Company Profile</button>' +
+      '<button class="save-watchlist-btn" data-name="' + esc(c.company_name) + '" data-url="' + esc(c.company_url || '') + '" onclick="saveToWatchlist(this.dataset.name,this.dataset.url,this)">\u2605 Save to Watchlist</button>' +
     '</div>' +
   '</div>';
 }
@@ -13023,7 +13023,7 @@ function renderNewsCard(a) {
       ? '<div style="font-size:10px;color:var(--muted)">\uD83D\uDC65 ' + esc(a.employee_count_est) + ' employees</div>' : '') +
 
     '<div class="news-card-actions">' +
-      '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(a.company_name || '') + ',null,this)">\u2605 Save Company</button>' +
+      '<button class="save-watchlist-btn" data-name="' + esc(a.company_name || '') + '" data-url="" onclick="saveToWatchlist(this.dataset.name,this.dataset.url,this)">\u2605 Save to Watchlist</button>' +
       '<a href="' + esc(a.article_url) + '" target="_blank" rel="noopener" class="btn btn-ghost btn-sm" style="font-size:11px">Read \u2192</a>' +
     '</div>' +
   '</div>';
@@ -13148,7 +13148,7 @@ function renderDvCard(c) {
         return '<a class="dv-cite" href="' + esc(s.url) + '" target="_blank" rel="noopener">\uD83D\uDD17 ' + esc(s.title) + '</a>';
       }).join('') + '</div>' : '') +
     '<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:8px">' +
-      '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(c.name) + ',' + JSON.stringify(websiteUrl || '') + ',this)">\u2605 Save Company Profile</button>' +
+      '<button class="save-watchlist-btn" data-name="' + esc(c.name) + '" data-url="' + esc(websiteUrl || '') + '" onclick="saveToWatchlist(this.dataset.name,this.dataset.url,this)">\u2605 Save to Watchlist</button>' +
     '</div>' +
   '</div>';
 }
