@@ -130,6 +130,32 @@ Return a JSON array (one object per article, same order). Each object MUST inclu
 
 Respond ONLY with valid JSON array, no markdown, no explanation.`;
 
+  // ── Perplexity primary ────────────────────────────────────────────────
+  try {
+    const { perplexitySearch } = await import('./perplexity.js');
+    const plxText = await perplexitySearch(prompt, { maxTokens: 2048, temperature: 0.3 });
+    const jsonMatch = plxText.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) throw new Error('No JSON array in Perplexity response');
+    const parsed: any[] = JSON.parse(jsonMatch[0]);
+    console.log(`[IndustryNews] Analyzed ${parsed.length} articles via Perplexity`);
+    return parsed.map((item: any) => ({
+      url: articles[(item.article_index ?? 1) - 1]?.url ?? '',
+      company_name: item.company_name ?? 'Unknown',
+      summary: item.summary ?? '',
+      why_it_matters: item.why_it_matters ?? '',
+      hiring_signal: item.hiring_signal ?? 'UNKNOWN',
+      sales_territory: item.sales_territory ?? 'Unknown',
+      funding_stage: item.funding_stage ?? 'Unknown',
+      employee_count_est: item.employee_count_est ?? 'Unknown',
+      relevance_score: Math.min(100, Math.max(0, Number(item.relevance_score) || 0)),
+      sector: item.sector ?? 'Other',
+      tags: Array.isArray(item.tags) ? item.tags.slice(0, 8) : [],
+    }));
+  } catch (plxErr) {
+    console.warn('[IndustryNews] Perplexity failed, trying Gemini:', plxErr instanceof Error ? plxErr.message.slice(0, 80) : plxErr);
+  }
+
+  // ── Gemini fallback ────────────────────────────────────────────────────
   let lastError: Error | null = null;
   for (const modelName of GEMINI_MODELS) {
     try {

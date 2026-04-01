@@ -205,16 +205,46 @@ export async function runGeminiJobDiscovery(
     ? [{ modelName: envModel, toolFamily: detectToolFamily(envModel), note: 'user-configured via GEMINI_MODEL env var' }, ...builtinsWithoutEnvDupe]
     : [...builtinsWithoutEnvDupe];
 
-  console.log(`\n──── GEMINI DISCOVERY ──────────────────────────────────────`);
-  console.log(`[Gemini] Candidate chain: ${candidates.map(c => c.modelName).join(' → ')}`);
-  console.log(`[Gemini] Max results: ${maxResults} | Timeout: ${timeoutMs / 1000}s`);
-  console.log(`[Gemini] Roles: ${criteria.target_roles.slice(0, 3).join(', ')}${criteria.target_roles.length > 3 ? '...' : ''}`);
-  console.log(`[Gemini] Locations: ${criteria.locations.join(', ') || 'Remote / US'}`);
+  console.log(`\n──── JOB DISCOVERY ─────────────────────────────────────────`);
+  console.log(`[Discovery] Max results: ${maxResults} | Timeout: ${timeoutMs / 1000}s`);
+  console.log(`[Discovery] Roles: ${criteria.target_roles.slice(0, 3).join(', ')}${criteria.target_roles.length > 3 ? '...' : ''}`);
+  console.log(`[Discovery] Locations: ${criteria.locations.join(', ') || 'Remote / US'}`);
 
   const ai = new GoogleGenAI({ apiKey });
   const prompt = buildSearchPrompt(criteria, maxResults);
 
-  // ── Waterfall: try each candidate until one succeeds ──────────────────────
+  // ── Perplexity primary ────────────────────────────────────────────────
+  const plxKey = process.env.PERPLEXITY_API_KEY?.trim();
+  if (plxKey) {
+    try {
+      console.log('[Discovery] Trying Perplexity sonar-pro');
+      const plxResp = await fetch('https://api.perplexity.ai/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${plxKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'sonar-pro', messages: [{ role: 'user', content: prompt }], max_tokens: 8192, temperature: 0.1 }),
+      });
+      if (plxResp.ok) {
+        const plxData = await plxResp.json() as any;
+        const text: string = plxData.choices?.[0]?.message?.content ?? '';
+        const rawJobs = parseJobsFromText(text);
+        if (rawJobs.length > 0) {
+          const normalized = normalizeGeminiJobs(rawJobs, {}, [], [], criteria);
+          const validated = await validateGreenhouseUrls(normalized);
+          const limited = validated.slice(0, maxResults);
+          console.log(`[Discovery] Perplexity: ${limited.length} valid jobs (${rawJobs.length} parsed)`);
+          console.log(`───────────────────────────────────────────────────────────`);
+          return { jobs: limited, queriesUsed: [], totalGroundingSources: 0, modelUsed: 'perplexity/sonar-pro', skipped: false };
+        }
+        throw new Error(`Perplexity returned 0 parseable jobs (${text.length} chars)`);
+      }
+      throw new Error(`Perplexity HTTP ${plxResp.status}`);
+    } catch (plxErr) {
+      console.warn('[Discovery] Perplexity failed, falling back to Gemini:', plxErr instanceof Error ? plxErr.message.slice(0, 100) : plxErr);
+    }
+  }
+
+  // ── Gemini fallback waterfall ─────────────────────────────────────────
+  console.log(`[Discovery] Gemini chain: ${candidates.map(c => c.modelName).join(' → ')}`);
   for (const candidate of candidates) {
     const { modelName, toolFamily, note } = candidate;
     const groundingTool = buildGroundingTool(toolFamily);

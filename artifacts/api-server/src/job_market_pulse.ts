@@ -253,8 +253,36 @@ export async function generateJobMarketPulse(
   const statMap = new Map(scoutStats.map(s => [s.company_name.toLowerCase(), s]));
 
   console.log(`\n──── JOB MARKET PULSE GENERATION ─────────────────────────────`);
-  console.log(`[JobMarketPulse] ${scoutStats.length} companies to assess | chain: ${chain.map(c => c.modelName).join(' → ')}`);
+  console.log(`[JobMarketPulse] ${scoutStats.length} companies to assess`);
 
+  // ── Perplexity primary ────────────────────────────────────────────────
+  try {
+    const { perplexitySearch } = await import('./perplexity.js');
+    console.log('[JobMarketPulse] Trying Perplexity sonar-pro');
+    const plxText = await perplexitySearch(prompt, { maxTokens: 8192, temperature: 0.25 });
+    const parsed = parsePulseFromText(plxText);
+    if (parsed && Array.isArray(parsed.companies) && parsed.companies.length > 0) {
+      const cards: PulseCompanyCard[] = (parsed.companies ?? []).map((raw: Partial<PulseCompanyCard>) => {
+        const stat = statMap.get((raw.company_name || '').toLowerCase());
+        return normaliseCard(raw, stat);
+      });
+      const sigOrder: Record<PulseSignal, number> = { true_growth:5, cautious:4, unknown:3, hype_risk:2, desperate_hiring:1, ai_risk:0 };
+      const recOrder: Record<string, number> = { pursue:4, watch:3, caution:2, avoid:1 };
+      cards.sort((a, b) => {
+        const ro = (recOrder[b.recommendation] ?? 0) - (recOrder[a.recommendation] ?? 0);
+        if (ro !== 0) return ro;
+        return (sigOrder[b.signal] ?? 0) - (sigOrder[a.signal] ?? 0);
+      });
+      console.log(`[JobMarketPulse] Perplexity returned ${cards.length} company cards`);
+      return { generated_at: new Date().toISOString(), pulse_headline: parsed.pulse_headline ?? '', market_mood: (['hot','warm','cooling','mixed'].includes(parsed.market_mood as string) ? parsed.market_mood : 'mixed') as JobMarketPulseResult['market_mood'], market_commentary: parsed.market_commentary ?? '', stats: buildStats(scoutStats, criteria), companies: cards, model_used: 'perplexity/sonar-pro', grounding_sources_count: 0 };
+    }
+    throw new Error('No company cards parsed from Perplexity response');
+  } catch (plxErr) {
+    console.warn('[JobMarketPulse] Perplexity failed, trying Gemini:', plxErr instanceof Error ? plxErr.message.slice(0, 80) : plxErr);
+  }
+
+  // ── Gemini fallback ────────────────────────────────────────────────────
+  console.log(`[JobMarketPulse] Gemini chain: ${chain.map(c => c.modelName).join(' → ')}`);
   for (const { modelName, note } of chain) {
     console.log(`[JobMarketPulse] Trying: ${modelName} (${note})`);
     try {
