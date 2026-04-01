@@ -1,0 +1,173 @@
+We need to stop doing symptom-based fixes and do a proper architectural debug of Quick Search mode.
+
+Context:
+Normal search mode respects saved user settings and gatekeeper logic well.
+Quick Search mode (Perplexity Search API / Open Search-Fast) does not.
+
+That means the problem is likely not the overall scoring system itself.
+It is likely that Quick Search is not using the same settings normalization, same deterministic gatekeeper rules, same schema, or same post-retrieval validation path as normal mode.
+
+Important:
+Do NOT assume the recent Perplexity tweaks solved the real problem.
+Do NOT keep layering hacks on top until you prove the actual root cause.
+
+I need a real audit and correction pass.
+
+GOAL
+Make Quick Search obey the same user settings and filtering logic as normal mode.
+
+That means Quick Search should:
+
+* load the same saved settings from DB
+* normalize them the same way
+* use the same deterministic post-retrieval filters
+* use the same scoring/gatekeeper logic
+* use the same company classification / exclusion rules
+* use the same location / remote-in-territory logic
+* use the same industry matching logic
+* use the same canonical-link / recovery pipeline where applicable
+
+PART 1: AUDIT FIRST — NO BLIND CODING
+Before changing code, inspect and compare the full pipeline for:
+
+A. Normal search mode
+
+* where saved settings are loaded
+* where settings are normalized
+* where search queries are generated
+* where deterministic filters are applied
+* where company classification happens
+* where location / remote-in-territory logic happens
+* where industry matching happens
+* where AI-risk scoring/exclusion happens
+* where canonical URL / recovery logic happens
+* where ranking happens
+
+B. Quick Search mode
+
+* where saved settings are loaded
+* whether the same normalized settings object is used
+* whether the same filters are applied
+* whether the same job schema is produced before filtering
+* whether ranking happens before filtering
+* whether company type / employer type is classified
+* whether industry matching is deterministic or only implied by prompt/query
+* whether canonical URL / recovery runs for Perplexity jobs
+* whether Claude settings apply here or not
+
+I want you to identify the exact code path differences between Normal mode and Quick mode.
+
+PART 2: ROOT-CAUSE ANALYSIS
+After auditing, tell me clearly which of these are true:
+
+1. Quick Search is bypassing the same normalized settings object
+2. Quick Search is using a simplified subset of settings
+3. Quick Search is relying too much on prompt/query wording instead of deterministic filters
+4. Quick Search results are using a different / weaker job schema
+5. Quick Search is ranking before filtering
+6. Quick Search is skipping company classification
+7. Quick Search is skipping or weakening remote-in-territory logic
+8. Quick Search is skipping or weakening industry filtering
+9. Quick Search is skipping canonical-link/job-recovery steps
+10. The recent fixes introduced hacks that paper over the problem instead of solving it
+
+Be explicit. I do not want a vague answer.
+
+PART 3: REVERT BAD PATCHES IF NECESSARY
+If any of the recent Quick Search fixes are hacks that make the architecture worse or move it farther away from normal-mode consistency, undo them.
+
+Examples of things that should be reverted if they are only patching symptoms instead of fixing the root problem:
+
+* hardcoded staffing/recruiter lists that should really come from a reusable company classification layer
+* custom filtering logic unique to Quick Search that diverges from normal mode
+* query-only “industry enforcement” when the real fix should happen in deterministic post-filters
+* any quick-mode-only score adjustments that are not shared with the main gatekeeper
+* any ad hoc logic that duplicates instead of reusing the normal-mode pipeline
+
+If some recent changes are still useful and consistent with the main architecture, keep them.
+But if they are introducing divergence, revert them.
+
+PART 4: FIX THE REAL ISSUE
+After the audit and any necessary cleanup, fix Quick Search so it reuses the same core pipeline as normal mode wherever possible.
+
+REQUIREMENTS:
+
+A. SINGLE SOURCE OF TRUTH FOR SETTINGS
+Quick Search must use the same normalized settings object as normal mode.
+Do not let Quick Search rely on a custom prompt-only interpretation of settings.
+
+B. SAME GATEKEEPER
+Quick Search jobs must go through the same deterministic filtering/gatekeeper logic as normal mode, including:
+
+* title alignment
+* location / remote-in-territory logic
+* industry whitelist / exclusions
+* staffing/recruiting exclusion
+* AI-risk logic
+* seniority fit
+* source confidence
+* canonical-link / recovery validation if applicable
+
+C. SAME JOB SCHEMA
+Perplexity jobs must be normalized into the same job schema as normal mode before gatekeeper filtering.
+If Quick Search results are missing fields needed by the gatekeeper, add enrichment/classification/defaulting so the same rules can operate correctly.
+
+D. FILTER BEFORE RANK
+Quick Search must not rank or explain jobs before deterministic filters run.
+
+E. EXPLAINABILITY
+For Quick Search jobs, expose why a job passed:
+
+* matched titles
+* matched location / territory
+* matched industries
+* passed company-type filter
+* passed AI-risk filter
+* passed source-confidence rules
+
+And if jobs are excluded, log why.
+
+PART 5: DO NOT OVER-INDEX ON PERPLEXITY PROMPT TWEAKS
+Perplexity query improvements are allowed, but they are not the primary fix.
+
+Search query changes should be treated as retrieval improvements only.
+They must not replace deterministic settings enforcement in the backend.
+
+Do not assume that changing:
+
+* search buckets
+* keyword clusters
+* domain targets
+* max_results
+  solves the actual settings mismatch problem.
+
+Those may improve retrieval recall/precision, but the real fix is pipeline consistency.
+
+PART 6: CLAUDE SETTINGS CLARITY
+I need a clear answer on whether the Claude model settings saved in Settings still apply to:
+
+* normal search mode
+* quick search mode
+* company research
+* resume tailoring
+* cover letter generation
+* any other features currently using Claude
+
+Do not guess. Trace the code paths and tell me exactly where Claude settings still matter and where they no longer do.
+
+PART 7: OUTPUT I EXPECT
+When finished, provide:
+
+1. The exact root cause(s) of why Quick Search ignored saved settings
+2. A comparison of Normal mode vs Quick mode architecture
+3. What recent fixes were kept
+4. What recent fixes were reverted or changed
+5. Exactly what code was changed so Quick Search now uses the same settings + gatekeeper behavior as normal mode
+6. Whether Quick Search now truly reuses the main gatekeeper
+7. Whether Perplexity jobs now go through the same validation/recovery path
+8. Where Claude settings still apply and where they do not
+9. Any remaining limitations
+
+IMPORTANT
+Do not keep stacking patches until you first prove where the divergence is.
+Audit first, compare pipelines, then fix the architecture properly.
