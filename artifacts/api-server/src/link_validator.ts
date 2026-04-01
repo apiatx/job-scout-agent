@@ -1075,8 +1075,9 @@ export async function runCanonicalResolutionInBackground(
       console.log(`[Recovery Phase A] Done: ${aOk} validated, ${aFail} failed`);
     }
 
-    // ── PHASE B: Gemini URL resolver for aggregator + broken links (sequential) ─
+    // ── PHASE B: Perplexity (primary) + Gemini (fallback) URL resolver ────────
     const hasGemini = !!process.env.GEMINI_API_KEY?.trim();
+    const hasPerplexity = !!process.env.PERPLEXITY_API_KEY?.trim();
     const { rows: geminiJobs } = await pool.query(`
       SELECT j.id, j.title, j.company, j.location, j.apply_url, j.description,
              j.match_score, j.url_ok, j.canonical_url, j.canonical_source,
@@ -1104,7 +1105,7 @@ export async function runCanonicalResolutionInBackground(
       return;
     }
 
-    console.log(`[Recovery Phase B] ${geminiJobs.length} aggregator/broken jobs | Gemini: ${hasGemini ? 'enabled' : 'disabled'}`);
+    console.log(`[Recovery Phase B] ${geminiJobs.length} aggregator/broken jobs | Perplexity: ${hasPerplexity ? 'primary' : 'off'} | Gemini: ${hasGemini ? 'fallback' : 'off'}`);
     let bUpgraded = 0, bDescFetched = 0, bFailed = 0;
 
     for (const job of geminiJobs) {
@@ -1113,7 +1114,7 @@ export async function runCanonicalResolutionInBackground(
         let canonicalSource: string = job.canonical_source ?? 'original';
         let usedGemini = false;
 
-        if (hasGemini) {
+        if (hasPerplexity || hasGemini) {
           const resolved = await resolveJobUrlWithGemini(
             job.title, job.company, job.location ?? '', canonicalUrl,
           );

@@ -1,0 +1,301 @@
+
+> @workspace/api-server@1.0.0 dev
+> node -e "require('fs').rmSync('dist',{recursive:true,force:true})" && tsx ./src/index.ts
+
+Job Scout Agent listening on port 8080
+URL health check: checking 11 unchecked job URLs…
+URL health check complete: 0 live, 0 broken, 11 skipped
+
+──── JOB RECOVERY ENGINE ────────────────────────────────────
+[Recovery Phase B] 20 aggregator/broken jobs | Gemini: enabled
+
+════════════════════════════════════════════════════════════
+SCOUT RUN #63 — 101 companies loaded from database
+════════════════════════════════════════════════════════════
+  Companies by ATS type: { plain: 62, workday: 28, greenhouse: 10, lever: 1 }
+ATS title filter active: Account Executive, Account Manager
+Workday (3M): found 103 unique jobs across 9 searches
+Greenhouse: scanning samsara...
+Greenhouse: samsara → 398 total, 95 match target roles
+Lever: scanning extremenetworks...
+Lever: extremenetworks → 81 total, 18 match target roles
+Greenhouse: scanning ironmountainsolutions...
+Greenhouse: ironmountainsolutions → 45 total, 0 match target roles
+Greenhouse: scanning purestorage...
+Greenhouse: purestorage → 350 total, 50 match target roles
+Greenhouse: scanning coreweave...
+Greenhouse: coreweave → 266 total, 8 match target roles
+Greenhouse: scanning databricks...
+Greenhouse: databricks → 842 total, 124 match target roles
+Greenhouse: scanning scaleai...
+Greenhouse: scaleai → 172 total, 1 match target roles
+Greenhouse: scanning cognite...
+Greenhouse: cognite → 84 total, 13 match target roles
+Greenhouse: scanning energyhub...
+Greenhouse: energyhub → 18 total, 0 match target roles
+Greenhouse: scanning anthropic...
+Greenhouse: anthropic → 438 total, 57 match target roles
+Greenhouse: scanning impinj...
+Greenhouse: impinj → 0 total, 0 match target roles
+[Recovery] Gemini search failed: {"error":{"code":503,"message":"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.","status":"UNAVAILABLE"}}
+Workday (HPE): found 138 unique jobs across 9 searches
+Workday (Cisco): found 83 unique jobs across 9 searches
+Workday (Cadence Design Systems): found 56 unique jobs across 9 searches
+Workday (Broadcom): found 59 unique jobs across 9 searches
+Workday (Rockwell Automation): found 64 unique jobs across 9 searches
+Workday (Baker Hughes): found 100 unique jobs across 9 searches
+Workday (Entegris): found 65 unique jobs across 9 searches
+Workday (Cognex): found 47 unique jobs across 9 searches
+Workday (Bloom Energy): found 55 unique jobs across 9 searches
+Workday (Micron): found 79 unique jobs across 9 searches
+Workday (Trimble): found 93 unique jobs across 9 searches
+Workday (Aspen Technology): found 60 unique jobs across 9 searches
+Workday (Intel): found 68 unique jobs across 9 searches
+Workday (Motorola Solutions): found 119 unique jobs across 9 searches
+Workday (Marvell Technology): found 45 unique jobs across 9 searches
+Workday (Calix): found 17 unique jobs across 9 searches
+Workday (Dell Technologies): found 98 unique jobs across 9 searches
+Workday (Equinix): found 82 unique jobs across 9 searches
+Workday (F5): found 72 unique jobs across 9 searches
+Workday (NVIDIA): found 89 unique jobs across 9 searches
+Workday (Lumentum): found 42 unique jobs across 9 searches
+
+──── JOBSPY SEARCH ────────────────────────────────────────
+Sources: LinkedIn + Indeed + Glassdoor + ZipRecruiter | concurrent workers
+  Roles    : Account Executive, Account Manager
+  Locations: Remote, south carolina, north carolina, georgia, florida
+  Proxy    : configured (source: env) — Glassdoor + ZipRecruiter enabled
+  [JobSpy] JobSpy: target_roles=['Account Executive', 'Account Manager']
+  [JobSpy] JobSpy: locations=['Remote', 'south carolina', 'north carolina', 'georgia', 'florida']
+  [JobSpy] JobSpy: proxy=configured (http://***@p.webshare.io:80)
+  [JobSpy] JobSpy: 41 Indeed terms | 20 LinkedIn terms | 15 per-location terms
+  [JobSpy] JobSpy [Phase 1/4]: LinkedIn — 20 US terms + 12 Remote terms × 100 = up to 3200 raw
+  [JobSpy] 2026-04-01 00:46:21,431 - INFO - JobSpy:Linkedin - finished scraping
+  [JobSpy]   [LinkedIn] "Account Manager" → 100
+  [JobSpy]   [LinkedIn] "Account Executive" → 100
+  [JobSpy]   [LinkedIn] "Commercial Account Executive" → 100
+[Recovery] Gemini search failed: fetch failed
+  [JobSpy]   [LinkedIn] "Commercial Account Manager" → 100
+  [JobSpy]   [LinkedIn] "Corporate Account Executive" → 100
+  [JobSpy]   [LinkedIn] "Corporate Account Manager" → 100
+  [JobSpy]   [LinkedIn] "Enterprise Account Executive" → 100
+[Recovery Phase B] ↗ Motorola Solutions "Mobile Video Area Sales Manager (Southea" → gemini_resolved_ats
+[Recovery Phase B] ✓ Motorola Solutions "Mobile Video Area Sales Manager (Southea" → recovered
+  [JobSpy]   [LinkedIn] "Enterprise Account Manager" → 100
+  [JobSpy]   [LinkedIn] "Lead Account Executive" → 100
+  [JobSpy]   [LinkedIn] "Major Account Account Executive" → 29
+  [JobSpy]   [LinkedIn] "Major Account Account Manager" → 30
+  [JobSpy]   [LinkedIn] "Lead Account Manager" → 100
+  [JobSpy]   [LinkedIn] "Mid-Market Account Executive" → 67
+  [JobSpy]   [LinkedIn] "Mid-Market Account Manager" → 100
+  [JobSpy]   [LinkedIn] "Named Account Executive" → 100
+  [JobSpy]   [LinkedIn] "Named Account Manager" → 100
+  [JobSpy]   [LinkedIn] "Regional Account Executive" → 100
+  [JobSpy]   [LinkedIn] "Regional Account Manager" → 100
+  [JobSpy]   [LinkedIn] "Senior Account Executive" → 100
+  [JobSpy]   [LinkedIn] "Senior Account Manager" → 100
+  [JobSpy]   [LinkedIn] "Commercial Account Executive" → 100
+  [JobSpy]   [LinkedIn] "Account Manager" → 100
+  [JobSpy]   [LinkedIn] "Account Executive" → 100
+  [JobSpy]   [LinkedIn] "Corporate Account Manager" → 100
+  [JobSpy]   [LinkedIn] "Commercial Account Manager" → 100
+  [JobSpy]   [LinkedIn] "Corporate Account Executive" → 100
+  [JobSpy]   [LinkedIn] "Enterprise Account Executive" → 100
+  [JobSpy]   [LinkedIn] "Lead Account Executive" → 100
+  [JobSpy]   [LinkedIn] "Enterprise Account Manager" → 100
+  [JobSpy]   [LinkedIn] "Major Account Account Executive" → 39
+  [JobSpy]   [LinkedIn] "Major Account Account Manager" → 40
+  [JobSpy]   [LinkedIn] "Lead Account Manager" → 100
+  [JobSpy] /home/runner/workspace/artifacts/api-server/src/jobspy_scraper.py:315: SettingWithCopyWarning: 
+  [JobSpy] A value is trying to be set on a copy of a slice from a DataFrame.
+  [JobSpy] Try using .loc[row_indexer,col_indexer] = value instead
+  [JobSpy] See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy
+  [JobSpy]   df["_key"] = df["title"].fillna("").str.lower().str.strip() + "||" + df["company"].fillna("").str.lower().str.strip()
+  [JobSpy] JobSpy [Phase 1/4]: LinkedIn → 1378 unique (US + Remote passes)
+  [JobSpy] JobSpy [Phase 2/4]: Indeed (US) — 41 terms × 50 = up to 2050 raw
+  [JobSpy]   [Indeed/United States] "Account Manager B2B technology" → 50
+  [JobSpy]   [Indeed/United States] "Account Executive B2B technology" → 50
+  [JobSpy]   [Indeed/United States] "Account Executive" → 50
+  [JobSpy]   [Indeed/United States] "Account Executive SaaS" → 50
+  [JobSpy]   [Indeed/United States] "Account Manager" → 50
+  [JobSpy]   [Indeed/United States] "Account Executive tech sales" → 50
+  [JobSpy]   [Indeed/United States] "Account Executive cloud" → 50
+  [JobSpy]   [Indeed/United States] "Account Executive software" → 50
+  [JobSpy]   [Indeed/United States] "Account Manager SaaS" → 50
+  [JobSpy]   [Indeed/United States] "Account Manager tech sales" → 50
+  [JobSpy]   [Indeed/United States] "Account Manager software" → 50
+  [JobSpy]   [Indeed/United States] "Account Manager cloud" → 50
+  [JobSpy]   [Indeed/United States] "Client Executive enterprise software" → 50
+  [JobSpy]   [Indeed/United States] "Commercial Account Manager" → 50
+  [JobSpy]   [Indeed/United States] "Commercial Account Executive" → 50
+  [JobSpy]   [Indeed/United States] "Corporate Account Executive" → 50
+  [JobSpy]   [Indeed/United States] "Enterprise Sales Representative B2B" → 50
+  [JobSpy]   [Indeed/United States] "Corporate Account Manager" → 50
+  [JobSpy]   [Indeed/United States] "Enterprise Account Executive" → 50
+  [JobSpy]   [Indeed/United States] "Enterprise Account Manager" → 50
+  [JobSpy]   [Indeed/United States] "Lead Account Executive" → 50
+  [JobSpy]   [Indeed/United States] "Lead Account Manager" → 50
+  [JobSpy]   [Indeed/United States] "Major Account Account Executive" → 50
+  [JobSpy]   [Indeed/United States] "Major Account Account Manager" → 50
+  [JobSpy]   [Indeed/United States] "Mid-Market Account Manager" → 50
+  [JobSpy]   [Indeed/United States] "Mid-Market Account Executive" → 50
+  [JobSpy]   [Indeed/United States] "Named Account Executive" → 50
+  [JobSpy]   [Indeed/United States] "New Business Account Executive" → 50
+  [JobSpy]   [Indeed/United States] "Named Account Manager" → 50
+  [JobSpy]   [Indeed/United States] "Partner Manager SaaS" → 50
+  [JobSpy]   [Indeed/United States] "Regional Account Executive" → 50
+  [JobSpy]   [Indeed/United States] "Regional Account Manager" → 50
+  [JobSpy]   [Indeed/United States] "Regional Sales Manager technology" → 50
+  [JobSpy]   [Indeed/United States] "Senior Account Executive" → 50
+  [JobSpy]   [Indeed/United States] "Senior Account Manager" → 50
+  [JobSpy]   [Indeed/United States] "Sr Account Manager" → 50
+  [JobSpy]   [Indeed/United States] "Sr Account Executive" → 50
+  [JobSpy]   [Indeed/United States] "Strategic Account Manager" → 50
+  [JobSpy]   [Indeed/United States] "Territory Account Executive" → 50
+  [JobSpy]   [Indeed/United States] "Strategic Account Executive" → 50
+  [JobSpy]   [Indeed/United States] "Territory Account Manager" → 50
+  [JobSpy] /home/runner/workspace/artifacts/api-server/src/jobspy_scraper.py:315: SettingWithCopyWarning: 
+  [JobSpy] A value is trying to be set on a copy of a slice from a DataFrame.
+  [JobSpy] Try using .loc[row_indexer,col_indexer] = value instead
+  [JobSpy] See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy
+  [JobSpy]   df["_key"] = df["title"].fillna("").str.lower().str.strip() + "||" + df["company"].fillna("").str.lower().str.strip()
+  [JobSpy] JobSpy [Phase 2/4]: Indeed (US) → 656 unique
+  [JobSpy] JobSpy [Phase 3/4]: Indeed (south carolina) — 15 terms
+  [JobSpy]   [Indeed/south carolina] "Commercial Account Executive" → 21
+  [JobSpy]   [Indeed/south carolina] "Enterprise Account Executive" → 22
+  [JobSpy]   [Indeed/south carolina] "Enterprise Sales Representative B2B" → 1
+  [JobSpy]   [Indeed/south carolina] "Enterprise Account Manager" → 25
+  [JobSpy]   [Indeed/south carolina] "Account Manager" → 50
+  [JobSpy]   [Indeed/south carolina] "Commercial Account Manager" → 37
+  [JobSpy]   [Indeed/south carolina] "Account Executive" → 50
+  [JobSpy]   [Indeed/south carolina] "Named Account Executive" → 9
+  [JobSpy]   [Indeed/south carolina] "Named Account Manager" → 20
+  [JobSpy]   [Indeed/south carolina] "Strategic Account Executive" → 50
+  [JobSpy]   [Indeed/south carolina] "Strategic Account Manager" → 50
+  [JobSpy]   [Indeed/south carolina] "Senior Account Executive" → 50
+  [JobSpy]   [Indeed/south carolina] "Senior Account Manager" → 50
+  [JobSpy] /home/runner/workspace/artifacts/api-server/src/jobspy_scraper.py:315: SettingWithCopyWarning: 
+  [JobSpy] A value is trying to be set on a copy of a slice from a DataFrame.
+  [JobSpy] Try using .loc[row_indexer,col_indexer] = value instead
+  [JobSpy] See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy
+  [JobSpy]   df["_key"] = df["title"].fillna("").str.lower().str.strip() + "||" + df["company"].fillna("").str.lower().str.strip()
+  [JobSpy] JobSpy [Phase 3/4]: Indeed (south carolina) → 216 unique
+  [JobSpy] JobSpy [Phase 3/4]: Indeed (north carolina) — 15 terms
+  [JobSpy]   [Indeed/north carolina] "Commercial Account Manager" → 50
+  [JobSpy]   [Indeed/north carolina] "Enterprise Sales Representative B2B" → 5
+  [JobSpy]   [Indeed/north carolina] "Commercial Account Executive" → 50
+  [JobSpy]   [Indeed/north carolina] "Account Manager" → 50
+  [JobSpy]   [Indeed/north carolina] "Account Executive" → 50
+  [JobSpy]   [Indeed/north carolina] "Mid-Market Account Manager" → 2
+  [JobSpy]   [Indeed/north carolina] "Mid-Market Account Executive" → 10
+  [JobSpy]   [Indeed/north carolina] "Named Account Executive" → 9
+  [JobSpy]   [Indeed/north carolina] "Enterprise Account Executive" → 50
+  [JobSpy]   [Indeed/north carolina] "Enterprise Account Manager" → 50
+  [JobSpy]   [Indeed/north carolina] "Named Account Manager" → 26
+  [JobSpy]   [Indeed/north carolina] "Strategic Account Manager" → 50
+  [JobSpy]   [Indeed/north carolina] "Senior Account Manager" → 50
+  [JobSpy]   [Indeed/north carolina] "Senior Account Executive" → 50
+  [JobSpy]   [Indeed/north carolina] "Strategic Account Executive" → 50
+  [JobSpy] /home/runner/workspace/artifacts/api-server/src/jobspy_scraper.py:315: SettingWithCopyWarning: 
+  [JobSpy] A value is trying to be set on a copy of a slice from a DataFrame.
+  [JobSpy] Try using .loc[row_indexer,col_indexer] = value instead
+  [JobSpy] See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy
+  [JobSpy]   df["_key"] = df["title"].fillna("").str.lower().str.strip() + "||" + df["company"].fillna("").str.lower().str.strip()
+  [JobSpy] JobSpy [Phase 3/4]: Indeed (north carolina) → 288 unique
+  [JobSpy] JobSpy [Phase 3/4]: Indeed (georgia) — 15 terms
+  [JobSpy]   [Indeed/georgia] "Commercial Account Manager" → 50
+  [JobSpy]   [Indeed/georgia] "Account Manager" → 50
+  [JobSpy]   [Indeed/georgia] "Account Executive" → 50
+  [JobSpy]   [Indeed/georgia] "Enterprise Sales Representative B2B" → 5
+  [JobSpy]   [Indeed/georgia] "Enterprise Account Executive" → 50
+  [JobSpy]   [Indeed/georgia] "Enterprise Account Manager" → 50
+  [JobSpy]   [Indeed/georgia] "Commercial Account Executive" → 50
+  [JobSpy]   [Indeed/georgia] "Mid-Market Account Executive" → 7
+  [JobSpy]   [Indeed/georgia] "Mid-Market Account Manager" → 8
+  [JobSpy]   [Indeed/georgia] "Named Account Executive" → 22
+  [JobSpy]   [Indeed/georgia] "Named Account Manager" → 34
+  [JobSpy]   [Indeed/georgia] "Senior Account Manager" → 50
+  [JobSpy]   [Indeed/georgia] "Senior Account Executive" → 50
+  [JobSpy]   [Indeed/georgia] "Strategic Account Executive" → 50
+  [JobSpy]   [Indeed/georgia] "Strategic Account Manager" → 50
+  [JobSpy] /home/runner/workspace/artifacts/api-server/src/jobspy_scraper.py:315: SettingWithCopyWarning: 
+  [JobSpy] A value is trying to be set on a copy of a slice from a DataFrame.
+  [JobSpy] Try using .loc[row_indexer,col_indexer] = value instead
+  [JobSpy] See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy
+  [JobSpy]   df["_key"] = df["title"].fillna("").str.lower().str.strip() + "||" + df["company"].fillna("").str.lower().str.strip()
+  [JobSpy] JobSpy [Phase 3/4]: Indeed (georgia) → 310 unique
+  [JobSpy] JobSpy [Phase 3/4]: Indeed (florida) — 15 terms
+  [JobSpy]   [Indeed/florida] "Commercial Account Manager" → 50
+  [JobSpy]   [Indeed/florida] "Account Manager" → 50
+  [JobSpy]   [Indeed/florida] "Account Executive" → 50
+  [JobSpy]   [Indeed/florida] "Enterprise Sales Representative B2B" → 2
+  [JobSpy]   [Indeed/florida] "Commercial Account Executive" → 50
+  [JobSpy]   [Indeed/florida] "Enterprise Account Manager" → 50
+  [JobSpy]   [Indeed/florida] "Mid-Market Account Executive" → 21
+  [JobSpy]   [Indeed/florida] "Enterprise Account Executive" → 50
+  [JobSpy]   [Indeed/florida] "Mid-Market Account Manager" → 10
+  [JobSpy]   [Indeed/florida] "Named Account Executive" → 50
+  [JobSpy]   [Indeed/florida] "Named Account Manager" → 50
+  [JobSpy]   [Indeed/florida] "Senior Account Executive" → 50
+  [JobSpy]   [Indeed/florida] "Senior Account Manager" → 50
+  [JobSpy]   [Indeed/florida] "Strategic Account Executive" → 50
+  [JobSpy]   [Indeed/florida] "Strategic Account Manager" → 50
+  [JobSpy] /home/runner/workspace/artifacts/api-server/src/jobspy_scraper.py:315: SettingWithCopyWarning: 
+  [JobSpy] A value is trying to be set on a copy of a slice from a DataFrame.
+  [JobSpy] Try using .loc[row_indexer,col_indexer] = value instead
+  [JobSpy] See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy
+  [JobSpy]   df["_key"] = df["title"].fillna("").str.lower().str.strip() + "||" + df["company"].fillna("").str.lower().str.strip()
+  [JobSpy] JobSpy [Phase 3/4]: Indeed (florida) → 350 unique
+  [JobSpy] JobSpy [Phase 4/4]: Glassdoor — 15 terms (proxy active)
+  [JobSpy]   [Glassdoor] "Account Executive" ✗ TLSClientExeption: failed to do request: Get "https://www.glassdoor.com//Job/computer-science-jobs.
+  [JobSpy]   [Glassdoor] "Account Executive B2B technology" ✗ TLSClientExeption: failed to do request: Get "https://www.glassdoor.com//Job/computer-science-jobs.
+  [JobSpy]   [Glassdoor] "Account Executive SaaS" ✗ TLSClientExeption: failed to do request: Get "https://www.glassdoor.com//Job/computer-science-jobs.
+  [JobSpy]   [Glassdoor] "Account Executive cloud" ✗ TLSClientExeption: failed to do request: Get "https://www.glassdoor.com//Job/computer-science-jobs.
+  [JobSpy]   [Glassdoor] "Account Executive software" ✗ TLSClientExeption: failed to do request: Get "https://www.glassdoor.com//Job/computer-science-jobs.
+  [JobSpy]   [Glassdoor] "Account Executive tech sales" ✗ TLSClientExeption: failed to do request: Get "https://www.glassdoor.com//Job/computer-science-jobs.
+  [JobSpy]   [Glassdoor] "Account Manager B2B technology" ✗ TLSClientExeption: failed to do request: Get "https://www.glassdoor.com//Job/computer-science-jobs.
+  [JobSpy]   [Glassdoor] "Account Manager" ✗ TLSClientExeption: failed to do request: Get "https://www.glassdoor.com//Job/computer-science-jobs.
+  [JobSpy]   [Glassdoor] "Account Manager SaaS" ✗ TLSClientExeption: failed to do request: Get "https://www.glassdoor.com//Job/computer-science-jobs.
+  [JobSpy]   [Glassdoor] "Account Manager cloud" ✗ TLSClientExeption: failed to do request: Get "https://www.glassdoor.com//Job/computer-science-jobs.
+  [JobSpy]   [Glassdoor] "Account Manager software" ✗ TLSClientExeption: failed to do request: Get "https://www.glassdoor.com//Job/computer-science-jobs.
+  [JobSpy]   [Glassdoor] "Account Manager tech sales" ✗ TLSClientExeption: failed to do request: Get "https://www.glassdoor.com//Job/computer-science-jobs.
+  [JobSpy]   [Glassdoor] "Client Executive enterprise software" ✗ TLSClientExeption: failed to do request: Get "https://www.glassdoor.com//Job/computer-science-jobs.
+  [JobSpy]   [Glassdoor] "Commercial Account Executive" ✗ TLSClientExeption: failed to do request: Get "https://www.glassdoor.com//Job/computer-science-jobs.
+  [JobSpy]   [Glassdoor] "Commercial Account Manager" ✗ TLSClientExeption: failed to do request: Get "https://www.glassdoor.com//Job/computer-science-jobs.
+  [JobSpy] JobSpy [Phase 4/4]: Glassdoor → 0 unique
+  [JobSpy] JobSpy [Phase 4/4]: ZipRecruiter — 15 terms (proxy active)
+  [JobSpy]   [ZipRecruiter] "Account Executive B2B technology" ✗ TLSClientExeption: failed to do request: Post "https://api.ziprecruiter.com/jobs-app/event": Proxy 
+  [JobSpy]   [ZipRecruiter] "Account Executive" ✗ TLSClientExeption: failed to do request: Post "https://api.ziprecruiter.com/jobs-app/event": Proxy 
+  [JobSpy]   [ZipRecruiter] "Account Executive SaaS" ✗ TLSClientExeption: failed to do request: Post "https://api.ziprecruiter.com/jobs-app/event": Proxy 
+  [JobSpy]   [ZipRecruiter] "Account Executive cloud" ✗ TLSClientExeption: failed to do request: Post "https://api.ziprecruiter.com/jobs-app/event": Proxy 
+  [JobSpy]   [ZipRecruiter] "Account Executive tech sales" ✗ TLSClientExeption: failed to do request: Post "https://api.ziprecruiter.com/jobs-app/event": Proxy 
+  [JobSpy]   [ZipRecruiter] "Account Executive software" ✗ TLSClientExeption: failed to do request: Post "https://api.ziprecruiter.com/jobs-app/event": Proxy 
+  [JobSpy]   [ZipRecruiter] "Account Manager" ✗ TLSClientExeption: failed to do request: Post "https://api.ziprecruiter.com/jobs-app/event": Proxy 
+  [JobSpy]   [ZipRecruiter] "Account Manager B2B technology" ✗ TLSClientExeption: failed to do request: Post "https://api.ziprecruiter.com/jobs-app/event": Proxy 
+  [JobSpy]   [ZipRecruiter] "Account Manager SaaS" ✗ TLSClientExeption: failed to do request: Post "https://api.ziprecruiter.com/jobs-app/event": Proxy 
+  [JobSpy]   [ZipRecruiter] "Account Manager cloud" ✗ TLSClientExeption: failed to do request: Post "https://api.ziprecruiter.com/jobs-app/event": Proxy 
+  [JobSpy]   [ZipRecruiter] "Account Manager software" ✗ TLSClientExeption: failed to do request: Post "https://api.ziprecruiter.com/jobs-app/event": Proxy 
+  [JobSpy]   [ZipRecruiter] "Account Manager tech sales" ✗ TLSClientExeption: failed to do request: Post "https://api.ziprecruiter.com/jobs-app/event": Proxy 
+  [JobSpy]   [ZipRecruiter] "Client Executive enterprise software" ✗ TLSClientExeption: failed to do request: Post "https://api.ziprecruiter.com/jobs-app/event": Proxy 
+  [JobSpy]   [ZipRecruiter] "Commercial Account Executive" ✗ TLSClientExeption: failed to do request: Post "https://api.ziprecruiter.com/jobs-app/event": Proxy 
+  [JobSpy]   [ZipRecruiter] "Commercial Account Manager" ✗ TLSClientExeption: failed to do request: Post "https://api.ziprecruiter.com/jobs-app/event": Proxy 
+  [JobSpy] JobSpy [Phase 4/4]: ZipRecruiter → 0 unique
+  [JobSpy] /home/runner/workspace/artifacts/api-server/src/jobspy_scraper.py:342: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  [JobSpy]   combined = pd.concat(all_dfs, ignore_index=True)
+  [JobSpy] JobSpy: 3198 total across sources → 3005 unique after global dedup
+  [JobSpy]   [filter] Dropped junk listing: "Account Executive" → https://naturaHQ.com/careers/?gnk=job&gni=8a7883a89d02f872019d30b7da9d63ac&gns=I
+  [JobSpy]   [filter] Dropped junk listing: "Controller" → https://mcgillcompost.com/careers/?gnk=job&gni=8a7885ac9d02e54a019d40c4eda05cab&
+  [JobSpy]   [filter] Dropped junk listing: "Health care Business Analyst - Project Lead" → https://intellibee.my.salesforce-sites.com/apps/jobs?id=a0AUU000006A9Un2AK
+  [JobSpy]   [filter] Dropped junk listing: "Network Administrator" → https://intellibee.my.salesforce-sites.com/apps/jobs?id=a0AUU0000068UYX2A2
+  [JobSpy]   [filter] Dropped junk listing: "Sales Executive (Cold Chain)" → https://jobs.jobvite.com/cjlogisticsamerica/jobs
+  [JobSpy]   [filter] Dropped junk listing: "Account Executive" → https://www.compass.com/careers?gh_jid=7769875&gh_board=urbancompass
+  [JobSpy] JobSpy: source breakdown → {'indeed': 1636, 'linkedin': 1363}
+  [JobSpy] JobSpy: outputting 2999 jobs
+JobSpy: summary → {"total":2999,"sources":{"indeed":1636,"linkedin":1363},"proxy":true}
+───────────────────────────────────────────────────────────
+JobSpy: received 2999 unique jobs
+JobSpy returned 2999 jobs — adding all to pipeline
+
+──── COMPANY SAFETY CHECK ──────────────────────────────────
+Evaluating 1877 unique non-pre-approved companies...
+[Recovery] Gemini search failed: fetch failed

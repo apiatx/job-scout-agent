@@ -5198,7 +5198,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
       allJobs.push(...safeJobSpyJobs.map(j => ({ ...j, source: sourceByUrl.get(j.applyUrl) ?? 'JobSpy' })));
     }
 
-    await setStage(`JobSpy done (${allJobs.length} total) — running Gemini discovery…`);
+    await setStage(`JobSpy done (${allJobs.length} total) — running Perplexity discovery…`);
     await pool.query(`UPDATE scout_runs SET jobs_in_pipeline=$1 WHERE id=$2`, [allJobs.length, runId]).catch(() => {});
     // ── Stage 2c: Gemini + Google Search grounding — supplemental discovery ──
     let geminiJobsFound = 0;
@@ -6892,7 +6892,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="nav-group">
     <div class="nav-group-label">Settings</div>
     <div class="tab" id="tab-settings" onclick="showTab('settings')" data-tooltip="Controls what the scout actually searches for: target roles, industries, locations, must-have skills, things to avoid, and salary floor. The scout won't run without this configured.">User Search Settings</div>
-    <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Your Company Watchlist — tracks open roles at each company daily using Gemini search. Also tells the scraper which ATS pages to hit and boosts their score.">Company Watchlist</div>
+    <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Your Company Watchlist — tracks open roles at each company daily using Perplexity AI search. Also tells the scraper which ATS pages to hit and boosts their score.">Company Watchlist</div>
     <div class="tab" id="tab-runs" onclick="showTab('runs')" data-tooltip="Full log of every scout run — jobs found, matches scored, errors, and timing. Use this to debug why a run found too many or too few results.">Run History</div>
   </div>
 </nav>
@@ -7175,7 +7175,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="intel-loading" style="display:none">
     <div class="intel-loading-wrap">
       <div class="intel-spinner"></div>
-      <div class="intel-loading-msg">Gemini is searching and synthesising company signals&hellip;<br><span style="font-size:11px;color:var(--muted)">This typically takes 30&ndash;60 seconds</span></div>
+      <div class="intel-loading-msg">Perplexity is searching and synthesising company signals&hellip;<br><span style="font-size:11px;color:var(--muted)">This typically takes 30&ndash;60 seconds</span></div>
     </div>
   </div>
 
@@ -7217,7 +7217,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </div>
       <div id="intel-scan-spinner" style="display:none;text-align:center;padding:20px 0">
         <div class="intel-spinner" style="margin:0 auto 10px"></div>
-        <div style="font-size:12px;color:var(--muted)">Asking Gemini to search for open roles at each company&hellip; (30-90s)</div>
+        <div style="font-size:12px;color:var(--muted)">Asking Perplexity to search for open roles at each company&hellip; (30-90s)</div>
       </div>
       <div id="intel-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
       <div id="intel-scan-results" style="display:none;margin-top:14px">
@@ -7235,7 +7235,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="pulse-header">
     <div>
       <div class="sec-title" style="margin-bottom:4px">Job Market Pulse</div>
-      <div class="intel-meta" id="pulse-meta">Scout data + Gemini search &mdash; hiring trends and signal analysis for your target companies</div>
+      <div class="intel-meta" id="pulse-meta">Scout data + Perplexity search &mdash; hiring trends and signal analysis for your target companies</div>
     </div>
     <button class="btn btn-gold btn-sm" id="pulse-refresh-btn" onclick="refreshJobMarketPulse()">&#x26A1; Refresh Pulse</button>
   </div>
@@ -7298,12 +7298,12 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="dv-loading" style="display:none">
     <div class="dv-loading-wrap">
       <div class="dv-spinner"></div>
-      <div class="dv-loading-msg">Gemini is searching for the most compelling infrastructure companies with undeniable value props&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;60 seconds</span></div>
+      <div class="dv-loading-msg">Perplexity is searching for the most compelling infrastructure companies with undeniable value props&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;60 seconds</span></div>
     </div>
   </div>
 
   <div id="dv-empty" style="display:none">
-    <div class="dv-empty">No Deep Value data yet.<br>Click &ldquo;Refresh Intel&rdquo; to have Gemini search for cutting-edge infrastructure companies with the clearest &ldquo;why you need this&rdquo; value props &mdash; plus any open roles at each.</div>
+    <div class="dv-empty">No Deep Value data yet.<br>Click &ldquo;Refresh Intel&rdquo; to have Perplexity search for cutting-edge infrastructure companies with the clearest &ldquo;why you need this&rdquo; value props &mdash; plus any open roles at each.</div>
   </div>
 
   <div id="dv-error" style="display:none" class="dv-error-box"></div>
@@ -7370,7 +7370,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </div>
       <div id="preipo-scan-spinner" style="display:none;text-align:center;padding:20px 0">
         <div class="intel-spinner" style="margin:0 auto 10px"></div>
-        <div style="font-size:12px;color:var(--muted)">Asking Gemini to search for open roles at each company&hellip; (30-90s)</div>
+        <div style="font-size:12px;color:var(--muted)">Asking Perplexity to search for open roles at each company&hellip; (30-90s)</div>
       </div>
       <div id="preipo-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
       <div id="preipo-scan-results" style="display:none;margin-top:14px">
@@ -7421,7 +7421,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </div>
       <div id="leaders-scan-spinner" style="display:none;text-align:center;padding:20px 0">
         <div class="intel-spinner" style="margin:0 auto 10px"></div>
-        <div style="font-size:12px;color:var(--muted)">Asking Gemini to search for open roles at each company&hellip; (30-90s)</div>
+        <div style="font-size:12px;color:var(--muted)">Asking Perplexity to search for open roles at each company&hellip; (30-90s)</div>
       </div>
       <div id="leaders-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
       <div id="leaders-scan-results" style="display:none;margin-top:14px">
@@ -7438,14 +7438,14 @@ textarea:focus,input:focus{border-color:var(--gold)}
 <div class="panel" id="panel-companies">
   <div style="margin-bottom:20px">
     <div class="sec-title" style="margin-bottom:4px">Company Watchlist</div>
-    <div style="font-size:12px;color:var(--muted)">Gemini searches for open sales roles at each company daily. Green = matching roles found. Also boosts each company&rsquo;s score in your job board.</div>
+    <div style="font-size:12px;color:var(--muted)">Perplexity searches for open sales roles at each company daily. Green = matching roles found. Also boosts each company&rsquo;s score in your job board.</div>
   </div>
 
   <!-- Watchlist scan controls -->
   <div class="cw-scan-header">
     <div>
       <div style="font-size:13px;font-weight:700;color:var(--text)">Daily Job Scan</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:2px" id="cw-scan-status">Gemini checks for open roles at each company daily &mdash; automatically</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:2px" id="cw-scan-status">Perplexity checks for open roles at each company daily &mdash; automatically</div>
     </div>
     <button class="btn btn-ghost btn-sm" id="cw-scan-btn" onclick="runWatchlistScan()">&#x1F50D; Scan Now</button>
   </div>
@@ -12283,7 +12283,7 @@ async function scanForRoles(source) {
     if (!res.ok) throw new Error(json.error || 'Scan failed');
 
     if (json.skipped) {
-      throw new Error('Gemini search not available: ' + (json.skip_reason || 'check GEMINI_API_KEY in Settings'));
+      throw new Error('AI discovery not available: ' + (json.skip_reason || 'check PERPLEXITY_API_KEY in Settings'));
     }
 
     var jobs = json.jobs || [];
@@ -12970,7 +12970,7 @@ async function runWatchlistScan() {
   var btn = document.getElementById('cw-scan-btn');
   var statusEl = document.getElementById('cw-scan-status');
   if (btn) { btn.disabled = true; btn.textContent = 'Scanning\u2026'; }
-  if (statusEl) statusEl.textContent = 'Gemini is searching for open roles at each company\u2026 (30-90s per company)';
+  if (statusEl) statusEl.textContent = 'Perplexity is searching for open roles at each company\u2026 (30-90s per company)';
   try {
     var res = await fetch('/api/companies/scan-jobs', { method: 'POST' });
     var data = await res.json();
