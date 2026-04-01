@@ -8,7 +8,8 @@ import mammoth from 'mammoth';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, UnderlineType } from 'docx';
 import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, runJobSpyScraper, proxyConfigured } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
-import { runGeminiJobDiscovery, deduplicateJobLists, isDirectCompanyUrl, normalizeUrl as normalizeJobUrl } from './gemini_discovery.js';
+import { isDirectCompanyUrl, normalizeUrl as normalizeJobUrl } from './gemini_discovery.js';
+// [Removed] Gemini Discovery imports (runGeminiJobDiscovery, deduplicateJobLists)
 import { runCanonicalResolutionInBackground, computeLinkConfidence, classifySourceTrust, enrichJobsPreScoring } from './link_validator.js';
 import { generateCareerIntel } from './career_intel.js';
 import type { CareerIntelCriteria } from './career_intel.js';
@@ -1901,8 +1902,7 @@ app.post('/api/industry-news/refresh', async (_req, res: Response) => {
   newsRefreshRunning = true;
   res.json({ started: true });
   try {
-    const geminiKey = process.env.GEMINI_API_KEY ?? '';
-    await refreshIndustryNews(pool, geminiKey);
+    await refreshIndustryNews(pool, '');
   } catch (e) {
     console.error('[IndustryNews] Refresh failed:', e);
   } finally {
@@ -2107,7 +2107,7 @@ app.post('/api/jobs/custom', async (req: Request, res: Response) => {
     const customUrl = rawUrl?.trim() || `custom://${company.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
 
     const result = await rescoreJobOpportunity(
-      { id: 0, title: rawTitle?.trim() || company + ' — Custom Role', company, location: 'See description', salary: null, applyUrl: customUrl, description },
+      { id: 0, title: rawTitle?.trim() || company + ' — Custom Role', company, location: 'See description', salary: undefined, applyUrl: customUrl, description: description ?? undefined },
       criteriaText, preApprovedSection, companyNames, tierSettings,
       criteria.min_salary ?? null, resume || undefined, criteria.min_ote ?? null,
     );
@@ -2510,59 +2510,7 @@ Rules: AE reports to Director/VP; Director reports to VP/SVP; Manager reports to
       }
     }
 
-    // ── Step 2.7: Gemini web search (fires when CSE/Apollo are unavailable) ─
-    let geminiWebSearchText = '';
-    const geminiHMKey = process.env.GEMINI_API_KEY?.trim();
-    if (!usedCache && geminiHMKey) {
-      try {
-        const { GoogleGenAI } = await import('@google/genai');
-        const hmGenAI = new GoogleGenAI({ apiKey: geminiHMKey });
-        const kwArr = Array.isArray(analysis.manager_seniority_keywords) && analysis.manager_seniority_keywords.length > 0
-          ? analysis.manager_seniority_keywords.slice(0, 4)
-          : ['VP Sales', 'Director of Sales', 'Regional Sales Director', 'Head of Sales'];
-        const regionStr = analysis.region ? ` ${analysis.region}` : (location ? ` ${location}` : '');
-        const managerTitle = analysis.manager_likely_title || 'VP Sales or Director of Sales';
-
-        // Two targeted prompts run in parallel for more coverage
-        const prompt1 = `Find the hiring manager for a ${roleTitle} position at ${companyName}. ` +
-          `Specifically search for: who is the current ${managerTitle} at ${companyName}${regionStr ? ' covering the' + regionStr + ' territory' : ''}? ` +
-          `Search LinkedIn profiles at ${companyName} for people with titles like: ${kwArr.join(', ')}. ` +
-          `For EVERY person you find at ${companyName} in a sales leadership role, give me their FULL NAME, exact current TITLE, and LinkedIn profile URL. ` +
-          `Be specific — I need real names of real people currently at ${companyName}.`;
-
-        const prompt2 = `Search for ${companyName} sales leadership team. ` +
-          `Find people at ${companyName} with the following titles: ${kwArr.join(', ')}${regionStr ? ' in ' + regionStr : ''}. ` +
-          `Also search: "${companyName} ${kwArr[0]} LinkedIn" and "${companyName} ${kwArr[1] || 'Director of Sales'} site:linkedin.com". ` +
-          `List each person's full name, title, and LinkedIn URL. ` +
-          `Also check ${companyName}'s website leadership/team page and any recent press releases that name their sales executives.`;
-
-        const hmModels = ['gemini-3-flash-preview', 'gemini-flash-latest', 'gemini-pro-latest'];
-        for (const hmModel of hmModels) {
-          try {
-            const [r1, r2] = await Promise.allSettled([
-              hmGenAI.models.generateContent({ model: hmModel, contents: prompt1, config: { tools: [{ googleSearch: {} }] } }),
-              hmGenAI.models.generateContent({ model: hmModel, contents: prompt2, config: { tools: [{ googleSearch: {} }] } }),
-            ]);
-            const texts = ([r1, r2] as any[])
-              .filter(r => r.status === 'fulfilled' && r.value?.text)
-              .map((r, i) => `SEARCH ${i + 1}:\n${r.value.text}`);
-            if (texts.length > 0) {
-              geminiWebSearchText = texts.join('\n\n---\n\n');
-              enrichmentSource = 'gemini';
-              console.log(`[HiringManager] Gemini web search (${hmModel}): ${geminiWebSearchText.length} chars from ${texts.length}/2 queries`);
-            }
-            break;
-          } catch (hmModelErr: any) {
-            const msg = hmModelErr instanceof Error ? hmModelErr.message : String(hmModelErr);
-            const isUnavail = msg.includes('not found') || msg.includes('404') || msg.includes('deprecated') || msg.includes('not available');
-            console.warn(`[HiringManager] Gemini model ${hmModel} failed: ${msg.slice(0, 120)}`);
-            if (!isUnavail) break;
-          }
-        }
-      } catch (geminiHMErr) {
-        console.warn('[HiringManager] Gemini web search failed:', geminiHMErr instanceof Error ? geminiHMErr.message : geminiHMErr);
-      }
-    }
+    // [Removed] Gemini web search (Step 2.7)
 
     // Build flattened results text for Claude
     let flattenedResults = '';
@@ -2577,7 +2525,7 @@ Rules: AE reports to Director/VP; Director reports to VP/SVP; Manager reports to
           `Apollo Result: ${p.first_name || ''} ${p.last_name || ''} - ${p.title || ''} at ${p.organization?.name || companyName}. Location: ${p.city || ''} ${p.state || ''}. LinkedIn: ${p.linkedin_url || 'N/A'}`
         ).join('\n')
         : '';
-      const parts = [cseText, apolloText, geminiWebSearchText ? 'WEB SEARCH RESULTS (via Gemini):\n' + geminiWebSearchText : ''].filter(Boolean);
+      const parts = [cseText, apolloText].filter(Boolean);
       flattenedResults = parts.length > 0 ? parts.join('\n\n---\n\n') : 'No search results available.';
     }
 
@@ -2641,39 +2589,7 @@ ${flattenedResults}`;
       }
     }
 
-    // ── Step 3.5: Gemini fallback identification when Claude is down ──────
-    if (!claudeStep3Success && geminiHMKey && geminiWebSearchText) {
-      try {
-        const { GoogleGenAI } = await import('@google/genai');
-        const fallbackGenAI = new GoogleGenAI({ apiKey: geminiHMKey });
-        const fallbackPrompt = `Based on the following web search results, identify the most likely hiring manager for a ${roleTitle} position at ${companyName}${analysis.region ? ' in ' + analysis.region : ''}.
-
-The hiring manager is the person this role REPORTS TO — typically a ${analysis.manager_likely_title || 'Director or VP of Sales'}.
-
-Search results:
-${geminiWebSearchText.slice(0, 6000)}
-
-Return ONLY this JSON (no other text):
-{"full_name":"First Last or null","title":"their title or null","linkedin_url":"URL or null","confidence":"high/medium/low","reasoning":"one sentence"}`;
-
-        const fbResp = await fallbackGenAI.models.generateContent({
-          model: 'gemini-3-flash-preview',
-          contents: fallbackPrompt,
-        });
-        const fbText = ((fbResp as any).text || '').trim();
-        const fbMatch = fbText.match(/\{[\s\S]*\}/);
-        if (fbMatch) {
-          const fbData = JSON.parse(fbMatch[0]);
-          if (fbData.full_name) {
-            hmData = { ...fbData, alternative: null };
-            enrichmentSource = enrichmentSource === 'gemini' ? 'gemini' : 'gemini-fallback';
-            console.log(`[HiringManager] Step 3 Gemini fallback identified: ${hmData.full_name} [${hmData.confidence}]`);
-          }
-        }
-      } catch (fbErr) {
-        console.warn('[HiringManager] Step 3 Gemini fallback failed:', fbErr instanceof Error ? fbErr.message.slice(0, 80) : fbErr);
-      }
-    }
+    // [Removed] Gemini fallback identification (Step 3.5)
 
     // ── Step 3.5: Apollo enrichment for found HM (Enhancement 1) ─────────
     let apolloEmail: string | null = null;
@@ -2718,7 +2634,7 @@ Return ONLY this JSON (no other text):
         hmData.confidence || 'none',
         hmData.reasoning || null,
         hmData.alternative ? JSON.stringify(hmData.alternative) : null,
-        (allResults.length === 0 && apolloResults.length === 0 && !geminiWebSearchText && !usedCache) ? 'No search results found — add manually' : null,
+        (allResults.length === 0 && apolloResults.length === 0 && !usedCache) ? 'No search results found — add manually' : null,
         enrichmentSource,
         apolloId,
         apolloEmail,
@@ -3783,114 +3699,10 @@ app.post('/api/jobs/targeted-scan', async (req: Request, res: Response) => {
     const { rows: resumeRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
     const candidateResume: string = resumeRows[0]?.value ?? '';
 
-    const geminiCriteria = {
-      target_roles:  criteria.target_roles  ?? [],
-      locations:     criteria.locations     ?? ['Remote'],
-      work_type:     criteria.work_type     ?? 'any',
-      must_have:     criteria.must_have     ?? [],
-      nice_to_have:  criteria.nice_to_have  ?? [],
-      avoid:         criteria.avoid         ?? [],
-      industries:    criteria.industries    ?? [],
-      min_salary:    criteria.min_salary    ?? null,
-      company_focus: companyNames,
-    };
-
-    // Run Gemini with company-focused prompt (15s timeout — user is waiting interactively)
-    console.log('[TargetedScan] Calling Gemini discovery…');
-    const geminiResult = await runGeminiJobDiscovery(geminiCriteria, { timeoutMs: 15000 });
-
-    if (geminiResult.skipped) {
-      console.log(`[TargetedScan] Gemini skipped: ${geminiResult.skipReason}`);
-      res.json({ jobs: [], skipped: true, skip_reason: geminiResult.skipReason });
-      return;
-    }
-
-    console.log(`[TargetedScan] Gemini returned ${geminiResult.jobs.length} raw jobs`);
-
-    // Deduplicate against existing jobs in DB
-    const { rows: existingRows } = await pool.query('SELECT apply_url FROM jobs');
-    const seenUrls = new Set(existingRows.map((r: any) => r.apply_url as string));
-    const newJobs = geminiResult.jobs.filter(j => !seenUrls.has(j.applyUrl));
-    console.log(`[TargetedScan] ${newJobs.length} new (${geminiResult.jobs.length - newJobs.length} already in DB)`);
-
-    if (newJobs.length === 0 && geminiResult.jobs.length === 0) {
-      res.json({ jobs: [], count: 0 });
-      return;
-    }
-
-    // Score with Claude (use all Gemini results, even if URL already in DB — we still return them)
-    const toScore = geminiResult.jobs.slice(0, 25);
-    const { rows: tierRows } = await pool.query("SELECT value FROM settings WHERE key='tier_settings'");
-    const tierSettings = tierRows[0]?.value ? JSON.parse(tierRows[0].value) : {};
-
-    console.log(`[TargetedScan] Scoring ${toScore.length} jobs with Claude…`);
-    const matches = await scoreJobsWithClaude(
-      toScore.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
-      {
-        targetRoles:        criteria.target_roles       ?? [],
-        industries:         criteria.industries         ?? [],
-        minSalary:          criteria.min_salary         ?? null,
-        minOte:             criteria.min_ote            ?? null,
-        locations:          criteria.locations          ?? ['Remote'],
-        allowedWorkModes:   criteria.allowed_work_modes ?? [],
-        mustHave:           criteria.must_have          ?? [],
-        niceToHave:         criteria.nice_to_have       ?? [],
-        avoid:              criteria.avoid              ?? [],
-        preApprovedCompanies: companyNames,
-        tierSettings,
-        candidateResume: candidateResume || undefined,
-        acceptedExperienceLevels: criteria.experience_levels ?? ['senior'],
-      }
-    );
-
-    console.log(`[TargetedScan] Claude returned ${matches.length} scored matches`);
-
-    // Save new (not-yet-in-DB) matches to the jobs table
-    const allowedWorkModes: string[] = criteria.allowed_work_modes ?? [];
-    let saved = 0;
-    for (const m of matches) {
-      if (!seenUrls.has(m.applyUrl)) {
-        const loc = (m.location ?? '').trim();
-        const locationOk = checkJobLocation(loc, criteria.locations ?? [], false, allowedWorkModes);
-        const finalTier = !locationOk
-          ? 'Probably Skip'
-          : (m.subScores && m.matchScore)
-            ? computeTier(m.matchScore, m.aiRisk, m.subScores, m.title, m.company, loc, tierSettings)
-            : (m.opportunityTier ?? 'unscored');
-
-        try {
-          await pool.query(
-            `INSERT INTO jobs (title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_score, ai_risk_reason, opportunity_tier, sub_scores)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-             ON CONFLICT (apply_url) DO NOTHING`,
-            [m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, scanSource, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskScore ?? null, m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null)]
-          );
-          saved++;
-        } catch (_e) { /* ignore individual insert errors */ }
-      }
-    }
-    console.log(`[TargetedScan] Saved ${saved} new jobs to DB`);
-    console.log(`───────────────────────────────────────────────────────────`);
-
-    // Return scored matches for immediate display
-    res.json({
-      jobs: matches.map(m => ({
-        id: null,
-        title: m.title,
-        company: m.company,
-        location: m.location,
-        salary: m.salary,
-        apply_url: m.applyUrl,
-        why_good_fit: m.whyGoodFit,
-        match_score: m.matchScore,
-        opportunity_tier: m.opportunityTier,
-        ai_risk: m.aiRisk,
-        source: scanSource,
-      })),
-      count: matches.length,
-      saved,
-      model_used: geminiResult.modelUsed,
-    });
+    // [Removed] Gemini Discovery — targeted scan now disabled
+    console.log('[TargetedScan] Gemini Discovery removed — targeted scan unavailable');
+    res.json({ jobs: [], skipped: true, skip_reason: '[Removed] Gemini Discovery feature' });
+    return;
   } catch (e) {
     console.error('[TargetedScan] Error:', e);
     res.status(500).json({ error: String(e) });
@@ -5531,8 +5343,6 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
     type Job = { title: string; company: string; location: string; salary?: string; applyUrl: string; description?: string; datePosted?: string; source: string; _fromJobSpy?: boolean; _fromGemini?: boolean };
     const allJobs: Job[] = [];
-    // Side-map: applyUrl → per-job metadata for Gemini-sourced jobs
-    const geminiMetaByUrl = new Map<string, { groundingMetadata?: object; confidence?: number }>();
     let companiesScanned = 0;
     const perCompanyStats: { name: string; type: string; jobs: number; error?: string }[] = [];
 
@@ -5623,68 +5433,9 @@ async function runScoutInBackground(runId: number): Promise<void> {
     // Pre-approved company names from the Claude-generated list (for Claude scoring context)
     const companyNames = scoutList.map(c => c.name);
 
-    await setStage(`JobSpy done (${allJobs.length} total) — running Gemini discovery…`);
+    // [Removed] Gemini Discovery block (Stage 2c)
+    await setStage(`JobSpy done (${allJobs.length} total) — preparing to score…`);
     await pool.query(`UPDATE scout_runs SET jobs_in_pipeline=$1 WHERE id=$2`, [allJobs.length, runId]).catch(() => {});
-    // ── Stage 2c: Gemini + Google Search grounding — supplemental discovery ──
-    let geminiJobsFound = 0;
-    let geminiDeduped = 0;
-    try {
-      const geminiResult = await runGeminiJobDiscovery({
-        target_roles:  criteria.target_roles ?? [],
-        locations:     criteria.locations ?? [],
-        work_type:     criteria.work_type ?? 'any',
-        must_have:     criteria.must_have ?? [],
-        nice_to_have:  criteria.nice_to_have ?? [],
-        avoid:         criteria.avoid ?? [],
-        industries:    criteria.industries ?? [],
-        min_salary:    criteria.min_salary ?? null,
-      });
-
-      if (!geminiResult.skipped && geminiResult.jobs.length > 0) {
-        // Merge Gemini results with existing allJobs — dedup by URL + company+title
-        const { merged, deduplicatedCount } = deduplicateJobLists(
-          allJobs as Array<ScrapedJob & { source: string; _fromJobSpy?: boolean }>,
-          geminiResult.jobs
-        );
-
-        geminiJobsFound = geminiResult.jobs.length;
-        geminiDeduped   = deduplicatedCount;
-        const netNew    = geminiJobsFound - deduplicatedCount;
-
-        // Store gemini metadata for net-new jobs so we can persist it to DB later
-        for (const gJob of geminiResult.jobs) {
-          if (!allJobs.some(j => j.applyUrl === gJob.applyUrl)) {
-            geminiMetaByUrl.set(gJob.applyUrl, {
-              groundingMetadata: gJob.geminiGroundingMetadata as object | undefined,
-              confidence:        gJob.ingestionConfidence,
-            });
-          }
-        }
-
-        // Rebuild allJobs from merged (preserves all existing + net-new Gemini jobs)
-        allJobs.length = 0;
-        for (const j of merged) {
-          allJobs.push({
-            title:       j.title,
-            company:     j.company,
-            location:    j.location,
-            salary:      j.salary,
-            applyUrl:    j.applyUrl,
-            description: j.description,
-            source:      j.source,
-            _fromJobSpy: (j as any)._fromJobSpy,
-            _fromGemini: (j as any)._fromGemini,
-          });
-        }
-
-        console.log(`[Gemini] ${geminiJobsFound} discovered → ${deduplicatedCount} dupes merged → ${netNew} net-new added`);
-        console.log(`[Gemini] Grounding sources: ${geminiResult.totalGroundingSources} | Queries: ${geminiResult.queriesUsed.join(', ')}`);
-      } else if (geminiResult.skipped) {
-        console.log(`[Gemini] Skipped: ${geminiResult.skipReason}`);
-      }
-    } catch (e) {
-      console.error(`[Gemini] Unexpected error (non-fatal):`, e);
-    }
 
     console.log(`\n──── SCRAPE RESULTS ────────────────────────────────────────`);
     console.log(`Total scraped: ${allJobs.length} raw listings from ${companiesScanned} companies`);
@@ -5737,6 +5488,8 @@ async function runScoutInBackground(runId: number): Promise<void> {
       // Empty / unknown location — treat as potentially remote; pass through
       const locTrim = jobLocation.trim();
       if (!locTrim || /^(unknown|n\/a|none)$/i.test(locTrim)) return { pass: true, reason: 'no location listed' };
+      // FIX 2: Workday "X Locations" — no city data available, let Claude decide
+      if (/^\d+\s+Locations?$/i.test(locTrim)) return { pass: true, reason: 'multi-location Workday — sending to Claude' };
       // "Remote" anywhere in location — always pass
       if (/remote/i.test(locTrim)) return { pass: true, reason: 'remote location' };
       // Location field matches a user-saved location
@@ -5989,8 +5742,13 @@ async function runScoutInBackground(runId: number): Promise<void> {
       const loc = (m.location ?? '').trim();
       let finalTier: string;
 
+      // FIX 2: Workday "X Locations" — pass through to Claude scoring (no city/state data)
+      const isWorkdayMultiLoc = /^\d+\s+Locations?$/i.test(loc);
+      if (isWorkdayMultiLoc) {
+        console.log(`  PASS (multi-location Workday — sending to Claude): "${loc}" for ${m.company} "${m.title}"`);
+      }
       // Apply location check + deterministic tier logic using our computeTier
-      const locationOk = checkJobLocation(loc, criteria.locations, false, allowedWorkModes);
+      const locationOk = isWorkdayMultiLoc || checkJobLocation(loc, criteria.locations, false, allowedWorkModes);
       if (!locationOk) {
         finalTier = 'Probably Skip';
       } else if (m.subScores && m.matchScore) {
@@ -5999,14 +5757,12 @@ async function runScoutInBackground(runId: number): Promise<void> {
         finalTier = m.opportunityTier ?? 'unscored';
       }
 
-      // Look up Gemini-specific metadata for this job (if it came from Gemini)
-      const geminiMeta = geminiMetaByUrl.get(m.applyUrl);
       const momWarning: string | null = null;
       await pool.query(
         `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, original_url, original_title, original_description, description, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_score, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
          ON CONFLICT (apply_url) DO NOTHING`,
-        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.applyUrl, m.title, m.description ?? null, m.description ?? null, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskScore ?? null, m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), geminiMeta?.groundingMetadata ? JSON.stringify(geminiMeta.groundingMetadata) : null, geminiMeta?.confidence ?? null, momWarning, datePosted]
+        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.applyUrl, m.title, m.description ?? null, m.description ?? null, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskScore ?? null, m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), null, null, momWarning, datePosted]
       );
     }
 
@@ -6081,9 +5837,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     console.log(`  ─── Raw pipeline ──────────────────────────────────────`);
     console.log(`  Raw jobs scraped:  ${allJobs.length}`);
     console.log(`  Source breakdown:  ${Object.entries(srcBreakdown).map(([k,v]) => `${k}: ${v}`).join(' | ')}`);
-    if (geminiJobsFound > 0) {
-      console.log(`  Gemini discovery:  ${geminiJobsFound} found → ${geminiDeduped} dupes → ${geminiJobsFound - geminiDeduped} net-new`);
-    }
+    // [Removed] Gemini discovery stats log
     console.log(`  ─── Filters ────────────────────────────────────────────`);
     console.log(`  After title filter:    ${toScore.length} (${droppedByTitle} dropped as non-sales)`);
     console.log(`  After location filter: ${toScore.length - droppedByLocation} (${droppedByLocation} dropped)`);

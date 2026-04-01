@@ -10,7 +10,7 @@
  * Same model waterfall as career_intel.ts.
  */
 
-import { GoogleGenAI, type GroundingChunk } from '@google/genai';
+// [Removed] Gemini import (GoogleGenAI)
 import type { Pool } from 'pg';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -163,55 +163,9 @@ Find at least 14 total companies. Include real companies with real data — no h
 
 // ── Core generation ────────────────────────────────────────────────────────────
 
-export async function generatePreIpo(criteria: PreIpoCriteria): Promise<PreIpoResult> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('GEMINI_API_KEY not set');
-
-  const ai = new GoogleGenAI({ apiKey });
-  const prompt = buildPreIpoPrompt(criteria);
-  const chain = buildCandidateChain();
-
-  let lastErr: unknown;
-  for (const candidate of chain) {
-    try {
-      console.log(`[PreIPO] Trying model: ${candidate.modelName}`);
-      const response = await ai.models.generateContent({
-        model: candidate.modelName,
-        contents: prompt,
-        config: { tools: [{ googleSearch: {} }] },
-      });
-
-      const rawText: string = response.text ?? '';
-      const start = rawText.indexOf('PREIPO_START');
-      const end   = rawText.indexOf('PREIPO_END');
-      if (start === -1 || end === -1) throw new Error('Markers not found in response');
-
-      const jsonStr = rawText.slice(start + 'PREIPO_START'.length, end).trim();
-      const parsed: PreIpoResult = JSON.parse(jsonStr);
-
-      // Count grounding sources
-      let groundingCount = 0;
-      try {
-        const chunks = (response as unknown as { candidates?: Array<{ groundingMetadata?: { groundingChunks?: GroundingChunk[] } }> })
-          ?.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
-        groundingCount = chunks.length;
-      } catch { /* ignore */ }
-
-      parsed.model_used = candidate.modelName;
-      parsed.grounding_sources_count = groundingCount;
-
-      // Sort by momentum_score descending
-      parsed.companies.sort((a, b) => (b.momentum_score ?? 0) - (a.momentum_score ?? 0));
-
-      console.log(`[PreIPO] Success: ${parsed.companies.length} companies via ${candidate.modelName}`);
-      return parsed;
-    } catch (err) {
-      console.error(`[PreIPO] ${candidate.modelName} failed:`, err);
-      lastErr = err;
-      if (!isModelUnavailableError(err)) break;
-    }
-  }
-  throw lastErr ?? new Error('All Gemini models failed for Pre-IPO generation');
+// [Removed] Gemini Pre-IPO generation
+export async function generatePreIpo(_criteria: PreIpoCriteria): Promise<PreIpoResult> {
+  throw new Error('[Removed] Pre-IPO feature requires Gemini which has been removed');
 }
 
 // ── DB helpers ─────────────────────────────────────────────────────────────────

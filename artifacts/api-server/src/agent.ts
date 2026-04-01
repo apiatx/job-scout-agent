@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { GoogleGenAI } from '@google/genai';
+// [Removed] Gemini import (GoogleGenAI)
 import type { ScrapedJob } from './scraper.js';
 
 const anthropic = new Anthropic({
@@ -60,6 +60,7 @@ export interface JobMatch {
   location: string;
   salary?: string;
   applyUrl: string;
+  description?: string | null;
   whyGoodFit: string;
   matchScore: number;
   isHardware: boolean;
@@ -87,105 +88,23 @@ interface CriteriaForAgent {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// getCompanyMomentum — Gemini-powered company health pre-check (48 h in-memory cache)
-// Returns 0-25 score feeding directly into companyQuality component.
-// ─────────────────────────────────────────────────────────────────────────────
+// [Removed] Gemini company momentum check — returns neutral default scores
+// getCompanyMomentum still exported for interface compatibility but Gemini removed.
 export async function getCompanyMomentum(
   companyName: string,
   isPreApproved: boolean,
 ): Promise<MomentumScore> {
   const cacheKey = companyName.toLowerCase().trim();
-
-  // Return in-process cached result if fresh (48 h)
   const mem = _momentumCache.get(cacheKey);
-  if (mem && Date.now() < mem.expiresAt) {
-    return { ...mem.data, cached: true };
-  }
+  if (mem && Date.now() < mem.expiresAt) return { ...mem.data, cached: true };
 
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) {
-    // No Gemini key — use a sensible default so scoring still works
-    const fallback: MomentumScore = {
-      companyName,
-      score: isPreApproved ? 18 : 10,
-      signals: [],
-      warning: null,
-      cached: false,
-    };
-    _momentumCache.set(cacheKey, { data: fallback, expiresAt: Date.now() + 48 * 3600 * 1000 });
-    return fallback;
-  }
-
-  const prompt = `You are a company intelligence analyst. Evaluate the current momentum and health of "${companyName}" as of today.
-
-Search the web for the most recent news (last 6 months preferred). Look for:
-- Recent funding rounds, IPO news, or financial results
-- Headcount growth or layoffs in the last 12 months
-- Product launches or major contract wins
-- Leadership stability (CEO/CRO changes are a flag)
-- Any legal issues, regulatory action, or public controversy
-
-Return ONLY a valid JSON object (no markdown, no other text):
-{
-  "score": <integer 0-25>,
-  "signals": [<up to 3 short positive signal strings, e.g. "Raised $120M Series C (Jan 2025)">],
-  "warning": <null or one-sentence red flag, e.g. "Laid off 20% of workforce in Q1 2025">,
-  "reasoning": "<one sentence summary>"
-}
-
-SCORING GUIDE:
-23-25: Elite momentum — major funding/IPO, strong growth, no red flags
-18-22: Healthy — stable growth, some positive signals, no major concerns
-13-17: Neutral — no clear signals either way, or pre-approved company without recent news
-8-12: Cautious — some negative signals (slowing growth, leadership turnover)
-0-7:  Red flag — layoffs, legal/regulatory problems, financial distress`;
-
-  const CANDIDATE_MODELS = ['gemini-3-flash-preview', 'gemini-flash-latest', 'gemini-pro-latest'];
-
-  let result: MomentumScore | null = null;
-
-  for (const modelName of CANDIDATE_MODELS) {
-    try {
-      const ai = new GoogleGenAI({ apiKey });
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: prompt,
-        config: { tools: [{ googleSearch: {} }] },
-      });
-
-      const text = (response.text ?? '').trim().replace(/```json|```/g, '').trim();
-      if (!text) continue;
-
-      const parsed = JSON.parse(text) as {
-        score?: number;
-        signals?: string[];
-        warning?: string | null;
-      };
-
-      result = {
-        companyName,
-        score:   Math.min(25, Math.max(0, Math.round(parsed.score ?? (isPreApproved ? 16 : 10)))),
-        signals: Array.isArray(parsed.signals) ? parsed.signals.slice(0, 3) : [],
-        warning: parsed.warning ?? null,
-        cached:  false,
-      };
-      console.log(`  [Momentum] ${companyName}: ${result.score}/25 via ${modelName}${result.warning ? ' ⚠ ' + result.warning : ''}`);
-      break;
-    } catch {
-      // Try next model
-    }
-  }
-
-  if (!result) {
-    result = {
-      companyName,
-      score: isPreApproved ? 16 : 10,
-      signals: [],
-      warning: null,
-      cached: false,
-    };
-  }
-
+  const result: MomentumScore = {
+    companyName,
+    score: isPreApproved ? 18 : 10,
+    signals: [],
+    warning: null,
+    cached: false,
+  };
   _momentumCache.set(cacheKey, { data: result, expiresAt: Date.now() + 48 * 3600 * 1000 });
   return result;
 }

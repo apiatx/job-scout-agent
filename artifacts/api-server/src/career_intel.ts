@@ -21,7 +21,7 @@
  *   - POST /api/career-intel/refresh triggers synchronous regeneration
  */
 
-import { GoogleGenAI, type GroundingChunk } from '@google/genai';
+// [Removed] Gemini import (GoogleGenAI)
 
 // ── Output types ──────────────────────────────────────────────────────────────
 
@@ -279,75 +279,7 @@ function rankAndNormaliseCards(
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-export async function generateCareerIntel(criteria: CareerIntelCriteria): Promise<CareerIntelResult> {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
-
-  const timeoutMs = parseInt(process.env.GEMINI_TIMEOUT_SECONDS ?? '45', 10) * 1000;
-  const candidates = buildCandidateChain();
-  const prompt = buildIntelPrompt(criteria);
-  const ai = new GoogleGenAI({ apiKey });
-
-  console.log(`\n──── CAREER INTEL GENERATION ─────────────────────────────────`);
-  console.log(`[CareerIntel] Candidate chain: ${candidates.map(c => c.modelName).join(' → ')}`);
-
-  for (const candidate of candidates) {
-    const { modelName, note } = candidate;
-    console.log(`[CareerIntel] Trying: ${modelName} (${note})`);
-
-    try {
-      const requestPromise = ai.models.generateContent({
-        model: modelName,
-        contents: prompt,
-        config: {
-          tools: [{ googleSearch: {} }],
-          temperature: 0.2,
-        },
-      });
-
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Timeout after ${timeoutMs / 1000}s`)), timeoutMs)
-      );
-
-      const response = await Promise.race([requestPromise, timeoutPromise]);
-      const text = response.text ?? '';
-      const groundingMeta = response.candidates?.[0]?.groundingMetadata ?? {};
-
-      const webSearchQueries: string[] = groundingMeta.webSearchQueries ?? [];
-      const groundingSources = (groundingMeta.groundingChunks ?? [])
-        .filter((c: GroundingChunk) => c.web?.uri)
-        .length;
-
-      console.log(`[CareerIntel] ✓ Model: ${modelName} — ${groundingSources} grounding sources, ${webSearchQueries.length} queries`);
-
-      const parsed = parseIntelFromText(text);
-      if (!parsed) {
-        throw new Error('Could not parse structured output from model response');
-      }
-
-      const ranked = rankAndNormaliseCards(parsed.companies ?? [], criteria, webSearchQueries);
-      console.log(`[CareerIntel] ${ranked.length} company cards ranked`);
-      console.log(`──────────────────────────────────────────────────────────────`);
-
-      return {
-        generated_at: new Date().toISOString(),
-        market_summary: parsed.market_summary ?? '',
-        themes: Array.isArray(parsed.themes) ? parsed.themes : [],
-        companies: ranked,
-        model_used: modelName,
-        grounding_sources_count: groundingSources,
-      };
-
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (isModelUnavailableError(err)) {
-        console.warn(`[CareerIntel] ✗ ${modelName} unavailable: ${msg} — trying next`);
-        continue;
-      }
-      console.error(`[CareerIntel] ✗ ${modelName} failed: ${msg}`);
-      throw err; // Non-availability errors bubble up
-    }
-  }
-
-  throw new Error(`All Career Intel model candidates exhausted: ${candidates.map(c => c.modelName).join(', ')}`);
+// [Removed] Gemini Career Intel generation
+export async function generateCareerIntel(_criteria: CareerIntelCriteria): Promise<CareerIntelResult> {
+  throw new Error('[Removed] Career Intel feature requires Gemini which has been removed');
 }

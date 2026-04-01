@@ -13,7 +13,7 @@
  * Model waterfall: gemini-3-flash-preview → gemini-3.1-pro-preview → gemini-flash-latest → gemini-pro-latest
  */
 
-import { GoogleGenAI, type GroundingChunk } from '@google/genai';
+// [Removed] Gemini import (GoogleGenAI)
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -238,78 +238,12 @@ function signalDefaultLabel(s: PulseSignal): string {
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
+// [Removed] Gemini Job Market Pulse generation
 export async function generateJobMarketPulse(
-  scoutStats: ScoutCompanyStat[],
-  criteria: { target_roles: string[]; industries: string[]; min_salary: number | null },
+  _scoutStats: ScoutCompanyStat[],
+  _criteria: { target_roles: string[]; industries: string[]; min_salary: number | null },
 ): Promise<JobMarketPulseResult> {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
-
-  const timeoutMs = parseInt(process.env.GEMINI_TIMEOUT_SECONDS ?? '45', 10) * 1000;
-  const chain = candidateChain();
-  const prompt = buildPulsePrompt(scoutStats, criteria);
-  const ai = new GoogleGenAI({ apiKey });
-
-  const statMap = new Map(scoutStats.map(s => [s.company_name.toLowerCase(), s]));
-
-  console.log(`\n──── JOB MARKET PULSE GENERATION ─────────────────────────────`);
-  console.log(`[JobMarketPulse] ${scoutStats.length} companies to assess | chain: ${chain.map(c => c.modelName).join(' → ')}`);
-
-  for (const { modelName, note } of chain) {
-    console.log(`[JobMarketPulse] Trying: ${modelName} (${note})`);
-    try {
-      const req = ai.models.generateContent({
-        model: modelName,
-        contents: prompt,
-        config: { tools: [{ googleSearch: {} }], temperature: 0.25 },
-      });
-      const resp = await Promise.race([req, new Promise<never>((_, r) => setTimeout(() => r(new Error(`Timeout ${timeoutMs / 1000}s`)), timeoutMs))]);
-      const text = resp.text ?? '';
-      const meta = resp.candidates?.[0]?.groundingMetadata ?? {};
-      const groundingSources = ((meta.groundingChunks ?? []) as GroundingChunk[]).filter(c => c.web?.uri).length;
-
-      console.log(`[JobMarketPulse] ✓ ${modelName} — ${groundingSources} grounding sources`);
-
-      const parsed = parsePulseFromText(text);
-      if (!parsed) throw new Error('Could not parse structured output');
-
-      // Merge scout stats into each card
-      const cards: PulseCompanyCard[] = (parsed.companies ?? []).map((raw: Partial<PulseCompanyCard>) => {
-        const stat = statMap.get((raw.company_name || '').toLowerCase());
-        return normaliseCard(raw, stat);
-      });
-
-      // Sort: pursue first, then by signal quality, then by scout job count
-      const sigOrder: Record<PulseSignal, number> = { true_growth:5, cautious:4, unknown:3, hype_risk:2, desperate_hiring:1, ai_risk:0 };
-      const recOrder: Record<string, number> = { pursue:4, watch:3, caution:2, avoid:1 };
-      cards.sort((a, b) => {
-        const ro = (recOrder[b.recommendation] ?? 0) - (recOrder[a.recommendation] ?? 0);
-        if (ro !== 0) return ro;
-        return (sigOrder[b.signal] ?? 0) - (sigOrder[a.signal] ?? 0);
-      });
-
-      console.log(`[JobMarketPulse] ${cards.length} company cards | mood: ${parsed.market_mood}`);
-      console.log(`──────────────────────────────────────────────────────────────`);
-
-      return {
-        generated_at: new Date().toISOString(),
-        pulse_headline: parsed.pulse_headline ?? '',
-        market_mood: (['hot','warm','cooling','mixed'].includes(parsed.market_mood as string) ? parsed.market_mood : 'mixed') as JobMarketPulseResult['market_mood'],
-        market_commentary: parsed.market_commentary ?? '',
-        stats: buildStats(scoutStats, criteria),
-        companies: cards,
-        model_used: modelName,
-        grounding_sources_count: groundingSources,
-      };
-
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (isUnavailable(err)) { console.warn(`[JobMarketPulse] ✗ ${modelName} unavailable — trying next`); continue; }
-      console.error(`[JobMarketPulse] ✗ ${modelName} failed: ${msg}`);
-      throw err;
-    }
-  }
-  throw new Error('All Job Market Pulse model candidates exhausted');
+  throw new Error('[Removed] Job Market Pulse feature requires Gemini which has been removed');
 }
 
 // ── Stats builder (from raw DB data, no AI needed) ────────────────────────────

@@ -1,6 +1,6 @@
 import Parser from 'rss-parser';
 import { Pool } from 'pg';
-import { GoogleGenAI } from '@google/genai';
+// [Removed] Gemini import (GoogleGenAI)
 
 const parser = new Parser({
   timeout: 8000,
@@ -82,9 +82,10 @@ const GEMINI_MODELS = [
   'gemini-flash-latest',
 ];
 
+// [Removed] Gemini article analysis — returns empty array
 export async function analyzeArticleBatch(
-  articles: Array<{ url: string; title: string; source: string; description: string }>,
-  geminiKey: string
+  _articles: Array<{ url: string; title: string; source: string; description: string }>,
+  _geminiKey: string
 ): Promise<Array<{
   url: string;
   company_name: string;
@@ -98,73 +99,7 @@ export async function analyzeArticleBatch(
   sector: string;
   tags: string[];
 }>> {
-  if (!articles.length) return [];
-
-  const ai = new GoogleGenAI({ apiKey: geminiKey });
-
-  const articlesText = articles.map((a, i) =>
-    `[${i + 1}] SOURCE: ${a.source}\nTITLE: ${a.title}\nURL: ${a.url}\nDESCRIPTION: ${a.description || 'N/A'}`
-  ).join('\n\n---\n\n');
-
-  const prompt = `You are a B2B sales intelligence analyst. For each news article below, research the primary company being covered and produce sales intelligence.
-
-Use your search capability to look up current information about each company: headcount, funding stage, recent hires, open sales roles, territory expansion.
-
-ARTICLES TO ANALYZE:
-${articlesText}
-
-Return a JSON array (one object per article, same order). Each object MUST include:
-{
-  "article_index": 1,
-  "company_name": "Primary company covered (or 'Multiple' if general)",
-  "summary": "2-3 sentence summary of why this matters for B2B sales reps",
-  "why_it_matters": "Specific sales angle — is this company buying? selling? expanding? launching?",
-  "hiring_signal": "STRONG/MODERATE/LOW/NONE — explain if they're building sales teams and what roles",
-  "sales_territory": "Geographic focus if determinable — e.g., 'North America', 'EMEA', 'Global', 'Unknown'",
-  "funding_stage": "Seed/Series A/B/C/D/E/Public/Profitable/Unknown + amount if mentioned",
-  "employee_count_est": "Estimated employee count (e.g., '50-100', '500-1000', '10,000+')",
-  "relevance_score": 0-100 (how relevant is this for a B2B enterprise software sales rep),
-  "sector": "Primary sector: SaaS/Cybersecurity/Infrastructure/Hardware/AI/Fintech/HealthTech/Other",
-  "tags": ["array", "of", "3-6", "relevant", "tags"]
-}
-
-Respond ONLY with valid JSON array, no markdown, no explanation.`;
-
-  let lastError: Error | null = null;
-  for (const modelName of GEMINI_MODELS) {
-    try {
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: prompt,
-        config: {
-          tools: [{ googleSearch: {} }],
-          temperature: 0.3,
-        },
-      });
-      const text = response.text ?? '';
-      const jsonMatch = text.match(/\[[\s\S]*\]/);
-      if (!jsonMatch) throw new Error('No JSON array in Gemini response');
-
-      const parsed: any[] = JSON.parse(jsonMatch[0]);
-      return parsed.map((item: any) => ({
-        url: articles[(item.article_index ?? 1) - 1]?.url ?? '',
-        company_name: item.company_name ?? 'Unknown',
-        summary: item.summary ?? '',
-        why_it_matters: item.why_it_matters ?? '',
-        hiring_signal: item.hiring_signal ?? 'UNKNOWN',
-        sales_territory: item.sales_territory ?? 'Unknown',
-        funding_stage: item.funding_stage ?? 'Unknown',
-        employee_count_est: item.employee_count_est ?? 'Unknown',
-        relevance_score: Math.min(100, Math.max(0, Number(item.relevance_score) || 0)),
-        sector: item.sector ?? 'Other',
-        tags: Array.isArray(item.tags) ? item.tags.slice(0, 8) : [],
-      }));
-    } catch (err) {
-      lastError = err as Error;
-      console.error(`[IndustryNews] Model ${modelName} failed:`, (err as Error).message);
-    }
-  }
-  throw lastError ?? new Error('All Gemini models failed');
+  return [];
 }
 
 export async function refreshIndustryNews(pool: Pool, geminiKey: string): Promise<{

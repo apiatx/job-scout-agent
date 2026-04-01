@@ -705,7 +705,7 @@ Use web search to find the URL. Return ONLY the single best URL on its own line,
     const response = await client.messages.create({
       model: 'claude-haiku-4-5',
       max_tokens: 512,
-      tools: [{ type: 'web_search_20250305' as const, name: 'web_search', max_uses: 3 }],
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }] as any[],
       messages: [{ role: 'user', content: prompt }],
     });
 
