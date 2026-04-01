@@ -2,11 +2,10 @@
  * company_classifier.ts
  *
  * Shared deterministic classification layer for jobs and companies.
- * Applied to ALL search sources (JobSpy, ATS scraping, Perplexity) via the
- * shared runScoutInBackground pipeline — NOT a Quick-Search-only feature.
+ * Applied to ALL search sources via the shared runScoutInBackground pipeline.
  *
  * Two classification dimensions:
- *   CompanyType     — is this a real employer or noise (staffing/agency/job_board)?
+ *   CompanyType     — is this a real employer in the right space, or noise?
  *   IndustryCategory — what industry segment does this company operate in?
  *
  * Rules are purely deterministic (keyword + pattern matching).
@@ -18,7 +17,7 @@
 export type CompanyType =
   | 'direct_employer'
   | 'staffing_recruiting'
-  | 'agency_services'
+  | 'agency_services'       // IT consulting, advertising agencies, management consulting
   | 'healthcare_provider'
   | 'job_board'
   | 'unknown';
@@ -35,6 +34,11 @@ export type IndustryCategory =
   | 'generic_saas'
   | 'staffing_recruiting'
   | 'healthcare'
+  | 'advertising_agency'
+  | 'construction_engineering'
+  | 'cleantech_energy'
+  | 'it_services_consulting'
+  | 'financial_services'
   | 'other'
   | 'unknown';
 
@@ -54,6 +58,50 @@ const KNOWN_STAFFING_NAMES = new Set([
   'hired', 'toptal', 'turing', 'andela', 'triplebyte', 'crossover',
   'acceleration partners', 'talentify', 'direct recruiters', 'talent inc',
   'revitalized recruiters', 'high alpha innovation', 'job mobz',
+  'meridianit', 'meridian it', 'meridian information technology',
+  'infosys bpm', 'wipro', 'tata consultancy', 'tcs', 'hcl technologies',
+  'cognizant', 'tech mahindra', 'mphasis', 'hexaware', 'niit technologies',
+  'syntel', 'mastech', 'igate', 'patni computer', 'rackspace managed',
+]);
+
+const KNOWN_AGENCY_SERVICE_NAMES = new Set([
+  'publicis groupe', 'publicis', 'wpp', 'omnicom', 'interpublic', 'havas',
+  'dentsu', 'grey', 'bbdo', 'jwt', 'ogilvy', 'saatchi', 'mcann',
+  'accenture', 'deloitte digital', 'ibm consulting', 'capgemini', 'atos',
+  'hitachi solutions', 'hitachi vantara', 'hitachi consulting',
+  'ntt data', 'fujitsu', 'unisys',
+  'invisible technologies', 'invisible.tech',
+  'a team', 'the a team',
+]);
+
+const KNOWN_JOB_BOARDS = new Set([
+  'indeed', 'linkedin', 'ziprecruiter', 'glassdoor', 'monster',
+  'careerbuilder', 'dice', 'simplyhired', 'handshake', 'snagajob',
+  'idealist', 'wayup', 'after college', 'internships.com',
+  'jobsforhumanity', 'jobs for humanity',
+  'smartdev', 'smartdev1',
+]);
+
+const HEALTHCARE_PROVIDER_PATTERNS = [
+  /\bhospital\b/i,
+  /\bhealth\s+system\b/i,
+  /\bmedical\s+center\b/i,
+  /\bclinic(s|al\s+center)?\b/i,
+  /\bnursing\s+(home|facility|center)\b/i,
+  /\bphysician\s+(group|practice|partners)\b/i,
+  /\bhealthcare\s+(system|network|group|provider)\b/i,
+  /\bmd\s+anderson\b/i,
+  /\bmemorial\s+health(care)?\b/i,
+  /\bchildren['s]*\s+hospital\b/i,
+  /\buniversity\s+hospital\b/i,
+  /\bregional\s+medical\s+center\b/i,
+];
+
+const HEALTHCARE_COMPANY_NAMES = new Set([
+  'alivecor', 'alive cor', 'docplanner', 'doc planner',
+  'teladoc', 'doximity', 'veeva', 'epic systems', 'cerner',
+  'allscripts', 'athenahealth', 'nextgen healthcare',
+  'healthstream', 'privia health', 'modernizing medicine',
 ]);
 
 const STAFFING_NAME_PATTERNS = [
@@ -71,25 +119,14 @@ const STAFFING_NAME_PATTERNS = [
   /\bcontract\s+staffing\b/i,
 ];
 
-const KNOWN_JOB_BOARDS = new Set([
-  'indeed', 'linkedin', 'ziprecruiter', 'glassdoor', 'monster',
-  'careerbuilder', 'dice', 'simplyhired', 'handshake', 'snagajob',
-  'idealist', 'wayup', 'after college', 'internships.com',
-]);
-
-const HEALTHCARE_PROVIDER_PATTERNS = [
-  /\bhospital\b/i,
-  /\bhealth\s+system\b/i,
-  /\bmedical\s+center\b/i,
-  /\bclinic(s|al\s+center)?\b/i,
-  /\bnursing\s+(home|facility|center)\b/i,
-  /\bphysician\s+(group|practice|partners)\b/i,
-  /\bhealthcare\s+(system|network|group|provider)\b/i,
-  /\bmd\s+anderson\b/i,
-  /\bmemorial\s+health(care)?\b/i,
-  /\bchildren['s]*\s+hospital\b/i,
-  /\buniversity\s+hospital\b/i,
-  /\bregional\s+medical\s+center\b/i,
+const AGENCY_SERVICES_PATTERNS = [
+  /\b(it|technology)\s+(solutions|services|consulting)\s+(llc|inc|group|corp|gmbh|ltd)\b/i,
+  /\bmanaged\s+(it|technology)\s+services?\b/i,
+  /\bsystems?\s+integrator\b/i,
+  /\bdigital\s+(agency|transformation\s+firm)\b/i,
+  /\badvertising\s+agency\b/i,
+  /\bmarketing\s+agency\b/i,
+  /\boutso(urcing|urced)\s+(firm|company|partner)\b/i,
 ];
 
 function classifyCompanyType(companyName: string, urlSlug = ''): { type: CompanyType; confidence: 'high' | 'medium' | 'low'; signal: string } {
@@ -111,7 +148,20 @@ function classifyCompanyType(companyName: string, urlSlug = ''): { type: Company
     }
   }
 
+  // ── Agency / consulting services ───────────────────────────────────────────
+  if (KNOWN_AGENCY_SERVICE_NAMES.has(lower)) {
+    return { type: 'agency_services', confidence: 'high', signal: `known_agency:${lower}` };
+  }
+  for (const p of AGENCY_SERVICES_PATTERNS) {
+    if (p.test(companyName)) {
+      return { type: 'agency_services', confidence: 'medium', signal: `agency_pattern:${p.source}` };
+    }
+  }
+
   // ── Healthcare provider ────────────────────────────────────────────────────
+  if (HEALTHCARE_COMPANY_NAMES.has(lower)) {
+    return { type: 'healthcare_provider', confidence: 'high', signal: `known_healthcare:${lower}` };
+  }
   for (const p of HEALTHCARE_PROVIDER_PATTERNS) {
     if (p.test(companyName)) {
       return { type: 'healthcare_provider', confidence: 'medium', signal: `healthcare_pattern:${p.source}` };
@@ -134,7 +184,7 @@ const INDUSTRY_SIGNAL_MAP: Partial<Record<IndustryCategory, IndustrySignals>> = 
 
   ai_infrastructure: {
     namePatterns: [
-      /\b(akash(network)?|centml|groq|cerebras|lambda\s+labs?|together\s+ai|replicate|modal(\s+labs?)?|runpod|coreweave|voltage\s+park|octoai|fireworks(\s+ai)?|baseten|anyscale|inflection(\s+ai)?|mistral(\s+ai)?|cohere|scale\s+ai|hugging\s+face|wandb|weights[\s&]+biases|determined\s+ai|cudo\s+compute|vast\.ai|gpu\.net|paperspace|gradient|phoenix\s+nap|hyperstack|imbue|stability\s+ai)\b/i,
+      /\b(akash(network)?|centml|groq|cerebras|lambda\s+labs?|together\s+ai|replicate|modal(\s+labs?)?|runpod|coreweave|voltage\s+park|octoai|fireworks(\s+ai)?|baseten|anyscale|inflection(\s+ai)?|mistral(\s+ai)?|cohere|scale\s+ai|hugging\s+face|wandb|weights[\s&]+biases|determined\s+ai|cudo\s+compute|vast\.ai|gpu\.net|paperspace|gradient|phoenix\s+nap|hyperstack|imbue|stability\s+ai|tensorwave|tensor\s+wave|evergrid|fiddler(\s+ai)?|rescale|andromeda(\s+systems?)?|tigerdata|tiger\s+data)\b/i,
     ],
     titlePatterns: [
       /\b(gpu\s+cloud|ai\s+accelerator|ai\s+cloud|ml\s+infrastructure|inference\s+(platform|cluster|cloud)|model\s+serving|ai\s+platform|llm\s+(platform|training|inference)|foundation\s+model)\b/i,
@@ -170,7 +220,7 @@ const INDUSTRY_SIGNAL_MAP: Partial<Record<IndustryCategory, IndustrySignals>> = 
 
   electronic_components: {
     namePatterns: [
-      /\b(molex|amphenol|te\s+connectivity|vishay|keysight|national\s+instruments|rohde\s+&\s+schwarz|murata|tdk|yageo|bourns|bel\s+fuse|littelfuse|panasonic\s+(electronic|industrial)|epson|kyocera|kyocera\s+avx|avx|ttm\s+technologies|isola|rogers\s+corp|park\s+electrochemical|moog|curtiss-wright|heico|esterline)\b/i,
+      /\b(molex|amphenol|te\s+connectivity|vishay|keysight|national\s+instruments|rohde\s+&\s+schwarz|murata|tdk|yageo|bourns|bel\s+fuse|littelfuse|panasonic\s+(electronic|industrial)|epson|kyocera|kyocera\s+avx|avx|ttm\s+technologies|isola|rogers\s+corp|park\s+electrochemical|moog|curtiss-wright|heico|esterline|wind\s+river|windriver)\b/i,
     ],
     titlePatterns: [
       /\b(electronic\s+components?|sensors?\s+(division|business)|embedded\s+systems?|iot\s+(solutions?|platform)|pcb|circuit\s+board|ems\s+(provider|manufacturer)|contract\s+manufacturing)\b/i,
@@ -182,7 +232,7 @@ const INDUSTRY_SIGNAL_MAP: Partial<Record<IndustryCategory, IndustrySignals>> = 
 
   servers_data_center: {
     namePatterns: [
-      /\b(supermicro|super\s+micro|dell\s+(emc|technologies)|hpe|hewlett\s+packard\s+enterprise|lenovo\s+(dcg|data\s+center)|quanta\s+(cloud|computer)|wiwynn|gigabyte\s+server|asus\s+(server|asmb)|pure\s+storage|netapp|cohesity|commvault|veeam|nutanix|zerto|druva|rubrik|scality|vast\s+data|hammerspace|qumulo|cloudian|seagate\s+(exos|lyve)|western\s+digital\s+data\s+center|backblaze|nerdio|weka|penguin\s+solutions|cray|sgimips|dataon|45drives)\b/i,
+      /\b(supermicro|super\s+micro|dell\s+(emc|technologies)|hpe|hewlett\s+packard\s+enterprise|lenovo\s+(dcg|data\s+center)|quanta\s+(cloud|computer)|wiwynn|gigabyte\s+server|asus\s+(server|asmb)|pure\s+storage|purestorage|netapp|cohesity|commvault|veeam|nutanix|zerto|druva|rubrik|scality|vast\s+data|hammerspace|qumulo|cloudian|seagate\s+(exos|lyve)|western\s+digital\s+data\s+center|backblaze|nerdio|weka|penguin\s+solutions|cray|sgimips|dataon|45drives)\b/i,
     ],
     titlePatterns: [
       /\b(data\s+center\s+(infrastructure|solutions?|sales?)|server\s+(hardware|infrastructure|solutions?)|colocation|bare\s+metal|hpc\s+(solutions?|cluster)|hyperscaler|compute\s+(cluster|infrastructure)|storage\s+systems?)\b/i,
@@ -194,7 +244,7 @@ const INDUSTRY_SIGNAL_MAP: Partial<Record<IndustryCategory, IndustrySignals>> = 
 
   networking: {
     namePatterns: [
-      /\b(cisco|juniper\s+(networks?)?|arista\s+(networks?)?|palo\s+alto\s+networks?|fortinet|extreme\s+networks?|calix|ciena|ribbon\s+communications?|lumen\s+(technologies?)?|commscope|corning\s+(optical|cable)|netscout|spirent|keysight\s+network|sycamore\s+networks?|cradlepoint|cato\s+networks?|versa\s+networks?|aryaka|cloudflare|fastly|akamai|zscaler|netskope|illumio|f5(\s+networks?)?|a10\s+networks?|radware|barracuda|sonicwall|watchguard|aerohive|ruckus|ubiquiti|cambium\s+networks?|siklu|mimosa|dejima|viptela|silverpeak|talari|velocloud)\b/i,
+      /\b(cisco|juniper\s+(networks?)?|arista\s+(networks?)?|palo\s+alto\s+networks?|fortinet|extreme\s+networks?|calix|ciena|ribbon\s+communications?|lumen\s+(technologies?)?|commscope|corning\s+(optical|cable)|netscout|spirent|keysight\s+network|sycamore\s+networks?|cradlepoint|cato\s+networks?|versa\s+networks?|aryaka|cloudflare|fastly|akamai|zscaler|netskope|illumio|f5(\s+networks?)?|a10\s+networks?|radware|barracuda|sonicwall|watchguard|aerohive|ruckus|ubiquiti|cambium\s+networks?|siklu|mimosa|dejima|viptela|silverpeak|talari|velocloud|netgear|nordsec|nord\s+security)\b/i,
     ],
     titlePatterns: [
       /\b(networking\s+(infrastructure|solutions?|equipment)|sd-wan|network\s+(fabric|security|monitoring|operations?|infrastructure)|routing\s+(hardware|protocols?)|switching\s+(fabric|hardware)|mpls|firewall\s+(platform|solutions?)|nfv|sdn(\s+platform)?|sase|sse)\b/i,
@@ -206,7 +256,7 @@ const INDUSTRY_SIGNAL_MAP: Partial<Record<IndustryCategory, IndustrySignals>> = 
 
   database: {
     namePatterns: [
-      /\b(mongodb|snowflake|databricks|cockroach\s+labs?|planetscale|singlestore|couchbase|clickhouse|neon(\s+db)?|supabase|timescaledb|yugabyte|arangodb|neo4j|tigergraph|redis(\s+labs?)?|aerospike|scylladb|cassandra|mariadb|percona|vitess|tidb|pingcap|starburst|dremio|imply|rockset|materialize|firebolt|turso|xata|edgedb|surrealdb|fauna|convex|upstash|momento|dynatrace\s+db|influxdb|influx\s+data|questdb|kdb|cratedb)\b/i,
+      /\b(mongodb|snowflake|databricks|cockroach\s+labs?|planetscale|singlestore|couchbase|clickhouse|neon(\s+db)?|supabase|timescaledb|yugabyte|arangodb|neo4j|tigergraph|redis(\s+labs?)?|aerospike|scylladb|cassandra|mariadb|percona|vitess|tidb|pingcap|starburst|dremio|imply|rockset|materialize|firebolt|turso|xata|edgedb|surrealdb|fauna|convex|upstash|momento|dynatrace\s+db|influxdb|influx\s+data|questdb|kdb|cratedb|teleport(\s+hq)?)\b/i,
     ],
     titlePatterns: [
       /\b(database\s+(infrastructure|platform|solutions?|products?)|data\s+(warehouse|platform|lake\s+house?|infrastructure)|distributed\s+(database|systems?)|object\s+storage\s+(solutions?|platform)|olap\s+(engine|platform)|vector\s+(database|db|search))\b/i,
@@ -218,7 +268,7 @@ const INDUSTRY_SIGNAL_MAP: Partial<Record<IndustryCategory, IndustrySignals>> = 
 
   infrastructure_security: {
     namePatterns: [
-      /\b(crowdstrike|sentinelone|wiz(\s+cloud)?|orca\s+security|lacework|darktrace|illumio|zscaler|netskope|vectra(\s+ai)?|axonius|tenable|qualys|rapid7|snyk|aqua\s+security|sysdig|cybereason|cyberark|sailpoint|delinea|telos|netsurion|secureworks|trustwave|exabeam|sumo\s+logic|logrhythm|securonix|devo(\s+technology)?|gurucul|varonis|forcepoint|proofpoint|mimecast|abnormal\s+security|ironscales|cofense|tessian|valimail|agari|red\s+canary|expel|arctic\s+wolf|huntress|blumira|detectify|intigriti|bugcrowd|hackerone|synack|cobalt\s+io|pentest(\s+tools?)?|threatlocker|xcitium|comodo|malwarebytes|webroot|sophos|bitdefender|eset|kaspersky|trend\s+micro|checkpoint|trellix|broadcom\s+security)\b/i,
+      /\b(crowdstrike|sentinelone|wiz(\s+cloud)?|orca\s+security|lacework|darktrace|illumio|zscaler|netskope|vectra(\s+ai)?|axonius|tenable|qualys|rapid7|snyk|aqua\s+security|sysdig|cybereason|cyberark|sailpoint|delinea|telos|netsurion|secureworks|trustwave|exabeam|sumo\s+logic|logrhythm|securonix|devo(\s+technology)?|gurucul|varonis|forcepoint|proofpoint|mimecast|abnormal\s+security|ironscales|cofense|tessian|valimail|agari|red\s+canary|expel|arctic\s+wolf|huntress|blumira|detectify|intigriti|bugcrowd|hackerone|synack|cobalt\s+io|pentest(\s+tools?)?|threatlocker|xcitium|comodo|malwarebytes|webroot|sophos|bitdefender|eset|kaspersky|trend\s+micro|checkpoint|trellix|broadcom\s+security|menlo\s+security|menlosecurity)\b/i,
     ],
     titlePatterns: [
       /\b(infrastructure\s+security|zero\s+trust\s+(network|architecture|platform|security)|cloud\s+security\s+(platform|posture|solutions?)|network\s+security\s+(solutions?|platform)|endpoint\s+(security|protection|detection)|siem\s+(platform|solution)|soar\s+(platform|solution)|sase\s+(platform|solution)|sse\s+platform|cnapp|cspm|cwpp|cdr|ciem|itdr|xdr\s+platform|edr\s+solution)\b/i,
@@ -230,7 +280,7 @@ const INDUSTRY_SIGNAL_MAP: Partial<Record<IndustryCategory, IndustrySignals>> = 
 
   generic_saas: {
     namePatterns: [
-      /\b(salesforce|hubspot|zendesk|freshworks|intercom|stripe|twilio|sendgrid|mailchimp|marketo|pardot|eloqua|gainsight|totango|churnzero|mixpanel|amplitude|segment|braze|iterable|klaviyo|attentive|yotpo|gorgias|dixa|kustomer|zoho|pipedrive|close\.io|outreach|salesloft|gong|chorus|clari|drift|qualified|6sense|demandbase|bombora|leadiq|apollo\.io|lusha|zoominfo|stackadapt|adroll|criteo|the\s+trade\s+desk|adobe\s+(marketing|experience)|workfront|asana|notion|clickup|monday\.com|airtable|smartsheet|coda|height\s+(app)?|shortcut|basecamp|trello|miro|figma|canva|loom|dovetail|productboard|pendo|fullstory|heap|hotjar|logrocket|datadog|new\s+relic|dynatrace|appdynamics|splunk|elastic|grafana|hashicorp|postman|insomnia|atlassian|linear\.app|auditboard|soc2|workiva|vanta|drata|lacework|tugboat\s+logic|hyperproof|zingtree|servicetitan|jobber|housecall\s+pro|mindbody|squarespace|wix|webflow|shopify|bigcommerce|magento|netsuite|sage\s+intacct|coupa|tipalti|bill\.com|expensify|concur|brex|ramp|bench|gusto|rippling|bamboohr|lattice|culture\s+amp|leapsome|15five|engagedly|reflektive|workday(\s+hcm)?|successfactors|cornerstone\s+ondemand|saba|docebo|absorb|bridge|lessonly|seismic|highspot|mindtickle|showpad|bigtincan)\b/i,
+      /\b(salesforce|hubspot|zendesk|freshworks|intercom|stripe|twilio|sendgrid|mailchimp|marketo|pardot|eloqua|gainsight|totango|churnzero|mixpanel|amplitude|segment|braze|iterable|klaviyo|attentive|yotpo|gorgias|dixa|kustomer|zoho|pipedrive|outreach|salesloft|gong|chorus|clari|drift|qualified|6sense|demandbase|bombora|leadiq|zoominfo|stackadapt|adroll|criteo|the\s+trade\s+desk|workfront|asana|notion|clickup|monday\.com|airtable|smartsheet|coda|basecamp|trello|miro|figma|canva|loom|dovetail|productboard|pendo|fullstory|heap|hotjar|logrocket|datadog|new\s+relic|dynatrace|appdynamics|splunk|elastic|grafana|hashicorp|postman|atlassian|vanta|drata|servicetitan|jobber|housecall\s+pro|mindbody|squarespace|wix|webflow|shopify|bigcommerce|magento|netsuite|sage\s+intacct|coupa|tipalti|expensify|concur|brex|ramp|bench|gusto|rippling|bamboohr|lattice|culture\s+amp|workday|successfactors|cornerstone\s+ondemand|docebo|absorb|seismic|highspot|mindtickle|showpad|xplor|xplor\s+technologies|reonic)\b/i,
     ],
     descPatterns: [
       /\b(saas\s+(platform|company|product|startup|application|solution|tool)|cloud\s+software\s+(company|platform|provider)|workflow\s+automation\s+platform|crm\s+(platform|system)|marketing\s+automation\s+(platform|tool)|customer\s+success\s+(platform|software)|sales\s+(engagement|enablement)\s+platform|revenue\s+operations\s+(platform|tool)|ad\s+tech|adtech\s+platform|martech\s+(stack|platform|company)|hr\s+tech|hrtech\s+platform|legal\s+tech|legaltech|proptech|insurtech)\b/i,
@@ -238,6 +288,66 @@ const INDUSTRY_SIGNAL_MAP: Partial<Record<IndustryCategory, IndustrySignals>> = 
     titlePatterns: [],
     negativeNames: [
       /\b(infrastructure|semiconductor|photonics|optical|networking|data\s+center|gpu|ai\s+(accelerator|chip|infrastructure)|security\s+(platform|infrastructure))\b/i,
+    ],
+  },
+
+  advertising_agency: {
+    namePatterns: [
+      /\b(publicis|wpp|omnicom|interpublic|havas|dentsu|grey|bbdo|jwt|ogilvy|saatchi|mccann|leo\s+burnett|ddb|tbwa|y&r|vmly&r|razorfish|possible|sapient|digitas|performics|zenithoptimedia|starcom|mediavest|mindshare|maxus|mec|carat|isobar|isobar|serviceplan|draftfcb|mullen\s+lowe|draft\s+worldwide)\b/i,
+    ],
+    titlePatterns: [
+      /\b(advertising\s+(agency|network|group)|media\s+(buying|planning|agency)|creative\s+agency|brand\s+agency|ad\s+(agency|network|tech\s+firm))\b/i,
+    ],
+    descPatterns: [
+      /\b(advertising\s+(agency|network|holding|group)|media\s+(buying|planning\s+agency)|creative\s+agency|integrated\s+marketing\s+communications|brand\s+(strategy|agency))\b/i,
+    ],
+  },
+
+  construction_engineering: {
+    namePatterns: [
+      /\b(aecom|bechtel|fluor|kbr(\s+inc)?|jacobs\s+(engineering)?|parsons(\s+corp)?|turner\s+construction|skanska|hok|gensler|stantec|wsatkins|atkins|arup|mott\s+macdonald|arcadis|cdm\s+smith|tetra\s+tech|black\s+&\s+veatch|burns\s+&\s+mcdonnell)\b/i,
+    ],
+    titlePatterns: [
+      /\b(civil\s+engineering|construction\s+(management|services)|infrastructure\s+(engineering|construction)|project\s+management\s+(construction|engineering)|epc\s+(firm|contractor)|general\s+contractor)\b/i,
+    ],
+    descPatterns: [
+      /\b(civil\s+(engineering|infrastructure)|construction\s+(management|services|project)|engineering\s+(procurement|construction)|epc\s+(project|contract)|general\s+contracting|design[\s-]build\s+(firm|contractor))\b/i,
+    ],
+  },
+
+  cleantech_energy: {
+    namePatterns: [
+      /\b(reonic|sunrun|sunpower|sunnova|vivint\s+solar|tesla\s+energy|enphase|solaredge|solarwinds(?!\s+network)|nextracker|firstsolar|first\s+solar|suntech|canadian\s+solar|jinko\s+solar|longi\s+solar|siemens\s+energy|ge\s+vernova|vestas|orsted|northland\s+power|pattern\s+energy|nextera\s+energy)\b/i,
+    ],
+    titlePatterns: [
+      /\b(renewable\s+(energy|power)|solar\s+(energy|power|installation|sales)|wind\s+(energy|power|turbine)|clean\s+energy|cleantech|energy\s+storage\s+(system|solutions?)|ev\s+charging\s+(solutions?|network)|electrification)\b/i,
+    ],
+    descPatterns: [
+      /\b(renewable\s+(energy|power|generation)|solar\s+(panels?|installation|photovoltaic|pv)|wind\s+(turbine|power|energy)|clean\s+(energy|power)|energy\s+storage\s+(battery|system)|ev\s+charging|grid\s+(modernization|decarbonization)|net\s+zero\s+energy)\b/i,
+    ],
+  },
+
+  it_services_consulting: {
+    namePatterns: [
+      /\b(accenture|deloitte(\s+consulting)?|ibm\s+(consulting|services)|capgemini|atos|infosys|wipro|tata\s+consultancy|tcs\b|hcl\s+(technologies|tech)|cognizant|tech\s+mahindra|mphasis|hexaware|niit\s+technologies|syntel|mastech|igate|kyndryl|dxc\s+technology|leidos|booz\s+allen|saic(\s+inc)?|gartner|forrester|idc(\s+research)?|hitachi\s+(solutions|vantara|consulting)|ntt\s+data|fujitsu(\s+america)?|unisys|logicalis|presidio|cdw(\s+corp)?|insight\s+direct|insight\s+enterprises|connection\s+(techsolve|inc)?|pc\s+connection|world\s+wide\s+technology|wwt\b|slalom|ness\s+digital|sapient|globe(\s+life)?|lumendata|meridian\s+it|meridianit|mirantis)\b/i,
+    ],
+    titlePatterns: [
+      /\b(it\s+(managed\s+services|outsourcing|consulting\s+firm)|technology\s+consulting\s+(firm|services)|systems?\s+integration\s+firm|managed\s+services?\s+provider|msp\s+(firm|company))\b/i,
+    ],
+    descPatterns: [
+      /\b(it\s+(managed\s+services|outsourcing|consulting\s+services)|technology\s+consulting\s+(services|firm)|systems?\s+integrator|managed\s+services?\s+provider|msp\s+(services?|company)|professional\s+services\s+(technology|it|technology\s+consulting))\b/i,
+    ],
+  },
+
+  financial_services: {
+    namePatterns: [
+      /\b(jpmorgan|jp\s+morgan|chase(\s+bank)?|goldman\s+sachs|morgan\s+stanley|bank\s+of\s+america|wells\s+fargo|citibank|citigroup|hsbc|barclays|deutsche\s+bank|credit\s+suisse|ubs|blackrock|vanguard|fidelity|charles\s+schwab|td\s+(bank|ameritrade)|american\s+express|visa(\s+inc)?|mastercard|paypal|square(\s+inc)?|robinhood|coinbase|kraken(\s+exchange)?|binance|gemini\s+trust)\b/i,
+    ],
+    titlePatterns: [
+      /\b(investment\s+(banking|management)|asset\s+management\s+firm|hedge\s+fund|private\s+equity\s+firm|venture\s+capital\s+firm|retail\s+banking|commercial\s+banking|financial\s+services\s+firm)\b/i,
+    ],
+    descPatterns: [
+      /\b(investment\s+(banking|management|firm)|asset\s+management|hedge\s+fund|private\s+equity|venture\s+capital\s+firm|retail\s+banking|commercial\s+lending|financial\s+(services|advisory|markets))\b/i,
     ],
   },
 
@@ -268,10 +378,10 @@ export function classifyJob(job: {
   // ── Step 2: Industry category ──────────────────────────────────────────────
   let industryCategory: IndustryCategory = 'unknown';
   let industryConfidence: 'high' | 'medium' | 'low' = 'low';
-  const text = `${company} ${title} ${description}`.toLowerCase();
 
   // Score each category against all three signal sources
   const scores: Partial<Record<IndustryCategory, number>> = {};
+  const text = `${company} ${title} ${description}`.toLowerCase();
 
   for (const [cat, signals_] of Object.entries(INDUSTRY_SIGNAL_MAP) as [IndustryCategory, IndustrySignals][]) {
     if (!signals_) continue;
@@ -304,9 +414,9 @@ export function classifyJob(job: {
   }
 
   // Determine confidence based on score
-  if (bestScore >= 3) industryConfidence = 'high';       // name-level match
-  else if (bestScore >= 2) industryConfidence = 'medium'; // title-level match
-  else if (bestScore >= 1) industryConfidence = 'low';    // description-only match
+  if (bestScore >= 3) industryConfidence = 'high';        // name-level match
+  else if (bestScore >= 2) industryConfidence = 'medium';  // title-level match
+  else if (bestScore >= 1) industryConfidence = 'low';     // description-only match
 
   // If company type is staffing, override industry category too
   if (companyType === 'staffing_recruiting') {
@@ -317,6 +427,9 @@ export function classifyJob(job: {
     industryConfidence = typeConf;
   } else if (companyType === 'job_board') {
     industryCategory = 'other';
+    industryConfidence = typeConf;
+  } else if (companyType === 'agency_services') {
+    industryCategory = 'it_services_consulting';
     industryConfidence = typeConf;
   }
 
@@ -387,35 +500,56 @@ export function mapUserIndustriesToCategories(userIndustries: string[]): Set<Ind
 
 export type FilterDecision = 'pass' | 'drop_company_type' | 'drop_industry';
 
+// Categories that are DEFINITIVELY off-target for hardware/infrastructure sales roles.
+// When the user has specific preferred categories, any job classified here gets dropped.
+const OFF_TARGET_CATEGORIES = new Set<IndustryCategory>([
+  'generic_saas',
+  'healthcare',
+  'staffing_recruiting',
+  'advertising_agency',
+  'construction_engineering',
+  'cleantech_energy',
+  'it_services_consulting',
+  'financial_services',
+  'other',
+]);
+
 export function getFilterDecision(
   cls:                JobClassification,
   preferredCategories: Set<IndustryCategory>,
 ): FilterDecision {
   // ── Hard drops: company type is definitively not a real employer ───────────
   if (
-    (cls.companyType === 'staffing_recruiting' || cls.companyType === 'healthcare_provider' || cls.companyType === 'job_board') &&
+    (cls.companyType === 'staffing_recruiting' ||
+     cls.companyType === 'healthcare_provider' ||
+     cls.companyType === 'job_board'           ||
+     cls.companyType === 'agency_services') &&
     cls.confidence !== 'low'
   ) {
     return 'drop_company_type';
   }
 
   // ── Industry whitelist — only when user has stated preferences ────────────
-  // Only drop when:
-  //   a) user has preferred categories (they've told us what they want)
-  //   b) we have HIGH confidence in the classification (name-level match)
-  //   c) the detected category is EXPLICITLY wrong (generic_saas or healthcare/staffing)
-  //   d) the category does NOT match any preferred category
-  //
-  // We never drop 'unknown' — we can't be sure, so we pass it through.
-  if (preferredCategories.size > 0 && cls.confidence === 'high') {
-    const isDefinitelyWrong = (
-      cls.industryCategory === 'generic_saas'   ||
-      cls.industryCategory === 'healthcare'     ||
-      cls.industryCategory === 'staffing_recruiting'
-    );
-    if (isDefinitelyWrong && !preferredCategories.has(cls.industryCategory)) {
+  if (preferredCategories.size > 0) {
+    const cat = cls.industryCategory;
+
+    // If it's clearly in a preferred category → always pass
+    if (preferredCategories.has(cat)) return 'pass';
+
+    // If we have HIGH confidence it's an off-target category → drop
+    if (cls.confidence === 'high' && OFF_TARGET_CATEGORIES.has(cat)) {
       return 'drop_industry';
     }
+
+    // If we have MEDIUM confidence it's an off-target category → also drop
+    // (medium = title-level match — strong enough to act on)
+    if (cls.confidence === 'medium' && OFF_TARGET_CATEGORIES.has(cat)) {
+      return 'drop_industry';
+    }
+
+    // 'unknown' at any confidence → pass through (can't be sure, let Claude decide)
+    // high/medium confidence in a NON-preferred category that's also not off-target
+    // (e.g. some edge category) → pass through to Claude
   }
 
   return 'pass';
