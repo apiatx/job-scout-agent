@@ -779,7 +779,7 @@ export async function scoreJobsWithClaude(
     })(),
     criteria.mustHave.length ? `Must have: ${criteria.mustHave.join(', ')}` : '',
     criteria.niceToHave.length ? `Nice to have: ${criteria.niceToHave.join(', ')}` : '',
-    criteria.avoid.length ? `Avoid (automatic disqualifier): ${criteria.avoid.join(', ')}` : '',
+    criteria.avoid.length ? `Avoid (strong negative signal — reduce score significantly, but do not automatically eliminate): ${criteria.avoid.join(', ')}` : '',
   ].filter(Boolean).join('\n');
 
   let preApprovedSection = '';

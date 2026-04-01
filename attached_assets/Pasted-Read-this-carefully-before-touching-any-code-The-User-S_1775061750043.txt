@@ -1,0 +1,154 @@
+Read this carefully before touching any code. The User Search Settings page 
+has multiple types of settings that must be handled differently. 
+Do NOT treat all settings the same way.
+
+════════════════════════════════════════════════
+CATEGORY 1 — HARD GATES (mandatory pre-filters)
+Job is SKIPPED ENTIRELY before Claude scoring if it fails these.
+════════════════════════════════════════════════
+
+MINIMUM BASE PAY
+- If a job has a listed salary AND it is below this value, skip it
+- If salary is unknown/not listed, do NOT skip — pass it through
+- Never skip a job just because salary is missing
+
+MINIMUM OTE
+- Same logic as base pay — only skip if OTE is explicitly listed AND below threshold
+- Unknown OTE = pass through
+
+WORK MODES (Remote-US, Remote-in-Territory, On-Site)
+- These are OR conditions — job passes if it matches ANY checked mode
+- Remote-US: passes if location contains "Remote" with no city requirement
+- Remote-in-Territory: passes if job is remote but requires living in a specific city/region
+- On-Site: passes if job requires physical office presence in one of user's saved locations
+- If a job's work mode is unclear or unspecified, pass it through — do not skip
+- NEVER skip a job just because it does not match a work mode if the mode is ambiguous
+
+════════════════════════════════════════════════
+CATEGORY 2 — OR FILTERS (any one match = pass)
+Job passes if it matches ANY ONE value in the list.
+Never require matching ALL values.
+════════════════════════════════════════════════
+
+LOCATIONS
+- Job passes if its location matches ANY saved location string
+- Job passes if its location contains "Remote" (regardless of saved locations)
+- Job passes if its TITLE contains any saved location string 
+  (e.g. title says "Southeast" and user has "south carolina" saved)
+- Job passes if location is blank/unknown
+- Job is only skipped if location is explicitly a city/state 
+  that matches NONE of the saved locations AND title has no location match
+- Matching is case-insensitive and partial 
+  (e.g. "georgia" matches "Atlanta, Georgia" and "Georgia, USA")
+
+TARGET ROLES  
+- Used to BUILD JobSpy searches, not to filter results
+- JobSpy searches are built as: each role title × each industry × each location
+- Do NOT use target roles as a hard post-search filter that eliminates jobs
+- Target roles inform Claude scoring (better role match = higher score)
+
+INDUSTRIES
+- Used to BUILD JobSpy searches
+- Also passed to Claude as scoring context
+- Do NOT use as a hard post-filter that eliminates jobs
+- A job from a semiconductor company is still valid even if 
+  "semiconductors" is not in the job description text
+
+COMPANY TYPE (Public / Private)
+- If both checked: no filtering, everything passes
+- If only Public checked: pass only publicly traded companies
+- If only Private checked: pass only private companies
+- If neither checked: no filtering, everything passes
+- Only apply this filter if company type is known — 
+  if unknown, pass the job through
+
+PRE-IPO FUNDING STAGE (Series A, B, C, D+, Bootstrapped, PE-Backed)
+- Only applies if at least one stage is checked AND company type includes Private
+- If none are checked: ignore this filter entirely, pass everything
+- If some are checked: job passes if company matches ANY checked stage
+- If company funding stage is unknown: pass the job through
+
+REVENUE SIZE
+- If none are checked: ignore this filter entirely
+- If some are checked: job passes if company revenue matches ANY checked range
+- If company revenue is unknown: pass the job through
+
+EMPLOYEE COUNT
+- If none are checked: ignore this filter entirely  
+- If some are checked: job passes if company size matches ANY checked range
+- Currently checked: 100-500, 500-1K, 1K-10K, 10K+
+- If company size is unknown: pass the job through
+
+════════════════════════════════════════════════
+CATEGORY 3 — SCORING CONTEXT (never filter, only inform scoring)
+These settings are passed to Claude to influence scores.
+They never eliminate jobs from the pipeline.
+════════════════════════════════════════════════
+
+VERTICAL NICHE KEYWORDS (federal, SLED, healthcare, FSI, DOD, etc.)
+- Pass to Claude as: "User has background in these verticals — 
+  jobs touching these verticals should score higher"
+- Never use to filter jobs out
+
+MUST-HAVE KEYWORDS
+- Pass to Claude as strong positive signals
+- A job mentioning these keywords scores significantly higher
+- Does NOT eliminate jobs that don't contain them
+
+NICE-TO-HAVE KEYWORDS
+- Pass to Claude as minor positive signals
+- Small score boost if present
+
+AVOID KEYWORDS
+- Pass to Claude as negative signals that reduce score
+- A job containing avoid keywords scores lower
+- Does NOT automatically eliminate jobs — 
+  let Claude decide if the job is still worth showing based on total score
+
+EXPERIENCE LEVEL (Junior, Mid, Senior, Strategic)
+- Checked levels = target levels (Mid + Senior currently checked)
+- Jobs at a level ABOVE the highest checked level → classify as Stretch automatically
+- Jobs at a level BELOW the lowest checked level → classify as Probably Pass
+- Jobs matching a checked level → eligible for Top Target or Fast Win
+
+TIER SCORE THRESHOLDS (Top Target: 65, Fast Win: 55, Stretch: 55)
+- These are the score cutoffs read from settings
+- Do not hardcode these values anywhere in the code
+- Read them from settings table at start of every scout run
+
+════════════════════════════════════════════════
+IMPLEMENTATION RULES
+════════════════════════════════════════════════
+
+1. Read ALL of these values from the settings table at the 
+   start of every scout run — never hardcode any value
+
+2. Log which settings were read at the start of the run so 
+   it is easy to verify correct values are being used
+
+3. When a job is filtered out, log the exact reason:
+   "SKIPPED: salary $80K listed, below minimum base $120K"
+   "SKIPPED: on-site Chicago, no location match, no remote indicator"
+
+4. When in doubt, PASS the job through to Claude scoring 
+   rather than skipping it — Claude is the intelligent layer, 
+   the pre-filters are only for obvious eliminations
+
+5. Company size, revenue, funding stage, and company type filters 
+   should only apply when that data is actually known for the company — 
+   never skip a job just because this metadata is missing
+
+6. The locations filter is OR logic — 
+   "Remote OR south carolina OR north carolina OR georgia OR florida" 
+   A job does not need to match all locations, just any one of them
+
+7. The industries filter builds searches but does NOT post-filter — 
+   do not eliminate jobs from non-listed industries if they 
+   pass the isCompanySafe() check
+
+Read the existing code in agent.ts, scout.ts, scraper.ts, 
+and the settings table schema completely before making any changes. 
+Understand the current filter implementation first, then apply 
+these rules as surgical fixes. Do not rebuild what is already working.
+
+Push to the feature branch when done.

@@ -5106,6 +5106,24 @@ async function runScoutInBackground(runId: number): Promise<void> {
     console.log(`\n════════════════════════════════════════════════════════════`);
     console.log(`SCOUT RUN #${runId} — ${companies.length} companies loaded from database`);
     console.log(`════════════════════════════════════════════════════════════`);
+    console.log(`\n──── CRITERIA READ FROM DB ─────────────────────────────────`);
+    console.log(`  Target roles     : ${(criteria.target_roles ?? []).join(', ') || '(none)'}`);
+    console.log(`  Industries       : ${(criteria.industries ?? []).join(', ') || '(none)'}`);
+    console.log(`  Locations        : ${(criteria.locations ?? []).join(', ') || '(none)'}`);
+    console.log(`  Work modes       : ${(criteria.allowed_work_modes ?? []).join(', ') || '(none)'}`);
+    console.log(`  Min base salary  : ${criteria.min_salary ? '$' + criteria.min_salary.toLocaleString() : '(none)'}`);
+    console.log(`  Min OTE          : ${(criteria as any).min_ote ? '$' + (criteria as any).min_ote.toLocaleString() : '(none)'}`);
+    console.log(`  Must have        : ${(criteria.must_have ?? []).join(', ') || '(none)'}`);
+    console.log(`  Nice to have     : ${(criteria.nice_to_have ?? []).join(', ') || '(none)'}`);
+    console.log(`  Avoid keywords   : ${(criteria.avoid ?? []).join(', ') || '(none)'}`);
+    console.log(`  Vertical niches  : ${(criteria.vertical_niches ?? []).join(', ') || '(none)'}`);
+    console.log(`  Experience levels: ${(criteria.experience_levels ?? []).join(', ') || '(none)'}`);
+    console.log(`  Company public   : ${(criteria as any).company_public ?? true}  Company private: ${(criteria as any).company_private ?? true}`);
+    console.log(`  Revenue bands    : ${((criteria as any).company_revenue_bands ?? []).join(', ') || '(none)'}`);
+    console.log(`  Employee bands   : ${((criteria as any).company_employee_bands ?? []).join(', ') || '(none)'}`);
+    console.log(`  Funding stages   : ${((criteria as any).company_funding_stages ?? []).join(', ') || '(none)'}`);
+    console.log(`  Tier thresholds  : Top Target≥${criteria.top_target_score ?? 65}  Fast Win≥${criteria.fast_win_score ?? 55}  Stretch≥${criteria.stretch_score ?? 55}`);
+    console.log(`───────────────────────────────────────────────────────────`);
     const byType: Record<string, number> = {};
     for (const c of companies) { byType[(c as any).ats_type] = (byType[(c as any).ats_type] || 0) + 1; }
     console.log(`  Companies by ATS type:`, byType);
@@ -5119,13 +5137,18 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
     await setStage(`Scraping ${companies.length} ATS job boards…`);
 
-    // Build title filter once before the ATS loop so Greenhouse/Lever can apply it
-    // at the source — this prevents hundreds of irrelevant jobs (engineering, finance,
-    // HR, etc.) from entering the pipeline just to be dropped later.
-    const atsTitleFilter = buildTitleFilter(criteria.target_roles);
-    if (atsTitleFilter) {
-      console.log(`ATS title filter active: ${criteria.target_roles.slice(0, 5).join(', ')}${criteria.target_roles.length > 5 ? '…' : ''}`);
-    }
+    // Build ATS title filter for Greenhouse/Lever/Workday source-level filtering.
+    // Per spec: target_roles must NOT be used as a hard filter — use a broad B2B sales/GTM
+    // allowlist instead. This still blocks engineering, design, HR, finance, etc. from
+    // entering the pipeline while letting through all adjacent sales role titles.
+    // NOTE: isBroadSalesRole() is defined later in the pipeline; we build an equivalent
+    //       RegExp here so we can pass it to the ATS scraper functions that expect a RegExp.
+    // A broad B2B sales/GTM signal pattern — matches any sales, revenue, BD, CSM, or
+    // client-facing role title. Non-matching titles (clearly engineering, HR, finance, etc.)
+    // are dropped at the ATS source level. The full two-pass check (signal + non-sales block)
+    // is applied in the main pipeline's isBroadSalesRole() function after collection.
+    const atsTitleFilter: RegExp = /\b(account|sales|revenue|business\s+development|client\s+(executive|manager|director|success|partner)|customer\s+(success|acquisition|growth)|channel|partner\s*(manager|sales|director)?|territory|field\s+sales|inside\s+sales|enterprise\s+(sales|account)|commercial|strategic\s+(account|sales)|regional\s+(account|sales|manager)|national\s+(account|sales)|hunter|ae\b|am\b|sdr\b|bdr\b|csm\b|bdm\b|gtm|quota|pre[\s-]?sales|solution\s+(consultant|sales)|alliances|growth\s+(executive|manager|director)|outbound|closing|expansion|renewal|upsell)\b/i;
+    console.log(`ATS title filter: broad B2B sales/GTM allowlist (not limited to target roles)`);
 
     // ── Stage 2a: Scrape Greenhouse, Lever, and Workday companies ──
     for (const c of companies) {
@@ -5303,32 +5326,37 @@ async function runScoutInBackground(runId: number): Promise<void> {
     for (const s of companiesWithZero) console.log(`    ✗ ${s.name} (${s.type})${s.error ? ` — ERROR: ${s.error}` : ''}`);
     console.log(`───────────────────────────────────────────────────────────`);
 
-    const titleFilter = buildTitleFilter(criteria.target_roles);
-    console.log(`\n──── TITLE FILTER ──────────────────────────────────────────`);
-    console.log(`Title filter regex: ${titleFilter?.source.slice(0, 200)}...`);
-    // All sources now have real job titles, so filter everything through title filter
-    const filtered = titleFilter
-      ? allJobs.filter((j) => titleFilter.test(j.title))
-      : allJobs;
-    const toScore = filtered;
-    const droppedByTitle = allJobs.length - filtered.length;
-    console.log(`Title filter: ${allJobs.length} total → ${filtered.length} passed (${droppedByTitle} dropped)`);
-    // Show per-company breakdown of what passed the title filter
-    const passedByCompany: Record<string, number> = {};
-    const droppedByCompany: Record<string, number> = {};
-    for (const j of allJobs) {
-      if (!titleFilter || titleFilter.test(j.title)) {
-        passedByCompany[j.company] = (passedByCompany[j.company] || 0) + 1;
-      } else {
-        droppedByCompany[j.company] = (droppedByCompany[j.company] || 0) + 1;
-      }
+    // Per spec: target_roles must NOT be used as a hard post-search filter.
+    // Instead use a broad B2B sales/GTM allowlist — only block titles that are
+    // unambiguously non-sales (engineering, design, analytics, HR, finance, legal).
+    // When in doubt, PASS the job through to Claude — Claude is the intelligent layer.
+    const SALES_SIGNAL_PATTERN = /\b(account|sales|revenue|business\s+development|client\s+(executive|manager|director|success|partner)|customer\s+(success|acquisition|growth)|channel|partner\s*(manager|sales|director)?|territory|field\s+sales|inside\s+sales|enterprise\s+(sales|account)|commercial|strategic\s+(account|sales)|regional\s+(account|sales|manager)|national\s+(account|sales)|hunter|ae\b|am\b|sdr\b|bdr\b|csm\b|bdm\b|gtm|quota|pre[\s-]?sales|solution\s+(consultant|sales)|alliances|growth\s+(executive|manager|director)|outbound|closing|expansion|renewal|upsell)\b/i;
+    const NON_SALES_SIGNAL_PATTERN = /^(software\s+engineer|senior\s+software|staff\s+software|principal\s+software|backend\s+engineer|frontend\s+engineer|full[\s-]?stack\s+engineer|data\s+engineer|data\s+scientist|data\s+analyst|machine\s+learning|ml\s+engineer|ai\s+engineer|devops\s+engineer|site\s+reliability|platform\s+engineer|mobile\s+engineer|ios\s+engineer|android\s+engineer|ux\s+designer|ui\s+designer|product\s+designer|graphic\s+designer|visual\s+designer|web\s+designer|recruiter\b|talent\s+acquisition|hr\s+generalist|hr\s+manager|hr\s+business\s+partner|human\s+resources\s+manager|financial\s+analyst|accounts\s+payable|accounts\s+receivable|bookkeeper|controller\b|tax\s+(manager|analyst|specialist|director|preparer)|payroll\s+specialist|legal\s+counsel|paralegal|attorney\b|lawyer\b|compliance\s+(analyst|manager|officer)|auditor\b|copywriter|content\s+(writer|creator|strategist|marketer)|technical\s+writer|journalist\b|it\s+support|help\s+desk|network\s+(admin|engineer|administrator)|systems\s+administrator|database\s+administrator|sysadmin)/i;
+
+    function isBroadSalesRole(title: string): boolean {
+      // Pass if title contains a clear sales/GTM signal
+      if (SALES_SIGNAL_PATTERN.test(title)) return true;
+      // Block if title starts with a clearly non-sales function
+      if (NON_SALES_SIGNAL_PATTERN.test(title.trim())) return false;
+      // Ambiguous or unlabeled title — pass through; Claude will decide
+      return true;
     }
-    console.log(`  Passed title filter by company:`);
-    for (const [co, count] of Object.entries(passedByCompany)) console.log(`    ✓ ${co}: ${count}`);
-    if (Object.keys(droppedByCompany).length > 0) {
-      console.log(`  Dropped by title filter (${Object.values(droppedByCompany).reduce((a,b) => a+b, 0)} total):`);
-      for (const [co, count] of Object.entries(droppedByCompany)) console.log(`    ✗ ${co}: ${count} dropped`);
+
+    console.log(`\n──── TITLE FILTER (broad B2B sales/GTM allowlist) ──────────`);
+    const droppedTitles: string[] = [];
+    const toScore = allJobs.filter((j) => {
+      const pass = isBroadSalesRole(j.title);
+      if (!pass) droppedTitles.push(`  ✗ [${j.company}] "${j.title}"`);
+      return pass;
+    });
+    const droppedByTitle = allJobs.length - toScore.length;
+    console.log(`Title filter: ${allJobs.length} total → ${toScore.length} passed (${droppedByTitle} dropped as non-sales)`);
+    if (droppedTitles.length > 0) {
+      console.log(`  Dropped titles (sample):`);
+      for (const t of droppedTitles.slice(0, 30)) console.log(t);
+      if (droppedTitles.length > 30) console.log(`  … and ${droppedTitles.length - 30} more`);
     }
+    console.log(`  NOTE: target_roles used for search-building and Claude scoring only — not for pre-filtering`);
     console.log(`───────────────────────────────────────────────────────────`);
 
     // ── Hard pre-filters (before Claude scoring) to save API costs ──
@@ -5357,20 +5385,17 @@ async function runScoutInBackground(runId: number): Promise<void> {
       return { pass: false, reason: `location "${locTrim}" not in prefs [${criteria.locations.join(', ')}]` };
     }
 
-    // 2. Avoid keywords hard filter — exclude jobs whose title or description contains avoid keywords
-    const avoidPatterns = criteria.avoid
-      .filter(k => k.trim().length > 0)
-      .map(k => new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i'));
-
-    function jobContainsAvoid(job: Job): boolean {
-      for (const pattern of avoidPatterns) {
-        if (pattern.test(job.title)) return true;
-        if (job.description && pattern.test(job.description)) return true;
-      }
-      return false;
+    // 2. Avoid keywords — per spec, avoid is Category 3 (scoring context only).
+    // Avoid keywords reduce Claude's score but do NOT eliminate jobs in pre-filtering.
+    // We still build the patterns here for debug logging, but never filter on them.
+    const avoidPatterns = (criteria.avoid ?? [])
+      .filter((k: string) => k.trim().length > 0)
+      .map((k: string) => new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i'));
+    if (avoidPatterns.length > 0) {
+      console.log(`  Avoid keywords (${avoidPatterns.length} terms) — scoring context only, not a pre-filter`);
     }
 
-    // 3. Salary hard filter — exclude jobs where listed salary is below minimum
+    // 3. Salary hard filter — Category 1 gate: exclude jobs where explicitly listed salary is below minimum
     function jobBelowMinSalary(job: Job): boolean {
       if (!criteria.min_salary || !job.salary) return false;
       // Try to extract a number from the salary string
@@ -5384,7 +5409,24 @@ async function runScoutInBackground(runId: number): Promise<void> {
       return highest < criteria.min_salary;
     }
 
-    // 4. Segment filter — block explicitly lower-ACV segment titles (Commercial/MM/SMB)
+    // 4. Min OTE hard filter — Category 1 gate (same logic as min_salary).
+    // Only drops a job if OTE is explicitly stated AND falls below the threshold.
+    // If OTE is unknown or not stated, the job passes through (let Claude assess).
+    const minOte: number | null = (criteria as any).min_ote ?? null;
+    function jobBelowMinOte(job: Job): boolean {
+      if (!minOte || !job.salary) return false;
+      const salaryLower = job.salary.toLowerCase();
+      // Only check if salary string explicitly references OTE or total comp
+      const hasOteSignal = /\b(ote|on[\s-]target|total\s+comp(?:ensation)?|variable|commission)\b/.test(salaryLower);
+      if (!hasOteSignal) return false;
+      const nums = job.salary.match(/[\d,]+/g);
+      if (!nums) return false;
+      const highest = Math.max(...nums.map(n => parseInt(n.replace(/,/g, ''), 10)));
+      if (isNaN(highest) || highest === 0 || highest < 1000) return false;
+      return highest < minOte;
+    }
+
+    // 5. Segment filter — block explicitly lower-ACV segment titles (Commercial/MM/SMB)
     //    when the user's target roles don't explicitly include those segments.
     //    These roles pay significantly less and represent a different sales motion.
     const userRolesLower = (criteria.target_roles ?? []).map((r: string) => r.toLowerCase());
@@ -5416,13 +5458,15 @@ async function runScoutInBackground(runId: number): Promise<void> {
       return true;
     }
 
-    // Apply all hard pre-filters
+    // Apply all hard pre-filters (Category 1 + 2 only — per spec)
+    // Category 3 settings (avoid, must-have, nice-to-have) go to Claude as scoring context only.
     let preFiltered = toScore;
     let droppedByLocation = 0;
-    let droppedByAvoid = 0;
     let droppedBySalary = 0;
+    let droppedByOte = 0;
     let droppedByTerritory = 0;
 
+    // Category 2: Location OR filter — pass if ANY saved location matches (or remote/unknown)
     if (hasLocationPrefs || allowedWorkModes.length > 0) {
       const locDropLog: string[] = [];
       const before = preFiltered.length;
@@ -5439,34 +5483,57 @@ async function runScoutInBackground(runId: number): Promise<void> {
         console.log(`───────────────────────────────────────────────────────────`);
       }
     }
-    if (avoidPatterns.length > 0) {
-      const before = preFiltered.length;
-      preFiltered = preFiltered.filter(j => !jobContainsAvoid(j));
-      droppedByAvoid = before - preFiltered.length;
-    }
+
+    // Category 1: Min base salary hard gate
     if (criteria.min_salary) {
+      const salDropLog: string[] = [];
       const before = preFiltered.length;
-      preFiltered = preFiltered.filter(j => !jobBelowMinSalary(j));
+      preFiltered = preFiltered.filter(j => {
+        const drop = jobBelowMinSalary(j);
+        if (drop) salDropLog.push(`  ✗ "${j.title}" @ ${j.company} — salary:"${j.salary}" below $${criteria.min_salary?.toLocaleString()}`);
+        return !drop;
+      });
       droppedBySalary = before - preFiltered.length;
+      if (salDropLog.length > 0) {
+        console.log(`\n──── SALARY FILTER DROPS (${salDropLog.length}) ────────────────────────`);
+        for (const msg of salDropLog.slice(0, 20)) console.log(msg);
+        if (salDropLog.length > 20) console.log(`  … and ${salDropLog.length - 20} more`);
+        console.log(`───────────────────────────────────────────────────────────`);
+      }
     }
 
-    // Apply territory filter only (segment is NOT a hard block — compensation handles it)
+    // Category 1: Min OTE hard gate (only if OTE is explicitly stated in salary field)
+    if (minOte) {
+      const oteDropLog: string[] = [];
+      const before = preFiltered.length;
+      preFiltered = preFiltered.filter(j => {
+        const drop = jobBelowMinOte(j);
+        if (drop) oteDropLog.push(`  ✗ "${j.title}" @ ${j.company} — salary:"${j.salary}" OTE below $${minOte.toLocaleString()}`);
+        return !drop;
+      });
+      droppedByOte = before - preFiltered.length;
+      if (oteDropLog.length > 0) {
+        console.log(`\n──── OTE FILTER DROPS (${oteDropLog.length}) ───────────────────────────`);
+        for (const msg of oteDropLog.slice(0, 20)) console.log(msg);
+        console.log(`───────────────────────────────────────────────────────────`);
+      }
+    }
+
+    // Territory filter — explicit mismatch in job title (hard block)
     {
       const before = preFiltered.length;
       preFiltered = preFiltered.filter(j => !isExcludedTerritory(j.title));
       droppedByTerritory = before - preFiltered.length;
     }
 
-    let droppedByKnownComp = 0; // reserved for future use
-
-    console.log(`\n──── PRE-FILTERS (before Claude scoring) ───────────────────`);
-    console.log(`  After title filter: ${toScore.length}`);
-    console.log(`  Dropped by location: ${droppedByLocation}`);
-    console.log(`  Dropped by avoid keywords: ${droppedByAvoid}`);
-    console.log(`  Dropped by salary below $${criteria.min_salary?.toLocaleString() ?? 'n/a'}: ${droppedBySalary}`);
-    console.log(`  Dropped by territory mismatch: ${droppedByTerritory}`);
-    console.log(`  Dropped by known comp below minimum: ${droppedByKnownComp}`);
-    console.log(`  Remaining for Claude scoring: ${preFiltered.length}`);
+    console.log(`\n──── PRE-FILTERS SUMMARY (before Claude scoring) ───────────`);
+    console.log(`  After broad title filter  : ${toScore.length}`);
+    console.log(`  Dropped by location       : ${droppedByLocation}`);
+    console.log(`  Dropped by min base salary: ${droppedBySalary}${criteria.min_salary ? ` (threshold: $${criteria.min_salary.toLocaleString()})` : ''}`);
+    console.log(`  Dropped by min OTE        : ${droppedByOte}${minOte ? ` (threshold: $${minOte.toLocaleString()})` : ' (not set — no OTE pre-filter)'}`);
+    console.log(`  Dropped by territory      : ${droppedByTerritory}`);
+    console.log(`  Avoid keywords            : NOT pre-filtered (${avoidPatterns.length} terms passed to Claude as scoring signals)`);
+    console.log(`  Remaining for Claude      : ${preFiltered.length}`);
     console.log(`───────────────────────────────────────────────────────────`);
 
     // ── Skip jobs already in the DB — only score genuinely new listings ──
@@ -5710,10 +5777,10 @@ async function runScoutInBackground(runId: number): Promise<void> {
       console.log(`  Gemini discovery:  ${geminiJobsFound} found → ${geminiDeduped} dupes → ${geminiJobsFound - geminiDeduped} net-new`);
     }
     console.log(`  ─── Filters ────────────────────────────────────────────`);
-    console.log(`  After title filter:    ${toScore.length} (${droppedByTitle} dropped)`);
+    console.log(`  After title filter:    ${toScore.length} (${droppedByTitle} dropped as non-sales)`);
     console.log(`  After location filter: ${toScore.length - droppedByLocation} (${droppedByLocation} dropped)`);
-    if (droppedByAvoid > 0)    console.log(`  After avoid filter:    ${toScore.length - droppedByLocation - droppedByAvoid} (${droppedByAvoid} dropped)`);
-    if (droppedBySalary > 0)   console.log(`  After salary filter:   (${droppedBySalary} below minimum)`);
+    if (droppedBySalary > 0)   console.log(`  After salary filter:   (${droppedBySalary} below $${criteria.min_salary?.toLocaleString()})`);
+    if (droppedByOte > 0)      console.log(`  After OTE filter:      (${droppedByOte} below $${minOte?.toLocaleString()} OTE)`);
     if (droppedByTerritory > 0) console.log(`  After territory filter:(${droppedByTerritory} wrong territory)`);
     console.log(`  Sent to Claude:        ${preFiltered.length}`);
     console.log(`  ─── Results ────────────────────────────────────────────`);
