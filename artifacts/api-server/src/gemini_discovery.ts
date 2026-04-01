@@ -383,10 +383,39 @@ function isJobPostingUrl(url: string): boolean {
   if (/jobs\.ashbyhq\.com\/[^/?#]+\/[0-9a-f]{8}-[0-9a-f]{4}/.test(url)) return true;
   // Workday: {company}.myworkdayjobs.com/**/{slug}/job/{slug}
   if (/myworkdayjobs\.com\/.+\/job\//.test(url)) return true;
+  // SmartRecruiters: jobs.smartrecruiters.com/{Company}/{id}
+  if (/jobs\.smartrecruiters\.com\/[^/?#]+\/\d+/.test(url)) return true;
+  // Workable: apply.workable.com/{company}/j/{code}
+  if (/apply\.workable\.com\/[^/?#]+\/j\/[A-Z0-9]+/.test(url)) return true;
+  // Jobvite: jobs.jobvite.com/{company}/job/{id}
+  if (/jobs\.jobvite\.com\/[^/?#]+\/job\/[^/?#]+/.test(url)) return true;
   // LinkedIn specific job view
   if (/linkedin\.com\/jobs\/view\/\d+/.test(url)) return true;
   // Indeed viewjob
   if (/indeed\.com\/viewjob/.test(url)) return true;
+  return false;
+}
+
+// ── Staffing / recruiting agency blocklist ────────────────────────────────────
+// Companies that post jobs on their own ATS but are recruiters/headhunters,
+// not the actual hiring company. Their postings are noise for a direct-hire scout.
+const STAFFING_SLUGS = new Set([
+  'lavendo', 'kforce', 'kforcetech', 'randstad', 'adecco', 'manpower',
+  'staffmark', 'insightglobal', 'insight-global', 'roberthalf', 'robert-half',
+  'heidrick', 'spencerstuart', 'spencer-stuart', 'michaelpage', 'michael-page',
+  'teksystems', 'tek-systems', 'cybercoders', 'cyber-coders', 'hired',
+  'toptal', 'turing', 'andela', 'triplebyte', 'crossover', 'acceleration-partners',
+  'talentify', 'recruitingfromscratch', 'revitalizedrecruiters', 'rrcruiting',
+  'talent-inc', 'executivesearch', 'executive-search', 'talentsolutions',
+  'talent-solutions', 'hirehive', 'theladders', 'ziprecruiter',
+]);
+
+const STAFFING_NAME_PATTERN = /\b(staffing|recruiting|recruitment|headhunting|headhunter|talent\s+acquisition\s+firm|talent\s+solutions|executive\s+search|placement\s+firm|search\s+group|search\s+firm)\b/i;
+
+function isStaffingCompany(urlSlug: string, companyName: string): boolean {
+  const slugLower = urlSlug.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (STAFFING_SLUGS.has(slugLower) || STAFFING_SLUGS.has(urlSlug.toLowerCase())) return true;
+  if (STAFFING_NAME_PATTERN.test(companyName)) return true;
   return false;
 }
 
@@ -422,6 +451,18 @@ function extractCompanyFromAtsUrl(url: string): string | null {
     }
     if (host.endsWith('.myworkdayjobs.com')) {
       return slugToCompanyName(host.replace('.myworkdayjobs.com', ''));
+    }
+    if (host === 'jobs.smartrecruiters.com') {
+      const m = path.match(/^\/([^/]+)\//);
+      return m ? slugToCompanyName(m[1]) : null;
+    }
+    if (host === 'apply.workable.com') {
+      const m = path.match(/^\/([^/]+)\//);
+      return m ? slugToCompanyName(m[1]) : null;
+    }
+    if (host === 'jobs.jobvite.com') {
+      const m = path.match(/^\/([^/]+)\//);
+      return m ? slugToCompanyName(m[1]) : null;
     }
     return null;
   } catch {
@@ -475,6 +516,21 @@ function searchResultToRawJob(result: PlxSearchResult): RawGeminiJobRecord | nul
 
   const company = extractCompanyFromAtsUrl(url);
   if (!company) return null;
+
+  // Extract the raw URL slug for staffing detection
+  let urlSlug = '';
+  try {
+    const u = new URL(url);
+    const pathParts = u.pathname.split('/').filter(Boolean);
+    urlSlug = pathParts[0] ?? '';
+  } catch { /* ignore */ }
+
+  // Drop known staffing / recruiting agencies — they post jobs for clients
+  // and are not the actual employer; they'll always score poorly and waste Claude calls
+  if (isStaffingCompany(urlSlug, company)) {
+    console.log(`[PerplexityScout] Dropped staffing/recruiting company: ${company} (slug: ${urlSlug})`);
+    return null;
+  }
 
   const title    = parseJobTitle(result.title ?? '', company);
   if (!title || title.length < 5) return null;
@@ -548,44 +604,64 @@ export async function runPerplexityScoutSearch(
     if (mode === 'watchlist' && companyNames.length === 0) {
       console.warn('[PerplexityScout] Watchlist mode but no companies — falling back to open search');
     }
-    console.log('[PerplexityScout] Open Search — 3 parallel Search API calls (Greenhouse/Lever | Ashby/Workday | LinkedIn)');
+    console.log('[PerplexityScout] Open Search — 3 parallel Search API calls (Greenhouse/Lever | Ashby/Workday | SmartRecruiters/Workable)');
 
-    // Build 5 queries per ATS bucket, rotating through the user's actual industry keywords
-    // Each bucket targets a different ATS domain family
+    // ── Tech-signal query builder ─────────────────────────────────────────────
+    // Instead of single industry names (which match any company that MENTIONS the
+    // industry), we use OR-clusters of specific product/technology terms that only
+    // companies actively MAKING or SELLING those products would use in job postings.
+    // This dramatically reduces off-target companies (StackAdapt, Linear, etc.)
+    // that slip through on generic industry keyword matches.
+    //
+    // Cluster A: AI compute / GPU / ML infra
+    const clusterAI    = `(GPU OR NVIDIA OR "AI accelerator" OR "AI cloud" OR "AI infrastructure" OR "ML infrastructure" OR "inference" OR "model serving")`;
+    // Cluster B: Semiconductors / silicon
+    const clusterSemi  = `(semiconductor OR "chip design" OR silicon OR ASIC OR FPGA OR "integrated circuit" OR photonics OR optoelectronics)`;
+    // Cluster C: Data center / compute infrastructure
+    const clusterDC    = `("data center" OR hyperscaler OR colocation OR "bare metal" OR HPC OR "server infrastructure" OR "compute cluster")`;
+    // Cluster D: Networking / infrastructure security
+    const clusterNet   = `(networking OR "SD-WAN" OR "network security" OR "infrastructure security" OR "zero trust" OR "network fabric" OR "network infrastructure")`;
+    // Cluster E: Optics / sensors / electronic components
+    const clusterOptic = `(optics OR "optical transceiver" OR "optical interconnect" OR "fiber optic" OR sensors OR "electronic components" OR "embedded systems")`;
+    // Cluster F: Data / storage / database infrastructure
+    const clusterData  = `(database OR "data platform" OR "distributed systems" OR "object storage" OR "storage systems" OR "data infrastructure")`;
+
     searchRequests = [
       {
         label: 'Greenhouse + Lever',
         query: [
-          `"${role0}" "${kw(0)}" remote`,
-          `"${role0}" "${kw(1)}" remote`,
-          `"${role1}" "${kw(2)}" remote`,
-          `"${role0}" "${kw(3)}" remote`,
-          `"${role1}" "${kw(4)}" remote${locSuffix}`,
+          `"${role0}" ${clusterAI} remote`,
+          `"${role0}" ${clusterSemi} remote`,
+          `"${role1}" ${clusterDC} remote`,
+          `"${role0}" ${clusterNet} remote`,
+          `"${role1}" ${clusterOptic} remote${locSuffix}`,
         ],
         search_domain_filter: ['boards.greenhouse.io', 'jobs.lever.co'],
-        max_results: 10,
+        max_results: 20,
       },
       {
         label: 'Ashby + Workday',
         query: [
-          `"${role0}" "${kw(0)}" remote`,
-          `"${role0}" "${kw(2)}" remote`,
-          `"${role1}" "${kw(1)}" remote`,
-          `"${role0}" "${kw(4)}" remote`,
-          `"${role1}" "${kw(3)}" remote${locSuffix}`,
+          `"${role0}" ${clusterAI} remote`,
+          `"${role0}" ${clusterDC} remote`,
+          `"${role1}" ${clusterSemi} remote`,
+          `"${role0}" ${clusterData} remote`,
+          `"${role1}" ${clusterNet} remote${locSuffix}`,
         ],
         search_domain_filter: ['jobs.ashbyhq.com', 'myworkdayjobs.com'],
-        max_results: 10,
+        max_results: 20,
       },
       {
-        label: 'LinkedIn Jobs',
+        label: 'SmartRecruiters + Workable + Jobvite',
         query: [
-          `"${role0}" "${kw(0)}" "${kw(1)}" remote`,
-          `"${role0}" "${kw(2)}" remote`,
-          `"${role1}" "${kw(3)}" remote${locSuffix}`,
+          `"${role0}" ${clusterAI} remote`,
+          `"${role0}" ${clusterSemi} remote`,
+          `"${role1}" ${clusterDC} remote`,
+          `"${role1}" ${clusterNet} remote${locSuffix}`,
+          `"${role0}" ${clusterOptic} remote`,
         ],
-        search_domain_filter: ['linkedin.com'],
-        max_results: 10,
+        search_domain_filter: ['jobs.smartrecruiters.com', 'apply.workable.com', 'jobs.jobvite.com'],
+        max_results: 20,
       },
     ];
   } else {
@@ -610,7 +686,7 @@ export async function runPerplexityScoutSearch(
       return {
         label: `Watchlist batch ${i + 1} (${batch.length} companies)`,
         query: queries.length === 1 ? queries[0] : queries,
-        max_results: 10,
+        max_results: 20,
       } as SearchRequest;
     });
   }
@@ -620,7 +696,7 @@ export async function runPerplexityScoutSearch(
     searchRequests.map(async (req, i) => {
       const body: Record<string, unknown> = {
         query:       req.query,
-        max_results: req.max_results ?? 10,
+        max_results: req.max_results ?? 20,
       };
       if (req.search_domain_filter) body.search_domain_filter = req.search_domain_filter;
 
