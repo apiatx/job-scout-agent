@@ -2157,6 +2157,42 @@ app.delete('/api/jobs/:id/save', async (req: Request, res: Response) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+// ── Bulk delete all unsaved jobs in a tier ────────────────────────────────────
+// Must be defined before DELETE /api/jobs/:id to avoid route collision
+app.delete('/api/jobs/tier/:tier', async (req: Request, res: Response) => {
+  try {
+    const tierMap: Record<string, string | null> = {
+      target: 'Top Target',
+      win: 'Fast Win',
+      stretch: 'Stretch Role',
+      skip: 'Probably Skip',
+      all: null,
+    };
+    const tier = req.params.tier;
+    if (!(tier in tierMap)) { res.status(400).json({ error: 'Invalid tier' }); return; }
+    let result;
+    if (tierMap[tier] === null) {
+      result = await pool.query(`DELETE FROM jobs WHERE saved_at IS NULL`);
+    } else {
+      result = await pool.query(
+        `DELETE FROM jobs WHERE opportunity_tier = $1 AND saved_at IS NULL`,
+        [tierMap[tier]]
+      );
+    }
+    console.log(`[Jobs] Bulk deleted ${result.rowCount} jobs (tier=${tier})`);
+    res.json({ ok: true, deleted: result.rowCount });
+  } catch (e: any) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Permanently delete a single job ──────────────────────────────────────────
+app.delete('/api/jobs/:id', async (req: Request, res: Response) => {
+  try {
+    const { rowCount } = await pool.query(`DELETE FROM jobs WHERE id = $1`, [req.params.id]);
+    if (!rowCount) { res.status(404).json({ error: 'Job not found' }); return; }
+    res.json({ ok: true });
+  } catch (e: any) { res.status(500).json({ error: String(e) }); }
+});
+
 // ── User action tracking (applied, interested, skipped, etc.) ─────────────
 app.put('/api/jobs/:id/action', async (req: Request, res: Response) => {
   try {
@@ -6310,6 +6346,8 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 
 /* ── Redesigned card components ─── */
 .card-tier-row{display:flex;align-items:center;justify-content:space-between;padding:13px 16px 0}
+.job-delete-x{background:none;border:none;color:#555;cursor:pointer;font-size:16px;line-height:1;padding:0 2px;border-radius:3px;transition:color .15s}
+.job-delete-x:hover{color:#e55353}
 .score-chip{font-size:19px;font-weight:800;color:var(--gold);line-height:1;min-width:36px;text-align:right}
 .score-chip.score-green{color:var(--green)}
 .score-chip.score-yellow{color:#f5c842}
@@ -7129,7 +7167,10 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="inner-tab tier-skip" id="jtab-skip" onclick="showJobsTab('skip')">&#x1F6AB; Probably Skip <span id="jtab-count-skip" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
     <div class="inner-tab" id="jtab-all" onclick="showJobsTab('all')">All <span id="jtab-count-all" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
   </div>
-  <div class="sec-title" id="jobs-count">Loading jobs&hellip;</div>
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:4px">
+    <div class="sec-title" id="jobs-count" style="margin:0">Loading jobs&hellip;</div>
+    <button id="clear-tab-btn" class="btn btn-sm" style="display:none;background:rgba(229,83,83,.12);color:#e55353;border:1px solid rgba(229,83,83,.35);font-size:11px;white-space:nowrap;padding:4px 10px" onclick="clearTierJobs()">&#x1F5D1; Delete all in tab</button>
+  </div>
   <div class="jobs-grid" id="jobs-grid"></div>
 </div>
 
@@ -8889,7 +8930,49 @@ function showJobsTab(tab) {
     var el = document.getElementById('jtab-' + t);
     if (el) el.classList.toggle('active', t === tab);
   });
+  var clearBtn = document.getElementById('clear-tab-btn');
+  if (clearBtn) {
+    var tabLabels = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs' };
+    clearBtn.textContent = '\uD83D\uDDD1 Delete all ' + (tabLabels[tab] || tab);
+    clearBtn.style.display = '';
+  }
   renderJobs();
+}
+
+async function deleteJob(id) {
+  _allJobs = _allJobs.filter(function(j) { return j.id !== id; });
+  renderJobs();
+  try {
+    var res = await fetch('/api/jobs/' + id, { method: 'DELETE' });
+    if (!res.ok) {
+      var err = await res.json().catch(function() { return {}; });
+      console.error('[deleteJob] Server error:', err);
+    }
+  } catch (e) { console.error('[deleteJob]', e); }
+}
+
+async function clearTierJobs() {
+  var tabLabels = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs' };
+  var label = tabLabels[_currentJobsTab] || _currentJobsTab;
+  var count = _allJobs.filter(function(j) {
+    if (j.saved_at) return false;
+    return _currentJobsTab === 'all' || tierKey(j) === _currentJobsTab;
+  }).length;
+  if (count === 0) { alert('No jobs in this tab to delete.'); return; }
+  if (!confirm('Permanently delete all ' + count + ' ' + label + ' jobs? This cannot be undone.')) return;
+  try {
+    var res = await fetch('/api/jobs/tier/' + _currentJobsTab, { method: 'DELETE' });
+    if (!res.ok) {
+      var body = await res.json().catch(function() { return { error: 'Unknown error' }; });
+      alert('Delete failed: ' + (body.error || res.status));
+      return;
+    }
+    var data = await res.json();
+    console.log('[clearTierJobs] Deleted', data.deleted, 'jobs from tier', _currentJobsTab);
+    await loadJobs();
+  } catch (e) {
+    alert('Delete failed: ' + e);
+  }
 }
 
 function isNew(j) {
@@ -9141,11 +9224,17 @@ function renderJobCard(j, opts) {
     }
   }
 
+  var deleteBtn = opts.showSavedDate ? '' :
+    '<button class="job-delete-x" data-jid="' + j.id + '" onclick="deleteJob(Number(this.dataset.jid))" title="Remove this job permanently">\u00D7</button>';
+
   return '<div class="card ' + tierClass + '">' +
-    // ── Tier row: badge + score chip
+    // ── Tier row: badge + score chip + delete button
     '<div class="card-tier-row">' +
       '<span>' + tBadge + '</span>' +
-      '<span class="' + scoreChipClass + '">' + esc(j.match_score) + '</span>' +
+      '<div style="display:flex;align-items:center;gap:6px">' +
+        '<span class="' + scoreChipClass + '">' + esc(j.match_score) + '</span>' +
+        deleteBtn +
+      '</div>' +
     '</div>' +
     // ── Title block
     '<div class="card-title-block">' +
@@ -9220,6 +9309,14 @@ function renderJobs() {
   var grid = document.getElementById('jobs-grid');
   var cnt  = document.getElementById('jobs-count');
   var jobs;
+
+  // Sync the "Delete all in tab" button label with current tab
+  var clearBtn = document.getElementById('clear-tab-btn');
+  if (clearBtn) {
+    var _tabLbls = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs' };
+    clearBtn.textContent = '\uD83D\uDDD1 Delete all ' + (_tabLbls[_currentJobsTab] || _currentJobsTab);
+    clearBtn.style.display = '';
+  }
 
   updateTabCounts();
 
