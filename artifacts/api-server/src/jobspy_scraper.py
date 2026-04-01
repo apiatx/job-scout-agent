@@ -342,6 +342,37 @@ def search_ziprecruiter(term: str, location: str = "United States") -> pd.DataFr
         return pd.DataFrame()
 
 
+# ── Phase 4 preflight: verify Glassdoor/ZipRecruiter connectivity ────────────
+
+def _preflight_source(site: str, term: str, location: str) -> bool:
+    """
+    Try a single 1-result scrape of the given site.
+    Returns True if the call succeeds (even if 0 results).
+    Returns False if a TLS/connection/proxy error is raised, logging the reason.
+    Individual per-term errors inside search_glassdoor/search_ziprecruiter are
+    handled there; this catches fatal connectivity failures at the source level.
+    """
+    if not PROXY_URL:
+        return False
+    try:
+        scrape_jobs(
+            site_name=[site],
+            search_term=term,
+            location=location,
+            results_wanted=1,
+            hours_old=HOURS_OLD,
+            proxies=PROXY_URL,
+        )
+        return True
+    except Exception as e:
+        etype = type(e).__name__
+        print(
+            f"  [Phase4 preflight] {site} FAILED ({etype}) — skipping source for this run",
+            file=sys.stderr,
+        )
+        return False
+
+
 # ── Concurrency helper ────────────────────────────────────────────────────────
 
 def run_concurrent(fn, args_list: list, max_workers: int, label: str) -> list:
@@ -688,28 +719,41 @@ def main():
     if PROXY_URL:
         gd_location = specific_locations[0] if specific_locations else "United States"
         gd_terms    = all_terms[:15]
+        preflight_term = gd_terms[0] if gd_terms else "Account Executive"
 
-        print(f"\nJobSpy [Phase 4/4]: Glassdoor — {len(gd_terms)} terms (proxy active)", file=sys.stderr)
-        gd_frames = run_concurrent(
-            search_glassdoor,
-            [(term, gd_location) for term in gd_terms],
-            MAX_WORKERS_GD_ZR,
-            "Glassdoor",
-        )
-        gd_df = concat_and_dedup(gd_frames, "glassdoor")
-        print(f"JobSpy [Phase 4/4]: Glassdoor → {len(gd_df)} unique", file=sys.stderr)
-        source_dfs.append(gd_df)
+        # Preflight: verify Glassdoor connectivity before full run
+        print(f"\nJobSpy [Phase 4/4]: Preflight check — Glassdoor…", file=sys.stderr)
+        gd_ok = _preflight_source("glassdoor", preflight_term, gd_location)
+        if gd_ok:
+            print(f"JobSpy [Phase 4/4]: Glassdoor — {len(gd_terms)} terms (proxy active)", file=sys.stderr)
+            gd_frames = run_concurrent(
+                search_glassdoor,
+                [(term, gd_location) for term in gd_terms],
+                MAX_WORKERS_GD_ZR,
+                "Glassdoor",
+            )
+            gd_df = concat_and_dedup(gd_frames, "glassdoor")
+            print(f"JobSpy [Phase 4/4]: Glassdoor → {len(gd_df)} unique", file=sys.stderr)
+            source_dfs.append(gd_df)
+        else:
+            print(f"JobSpy [Phase 4/4]: Glassdoor SKIPPED — preflight failed", file=sys.stderr)
 
-        print(f"JobSpy [Phase 4/4]: ZipRecruiter — {len(gd_terms)} terms (proxy active)", file=sys.stderr)
-        zr_frames = run_concurrent(
-            search_ziprecruiter,
-            [(term, "United States") for term in gd_terms],
-            MAX_WORKERS_GD_ZR,
-            "ZipRecruiter",
-        )
-        zr_df = concat_and_dedup(zr_frames, "ziprecruiter")
-        print(f"JobSpy [Phase 4/4]: ZipRecruiter → {len(zr_df)} unique", file=sys.stderr)
-        source_dfs.append(zr_df)
+        # Preflight: verify ZipRecruiter connectivity before full run
+        print(f"JobSpy [Phase 4/4]: Preflight check — ZipRecruiter…", file=sys.stderr)
+        zr_ok = _preflight_source("zip_recruiter", preflight_term, "United States")
+        if zr_ok:
+            print(f"JobSpy [Phase 4/4]: ZipRecruiter — {len(gd_terms)} terms (proxy active)", file=sys.stderr)
+            zr_frames = run_concurrent(
+                search_ziprecruiter,
+                [(term, "United States") for term in gd_terms],
+                MAX_WORKERS_GD_ZR,
+                "ZipRecruiter",
+            )
+            zr_df = concat_and_dedup(zr_frames, "ziprecruiter")
+            print(f"JobSpy [Phase 4/4]: ZipRecruiter → {len(zr_df)} unique", file=sys.stderr)
+            source_dfs.append(zr_df)
+        else:
+            print(f"JobSpy [Phase 4/4]: ZipRecruiter SKIPPED — preflight failed", file=sys.stderr)
     else:
         print(
             f"\nJobSpy [Phase 4/4]: Glassdoor + ZipRecruiter SKIPPED — "

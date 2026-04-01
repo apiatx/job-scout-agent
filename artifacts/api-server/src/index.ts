@@ -5357,6 +5357,8 @@ For workday: identifier is "subdomain|careerSite" (e.g. "nvidia.wd5|NVIDIAExtern
 For lever: identifier is the company slug (e.g. "extremenetworks")
 For plain: identifier is the full careers page URL (e.g. "https://careers.cisco.com")
 
+Only specify ats_type greenhouse if you are highly confident in the exact Greenhouse board slug. These slugs are verified correct: purestorage, databricks, coreweave, scaleai, cloudflare, mongodb, rubrik, verkada, axonius, elastic, anthropic, cognite, energyhub, ironmountainsolutions, impinj, commvault. For extremenetworks use ats_type lever. If you are not certain of a company's exact slug, use ats_type plain with the company's careers URL.
+
 Only include companies you are highly confident about.
 Do not guess ATS details. If unsure of the ATS type or identifier for a company, use plain with their known careers URL.
 
@@ -5472,6 +5474,48 @@ async function runScoutInBackground(runId: number): Promise<void> {
         }
         return { name: c.name as string, ats_type: c.ats_type as ScoutCompanyEntry['ats_type'], identifier, reason: 'From companies watchlist' };
       });
+    }
+
+    // ── FIX 3: Deduplicate by company name (case-insensitive, keep first occurrence) ──
+    {
+      const seen = new Set<string>();
+      const deduped: ScoutCompanyEntry[] = [];
+      for (const co of scoutList) {
+        const key = co.name.toLowerCase().trim();
+        if (!seen.has(key)) { seen.add(key); deduped.push(co); }
+      }
+      const removed = scoutList.length - deduped.length;
+      if (removed > 0) console.log(`[CompanyList] Removed ${removed} duplicate companies from Claude list`);
+      scoutList = deduped;
+    }
+
+    // ── FIX 4: Validate Greenhouse slugs (parallel HEAD requests, 5s timeout) ──
+    const ghEntries = scoutList.filter(c => c.ats_type === 'greenhouse' && c.identifier);
+    if (ghEntries.length > 0) {
+      console.log(`[CompanyList] Validating ${ghEntries.length} Greenhouse slugs…`);
+      await Promise.all(ghEntries.map(async (entry) => {
+        const slug = entry.identifier;
+        const url = `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs`;
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 5000);
+          const res = await fetch(url, { method: 'HEAD', signal: ctrl.signal });
+          clearTimeout(timer);
+          if (res.status === 200 || res.status === 405) {
+            console.log(`  ✓ ${slug} valid`);
+          } else {
+            const safeName = entry.name.toLowerCase().replace(/\s+/g, '');
+            console.log(`  ✗ ${slug} invalid (${res.status}) → converting to plain`);
+            entry.ats_type = 'plain';
+            entry.identifier = `https://www.${safeName}.com/careers`;
+          }
+        } catch {
+          const safeName = entry.name.toLowerCase().replace(/\s+/g, '');
+          console.log(`  ✗ ${slug} invalid (timeout) → converting to plain`);
+          entry.ats_type = 'plain';
+          entry.identifier = `https://www.${safeName}.com/careers`;
+        }
+      }));
     }
 
     const listSource = usingClaudeList ? 'Claude' : 'Watchlist (fallback)';
@@ -5718,8 +5762,13 @@ async function runScoutInBackground(runId: number): Promise<void> {
     // 3. Salary hard filter — Category 1 gate: exclude jobs where explicitly listed salary is below minimum
     function jobBelowMinSalary(job: Job): boolean {
       if (!criteria.min_salary || !job.salary) return false;
+      // Safety: coerce salary to string regardless of what the scraper returned
+      const salaryStr = typeof job.salary === 'string'
+        ? job.salary
+        : job.salary != null ? String(job.salary) : '';
+      if (!salaryStr) return false;
       // Try to extract a number from the salary string
-      const nums = job.salary.match(/[\d,]+/g);
+      const nums = salaryStr.match(/[\d,]+/g);
       if (!nums) return false;
       // Use the highest number found (could be a range like "$100,000 - $150,000")
       const highest = Math.max(...nums.map(n => parseInt(n.replace(/,/g, ''), 10)));
@@ -5735,11 +5784,16 @@ async function runScoutInBackground(runId: number): Promise<void> {
     const minOte: number | null = (criteria as any).min_ote ?? null;
     function jobBelowMinOte(job: Job): boolean {
       if (!minOte || !job.salary) return false;
-      const salaryLower = job.salary.toLowerCase();
+      // Safety: coerce salary to string regardless of what the scraper returned
+      const salaryStr = typeof job.salary === 'string'
+        ? job.salary
+        : job.salary != null ? String(job.salary) : '';
+      if (!salaryStr) return false;
+      const salaryLower = salaryStr.toLowerCase();
       // Only check if salary string explicitly references OTE or total comp
       const hasOteSignal = /\b(ote|on[\s-]target|total\s+comp(?:ensation)?|variable|commission)\b/.test(salaryLower);
       if (!hasOteSignal) return false;
-      const nums = job.salary.match(/[\d,]+/g);
+      const nums = salaryStr.match(/[\d,]+/g);
       if (!nums) return false;
       const highest = Math.max(...nums.map(n => parseInt(n.replace(/,/g, ''), 10)));
       if (isNaN(highest) || highest === 0 || highest < 1000) return false;
