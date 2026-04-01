@@ -6916,12 +6916,12 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="tab" id="tab-saved" onclick="showTab('saved')" data-tooltip="Jobs you've starred. Generate tailored resumes and cover letters from each one.">Saved Jobs</div>
     <div class="tab" id="tab-pipeline" onclick="showTab('pipeline')" data-tooltip="Your active application pipeline. Track every job you've applied to, are interviewing for, or are interested in — with daily AI action recommendations.">My Pipeline</div>
     <div class="tab" id="tab-research" onclick="showTab('research')" data-tooltip="Deep-dive company research powered by Claude. Culture, financials, hiring signals, and interview prep before you apply.">Company Research</div>
-    <div class="tab" id="tab-positioning" onclick="showTab('positioning')" data-tooltip="Content studio — separate from the job search. Generates your LinkedIn headline, pitches, bios, and objection prep from your intake form. Never affects scoring or discovery.">Positioning</div>
     <div class="tab" id="tab-resume" onclick="showTab('resume')" data-tooltip="Your uploaded resume. The first 2,500 characters go to Claude on every scoring run so it can judge whether you actually qualify — not just keyword match.">Resume</div>
   </div>
   <div class="nav-group">
     <div class="nav-group-label">Settings</div>
     <div class="tab" id="tab-settings" onclick="showTab('settings')" data-tooltip="Controls what the scout actually searches for: target roles, industries, locations, must-have skills, things to avoid, and salary floor. The scout won't run without this configured.">User Search Settings</div>
+    <div class="tab" id="tab-positioning" onclick="showTab('positioning')" data-tooltip="Content studio — separate from the job search. Generates your LinkedIn headline, pitches, bios, and objection prep from your intake form. Never affects scoring or discovery.">Positioning Intake</div>
     <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Your Company Watchlist — tracks open roles at each company daily using Gemini search. Also tells the scraper which ATS pages to hit and boosts their score.">Company Watchlist</div>
     <div class="tab" id="tab-runs" onclick="showTab('runs')" data-tooltip="Full log of every scout run — jobs found, matches scored, errors, and timing. Use this to debug why a run found too many or too few results.">Run History</div>
   </div>
