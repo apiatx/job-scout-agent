@@ -1614,10 +1614,19 @@ app.get('/api/jobs', async (req: Request, res: Response) => {
       }
     }
 
+    // Find the most recent completed scout run so we can flag "new from latest run"
+    const { rows: latestRunRows } = await pool.query(
+      `SELECT id FROM scout_runs WHERE status='completed' ORDER BY completed_at DESC LIMIT 1`
+    );
+    const latestRunId: number | null = latestRunRows.length > 0 ? latestRunRows[0].id : null;
+
     // Enrich every job record with computed explanation fields:
     // deterministic_score, direct_company_page_found, explanation_for_rank,
     // matched_settings, gemini_web_search_queries, gemini_sources, source_found_from, is_live
-    const enriched = rows.map((j: Record<string, unknown>) => enrichJobRecord(j, criteriaForReport));
+    const enriched = rows.map((j: Record<string, unknown>) => ({
+      ...enrichJobRecord(j, criteriaForReport),
+      is_from_latest_run: latestRunId !== null && j.scout_run_id === latestRunId,
+    }));
 
     res.json(enriched);
   } catch (e) { res.status(500).json({ error: String(e) }); }
@@ -6274,6 +6283,8 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .inner-tab.tier-win.active{color:#00c86e;border-bottom-color:#00c86e}
 .inner-tab.tier-stretch.active{color:#7c8dff;border-bottom-color:#7c8dff}
 .inner-tab.tier-skip.active{color:#888;border-bottom-color:#888}
+.inner-tab.tier-new.active{color:#7ec8f7;border-bottom-color:#7ec8f7}
+.inner-tab.tier-new{color:#7ec8f7}
 .tier-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
 .tier-top-target{background:rgba(245,200,66,.15);color:#f5c842;border:1px solid rgba(245,200,66,.35)}
 .tier-fast-win{background:rgba(0,200,110,.13);color:#00c86e;border:1px solid rgba(0,200,110,.3)}
@@ -7166,6 +7177,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="inner-tab tier-stretch" id="jtab-stretch" onclick="showJobsTab('stretch')">&#x1F680; Stretch <span id="jtab-count-stretch" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
     <div class="inner-tab tier-skip" id="jtab-skip" onclick="showJobsTab('skip')">&#x1F6AB; Probably Skip <span id="jtab-count-skip" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
     <div class="inner-tab" id="jtab-all" onclick="showJobsTab('all')">All <span id="jtab-count-all" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
+    <div class="inner-tab tier-new" id="jtab-new" onclick="showJobsTab('new')">&#x2728; New <span id="jtab-count-new" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
   </div>
   <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:4px">
     <div class="sec-title" id="jobs-count" style="margin:0">Loading jobs&hellip;</div>
@@ -8926,15 +8938,19 @@ function sortJobs(jobs) {
 
 function showJobsTab(tab) {
   _currentJobsTab = tab;
-  ['target','win','stretch','skip','all'].forEach(function(t) {
+  ['target','win','stretch','skip','all','new'].forEach(function(t) {
     var el = document.getElementById('jtab-' + t);
     if (el) el.classList.toggle('active', t === tab);
   });
   var clearBtn = document.getElementById('clear-tab-btn');
   if (clearBtn) {
-    var tabLabels = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs' };
-    clearBtn.textContent = '\uD83D\uDDD1 Delete all ' + (tabLabels[tab] || tab);
-    clearBtn.style.display = '';
+    if (tab === 'new') {
+      clearBtn.style.display = 'none';
+    } else {
+      var tabLabels = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs' };
+      clearBtn.textContent = '\uD83D\uDDD1 Delete all ' + (tabLabels[tab] || tab);
+      clearBtn.style.display = '';
+    }
   }
   renderJobs();
 }
@@ -9297,12 +9313,15 @@ function updateTabCounts() {
     else counts.unscored++;
   });
   var allCount = _allJobs.filter(function(j) { return !j.saved_at; }).length;
+  var newCount = _allJobs.filter(function(j) { return j.is_from_latest_run; }).length;
   ['target','win','stretch','skip'].forEach(function(t) {
     var el = document.getElementById('jtab-count-' + t);
     if (el) el.textContent = counts[t] > 0 ? '(' + counts[t] + ')' : '';
   });
   var allEl = document.getElementById('jtab-count-all');
   if (allEl) allEl.textContent = allCount > 0 ? '(' + allCount + ')' : '';
+  var newEl = document.getElementById('jtab-count-new');
+  if (newEl) newEl.textContent = newCount > 0 ? '(' + newCount + ')' : '';
 }
 
 function renderJobs() {
@@ -9313,16 +9332,29 @@ function renderJobs() {
   // Sync the "Delete all in tab" button label with current tab
   var clearBtn = document.getElementById('clear-tab-btn');
   if (clearBtn) {
-    var _tabLbls = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs' };
-    clearBtn.textContent = '\uD83D\uDDD1 Delete all ' + (_tabLbls[_currentJobsTab] || _currentJobsTab);
-    clearBtn.style.display = '';
+    if (_currentJobsTab === 'new') {
+      clearBtn.style.display = 'none';
+    } else {
+      var _tabLbls = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs' };
+      clearBtn.textContent = '\uD83D\uDDD1 Delete all ' + (_tabLbls[_currentJobsTab] || _currentJobsTab);
+      clearBtn.style.display = '';
+    }
   }
 
   updateTabCounts();
 
   var unsavedJobs = _allJobs.filter(function(j) { return !j.saved_at; });
 
-  if (_currentJobsTab === 'all') {
+  if (_currentJobsTab === 'new') {
+    // Show ALL jobs from the latest scout run (including saved), sorted by tier then score
+    jobs = sortJobs(_allJobs.filter(function(j) { return j.is_from_latest_run; }));
+    if (!jobs.length) {
+      cnt.textContent = 'No jobs from the latest run yet';
+      grid.innerHTML = '<div style="padding:48px 24px;text-align:center;color:var(--muted);font-size:13px">No jobs from the latest scout run yet \u2014 run the scout to populate this tab</div>';
+      return;
+    }
+    cnt.textContent = jobs.length + ' job' + (jobs.length !== 1 ? 's' : '') + ' from the latest run';
+  } else if (_currentJobsTab === 'all') {
     jobs = sortJobs(unsavedJobs);
     cnt.textContent = jobs.length + ' job' + (jobs.length !== 1 ? 's' : '') + ' total';
   } else {
