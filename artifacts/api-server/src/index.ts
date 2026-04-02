@@ -3752,11 +3752,27 @@ app.post('/api/jobs/:id/tailor-resume', async (req: Request, res: Response) => {
   }
 });
 
-// ── Targeted company scan (Career Intel / Pre-IPO → open roles) ───────────
+// ── Targeted company scan (Career Intel / Pre-IPO / Industry Leaders / Deep Value / Pulse) ──
 // POST /api/jobs/targeted-scan
-// Body: { companies: string[], source: 'intel' | 'preipo' }
-// Runs Gemini discovery scoped to the listed companies, scores with Claude,
+// Body: { companies: string[], source: string }
+// Runs ATS scraping + JobSpy filtered to the listed companies, scores with Claude Haiku,
 // saves matches to DB, and returns the scored jobs for display.
+
+function formatJobForTargetedResponse(job: Record<string, unknown>) {
+  return {
+    title: job.title,
+    company: job.company,
+    location: job.location,
+    salary: job.salary,
+    apply_url: job.apply_url,
+    canonical_url: job.canonical_url,
+    match_score: job.match_score,
+    opportunity_tier: job.opportunity_tier,
+    why_good_fit: job.why_good_fit,
+    source: job.source,
+  };
+}
+
 app.post('/api/jobs/targeted-scan', async (req: Request, res: Response) => {
   try {
     const { companies, source } = req.body as { companies?: string[]; source?: string };
@@ -3765,22 +3781,184 @@ app.post('/api/jobs/targeted-scan', async (req: Request, res: Response) => {
       return;
     }
 
-    const companyNames = companies.map((c: string) => c.trim()).filter(Boolean).slice(0, 20);
-    const scanSource = source === 'preipo' ? 'preipo-scan' : 'intel-scan';
-
+    const companyNames = companies.map((c: string) => c.trim()).filter(Boolean).slice(0, 25);
+    const scanSource = source ?? 'targeted-scan';
     console.log(`\n──── TARGETED SCAN (${scanSource}) ────────────────────────────────`);
     console.log(`Companies (${companyNames.length}): ${companyNames.join(', ')}`);
 
     // Load criteria
     const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
-    const criteria = cRows[0] as any ?? {};
+    if (cRows.length === 0) {
+      res.status(400).json({ error: 'No search criteria configured — set up User Search Settings first' });
+      return;
+    }
+    const criteria = cRows[0] as any;
+    const tierSettings: TierSettings = {
+      verticalNiches: criteria.vertical_niches ?? [],
+      topTargetScore: criteria.top_target_score ?? 65,
+      fastWinScore: criteria.fast_win_score ?? 55,
+      stretchScore: criteria.stretch_score ?? 55,
+      experienceLevels: criteria.experience_levels ?? ['senior'],
+    };
+
+    // Look up companies in DB to get ATS info
+    const { rows: dbCompanies } = await pool.query('SELECT * FROM companies WHERE user_deleted = false');
+    const dbMap = new Map<string, Record<string, unknown>>();
+    for (const co of dbCompanies) dbMap.set((co.name as string).toLowerCase(), co as Record<string, unknown>);
+
+    // Build scout list: DB-matched companies get real ATS info; others get plain fallback
+    const scoutList: ScoutCompanyEntry[] = companyNames.map(name => {
+      const dbCo = dbMap.get(name.toLowerCase());
+      if (dbCo) {
+        let identifier = '';
+        if (dbCo.ats_type === 'workday') {
+          const sub = ((dbCo.careers_url as string) ?? '').replace('.myworkdayjobs.com', '');
+          identifier = `${sub}|${(dbCo.ats_slug as string) ?? ''}`;
+        } else {
+          identifier = (dbCo.ats_slug as string) ?? (dbCo.careers_url as string) ?? '';
+        }
+        return { name, ats_type: dbCo.ats_type as ScoutCompanyEntry['ats_type'], identifier, reason: 'From watchlist DB' };
+      }
+      const safeName = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return { name, ats_type: 'plain' as ScoutCompanyEntry['ats_type'], identifier: `https://www.${safeName}.com/careers`, reason: 'Company name search' };
+    });
+
+    const atsTitleFilter = buildRoleExperienceFilter(criteria.target_roles ?? [], criteria.experience_levels ?? []);
+    type TargetedJob = { title: string; company: string; location: string; salary?: string; applyUrl: string; description?: string; datePosted?: string; source: string };
+    const allJobs: TargetedJob[] = [];
+
+    // ── Stage 1: ATS scraping for recognized companies ──
+    for (const entry of scoutList) {
+      try {
+        if (entry.ats_type === 'greenhouse' && entry.identifier) {
+          const jobs = await scrapeGreenhouseJobs(entry.identifier, entry.name, atsTitleFilter ?? undefined);
+          allJobs.push(...jobs.map(j => ({ ...j, source: 'Greenhouse' })));
+          console.log(`[TargetedScan] Greenhouse ${entry.name}: ${jobs.length} jobs`);
+        } else if (entry.ats_type === 'lever' && entry.identifier) {
+          const jobs = await scrapeLeverJobs(entry.identifier, entry.name, atsTitleFilter ?? undefined);
+          allJobs.push(...jobs.map(j => ({ ...j, source: 'Lever' })));
+          console.log(`[TargetedScan] Lever ${entry.name}: ${jobs.length} jobs`);
+        } else if (entry.ats_type === 'workday' && entry.identifier) {
+          const pipeIdx = entry.identifier.indexOf('|');
+          const rawSub = pipeIdx >= 0 ? entry.identifier.slice(0, pipeIdx) : entry.identifier;
+          const boardSlug = pipeIdx >= 0 ? entry.identifier.slice(pipeIdx + 1) : '';
+          const subdomain = rawSub.includes('.myworkdayjobs.com') ? rawSub : `${rawSub}.myworkdayjobs.com`;
+          const jobs = await scrapeWorkdayJobs(entry.name, subdomain, boardSlug);
+          const filtered = atsTitleFilter ? jobs.filter(j => atsTitleFilter.test(j.title)) : jobs;
+          allJobs.push(...filtered.map(j => ({ ...j, source: 'Workday' })));
+          console.log(`[TargetedScan] Workday ${entry.name}: ${filtered.length} jobs`);
+        }
+      } catch (e) {
+        console.error(`[TargetedScan] ATS error for ${entry.name}:`, e);
+      }
+    }
+
+    // ── Stage 2: JobSpy — run broad search then filter to requested companies only ──
+    try {
+      const jobSpyResults = await runJobSpyScraper({
+        target_roles: criteria.target_roles ?? [],
+        locations:    criteria.locations    ?? [],
+        industries:   criteria.industries   ?? [],
+        proxy_url:    criteria.proxy_url    ?? '',
+      });
+      const nameSet = new Set(companyNames.map(n => n.toLowerCase()));
+      const filtered = jobSpyResults.filter(j => nameSet.has(((j.company as string) ?? '').toLowerCase()));
+      console.log(`[TargetedScan] JobSpy: ${jobSpyResults.length} total → ${filtered.length} matching requested companies`);
+      allJobs.push(...filtered.map(j => {
+        const src = ((j.source as string) ?? '').toLowerCase();
+        const displaySrc = src === 'linkedin' ? 'LinkedIn' : src === 'indeed' ? 'Indeed' : src === 'glassdoor' ? 'Glassdoor' : src === 'ziprecruiter' ? 'ZipRecruiter' : 'JobSpy';
+        return { ...j, source: displaySrc } as TargetedJob;
+      }));
+    } catch (e) {
+      console.error('[TargetedScan] JobSpy error:', e);
+    }
+
+    console.log(`[TargetedScan] Total raw listings: ${allJobs.length}`);
+
+    // ── Stage 3: Title filter + dedup ──
+    const titleFilter = buildRoleExperienceFilter(criteria.target_roles ?? [], criteria.experience_levels ?? []);
+    const titleFiltered = allJobs.filter(j => !titleFilter || titleFilter.test(j.title));
+    const seenUrls = new Set<string>();
+    const deduped = titleFiltered.filter(j => { if (seenUrls.has(j.applyUrl)) return false; seenUrls.add(j.applyUrl); return true; });
+    console.log(`[TargetedScan] After title filter + dedup: ${deduped.length}`);
+
+    if (deduped.length === 0) {
+      res.json({ jobs: [] });
+      return;
+    }
+
+    // ── Stage 4: Skip already-scored DB jobs (return them directly) ──
+    const { rows: existingJobs } = await pool.query('SELECT apply_url FROM jobs');
+    const existingUrls = new Set(existingJobs.map((r: Record<string, unknown>) => r.apply_url as string));
+    const newJobs = deduped.filter(j => !existingUrls.has(j.applyUrl));
+    const alreadyInDb = deduped.filter(j => existingUrls.has(j.applyUrl));
+
+    console.log(`[TargetedScan] ${newJobs.length} new + ${alreadyInDb.length} already in DB`);
+
+    // ── Stage 5: Score new jobs with Claude Haiku ──
     const { rows: resumeRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
     const candidateResume: string = resumeRows[0]?.value ?? '';
+    const savedJobs: Record<string, unknown>[] = [];
 
-    // [Removed] Gemini Discovery — targeted scan now disabled
-    console.log('[TargetedScan] Gemini Discovery removed — targeted scan unavailable');
-    res.json({ jobs: [], skipped: true, skip_reason: '[Removed] Gemini Discovery feature' });
-    return;
+    if (newJobs.length > 0) {
+      const matches = await scoreJobsWithClaude(
+        newJobs.slice(0, 30).map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
+        {
+          targetRoles: criteria.target_roles,
+          industries: criteria.industries,
+          minSalary: criteria.min_salary,
+          minOte: criteria.min_ote ?? null,
+          locations: criteria.locations,
+          allowedWorkModes: criteria.allowed_work_modes ?? [],
+          mustHave: criteria.must_have,
+          niceToHave: criteria.nice_to_have,
+          avoid: criteria.avoid,
+          preApprovedCompanies: companyNames,
+          tierSettings,
+          candidateResume: candidateResume || undefined,
+          acceptedExperienceLevels: criteria.experience_levels ?? ['senior'],
+        }
+      );
+      console.log(`[TargetedScan] Claude scored: ${matches.length} matches from ${newJobs.length} candidates`);
+
+      for (const m of matches) {
+        const matchedJob = newJobs.find(j => j.applyUrl === m.applyUrl);
+        const jobSource = matchedJob?.source ?? '';
+        const datePosted = matchedJob?.datePosted ?? null;
+        const loc = (m.location ?? '').trim();
+        const finalTier = m.subScores && m.matchScore
+          ? computeTier(m.matchScore, m.aiRisk, m.subScores, m.title, m.company, loc, tierSettings)
+          : (m.opportunityTier ?? 'unscored');
+
+        const { rows: inserted } = await pool.query(
+          `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, original_url, original_title, original_description, description, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_score, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+           ON CONFLICT (apply_url) DO NOTHING RETURNING *`,
+          [null, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.applyUrl, m.title, m.description ?? null, m.description ?? null, m.whyGoodFit, m.matchScore, jobSource, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskScore ?? null, m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), null, null, null, datePosted]
+        );
+        if (inserted.length > 0) savedJobs.push(inserted[0] as Record<string, unknown>);
+      }
+
+      const newIds = savedJobs.map(j => j.id as number);
+      if (newIds.length > 0) checkUrlHealthInBackground(newIds).catch(() => {});
+    }
+
+    // Fetch already-scored DB jobs for the requested companies and merge
+    let existingMatches: Record<string, unknown>[] = [];
+    if (alreadyInDb.length > 0) {
+      const { rows } = await pool.query(
+        `SELECT * FROM jobs WHERE apply_url = ANY($1::text[]) AND opportunity_tier != 'Probably Skip' ORDER BY match_score DESC LIMIT 20`,
+        [alreadyInDb.map(j => j.applyUrl)]
+      );
+      existingMatches = rows as Record<string, unknown>[];
+    }
+
+    const allResults = [
+      ...savedJobs.filter(j => j.opportunity_tier !== 'Probably Skip'),
+      ...existingMatches,
+    ].sort((a, b) => ((b.match_score as number) ?? 0) - ((a.match_score as number) ?? 0));
+
+    res.json({ jobs: allResults.map(formatJobForTargetedResponse) });
   } catch (e) {
     console.error('[TargetedScan] Error:', e);
     res.status(500).json({ error: String(e) });
@@ -7510,7 +7688,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </div>
       <div id="intel-scan-spinner" style="display:none;text-align:center;padding:20px 0">
         <div class="intel-spinner" style="margin:0 auto 10px"></div>
-        <div style="font-size:12px;color:var(--muted)">Asking Gemini to search for open roles at each company&hellip; (30-90s)</div>
+        <div style="font-size:12px;color:var(--muted)">Searching ATS boards &amp; job sites for matching roles&hellip; (30&ndash;90s)</div>
       </div>
       <div id="intel-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
       <div id="intel-scan-results" style="display:none;margin-top:14px">
@@ -7576,6 +7754,28 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div id="pulse-cards" class="pulse-cards-grid"></div>
 
     <div id="pulse-footer" style="margin-top:16px;font-size:11px;color:var(--muted);text-align:right"></div>
+
+    <div id="pulse-scan-section" style="margin-top:24px;border-top:1px solid var(--border);padding-top:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:8px">
+        <div>
+          <div style="font-size:14px;font-weight:700;color:var(--text)">Open Roles at These Companies</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px">Search for matching jobs at every company in this pulse report</div>
+        </div>
+        <button class="btn btn-gold" id="pulse-scan-btn" onclick="scanForRoles('pulse')">&#x1F50D; Find Open Roles</button>
+      </div>
+      <div id="pulse-scan-spinner" style="display:none;text-align:center;padding:20px 0">
+        <div class="intel-spinner" style="margin:0 auto 10px"></div>
+        <div style="font-size:12px;color:var(--muted)">Searching ATS boards &amp; job sites for matching roles&hellip; (30&ndash;90s)</div>
+      </div>
+      <div id="pulse-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
+      <div id="pulse-scan-results" style="display:none;margin-top:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none" onclick="togglePulseScanResults()">
+          <div id="pulse-scan-count" style="font-size:13px;font-weight:700;color:var(--gold)"></div>
+          <span id="pulse-scan-toggle" style="font-size:12px;color:var(--muted)">&#x25B2; Collapse</span>
+        </div>
+        <div id="pulse-scan-jobs" style="margin-top:12px"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -7605,6 +7805,28 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="dv-summary" id="dv-summary"></div>
     <div class="dv-grid" id="dv-grid"></div>
     <div class="dv-footer" id="dv-footer"></div>
+
+    <div id="dv-scan-section" style="margin-top:24px;border-top:1px solid var(--border);padding-top:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:8px">
+        <div>
+          <div style="font-size:14px;font-weight:700;color:var(--text)">Open Roles at These Companies</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px">Search for matching jobs at every company on this page</div>
+        </div>
+        <button class="btn btn-gold" id="dv-scan-btn" onclick="scanForRoles('deepvalue')">&#x1F50D; Find Open Roles</button>
+      </div>
+      <div id="dv-scan-spinner" style="display:none;text-align:center;padding:20px 0">
+        <div class="intel-spinner" style="margin:0 auto 10px"></div>
+        <div style="font-size:12px;color:var(--muted)">Searching ATS boards &amp; job sites for matching roles&hellip; (30&ndash;90s)</div>
+      </div>
+      <div id="dv-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
+      <div id="dv-scan-results" style="display:none;margin-top:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none" onclick="toggleDvScanResults()">
+          <div id="dv-scan-count" style="font-size:13px;font-weight:700;color:var(--gold)"></div>
+          <span id="dv-scan-toggle" style="font-size:12px;color:var(--muted)">&#x25B2; Collapse</span>
+        </div>
+        <div id="dv-scan-jobs" style="margin-top:12px"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -7663,7 +7885,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </div>
       <div id="preipo-scan-spinner" style="display:none;text-align:center;padding:20px 0">
         <div class="intel-spinner" style="margin:0 auto 10px"></div>
-        <div style="font-size:12px;color:var(--muted)">Asking Gemini to search for open roles at each company&hellip; (30-90s)</div>
+        <div style="font-size:12px;color:var(--muted)">Searching ATS boards &amp; job sites for matching roles&hellip; (30&ndash;90s)</div>
       </div>
       <div id="preipo-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
       <div id="preipo-scan-results" style="display:none;margin-top:14px">
@@ -7714,7 +7936,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </div>
       <div id="leaders-scan-spinner" style="display:none;text-align:center;padding:20px 0">
         <div class="intel-spinner" style="margin:0 auto 10px"></div>
-        <div style="font-size:12px;color:var(--muted)">Asking Gemini to search for open roles at each company&hellip; (30-90s)</div>
+        <div style="font-size:12px;color:var(--muted)">Searching ATS boards &amp; job sites for matching roles&hellip; (30&ndash;90s)</div>
       </div>
       <div id="leaders-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
       <div id="leaders-scan-results" style="display:none;margin-top:14px">
@@ -12717,14 +12939,21 @@ function renderTargetedJobCard(j) {
 async function scanForRoles(source) {
   var isIntel = source === 'intel';
   var isLeaders = source === 'leaders';
-  var prefix = isIntel ? 'intel' : (isLeaders ? 'leaders' : 'preipo');
+  var isPreipo = source === 'preipo';
+  var isDv = source === 'deepvalue';
+  var isPulse = source === 'pulse';
+  var prefix = isIntel ? 'intel' : isLeaders ? 'leaders' : isPreipo ? 'preipo' : isDv ? 'dv' : 'pulse';
   var companies;
   if (isIntel) {
     companies = _intelCompanies;
   } else if (isLeaders) {
     companies = _leadersAllCompanies;
-  } else {
+  } else if (isPreipo) {
     companies = preIpoAllCompanies.map(function(c) { return c.company_name; }).filter(Boolean);
+  } else if (isDv) {
+    companies = _dvAllCompanies;
+  } else {
+    companies = _pulseAllCompanies;
   }
 
   if (!companies || companies.length === 0) {
@@ -12753,16 +12982,8 @@ async function scanForRoles(source) {
     if (!res.ok) throw new Error(json.error || 'Scan failed');
 
     if (json.skipped) {
-      var reason = json.skip_reason || '';
-      var isCapacity = reason.includes('unavailable') || reason.includes('503') || reason.includes('timeout') || reason.includes('candidates') || reason.includes('demand') || reason.includes('429');
-      if (isCapacity) {
-        if (errBox) {
-          errBox.innerHTML = '<strong>AI service is temporarily at capacity</strong> \u2014 this usually clears in 1\u20132 minutes.<br><button style="margin-top:8px;padding:4px 14px;background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.3);border-radius:6px;cursor:pointer;font-size:12px" onclick="runTargetedScan(this.dataset.src)" data-src="' + source + '">Retry</button>';
-          errBox.style.display = '';
-        }
-        return;
-      }
-      throw new Error('Gemini not available: ' + (reason || 'check GEMINI_API_KEY in Settings'));
+      if (errBox) { errBox.textContent = 'No results \u2014 try refreshing the page data first.'; errBox.style.display = ''; }
+      return;
     }
 
     var jobs = json.jobs || [];
@@ -12801,6 +13022,24 @@ function togglePreIpoScanResults() {
   var toggleEl = document.getElementById('preipo-scan-toggle');
   if (jobsEl) jobsEl.style.display = _preipoScanCollapsed ? 'none' : '';
   if (toggleEl) toggleEl.textContent = _preipoScanCollapsed ? '\u25BC Expand' : '\u25B2 Collapse';
+}
+
+var _dvScanCollapsed = false;
+function toggleDvScanResults() {
+  _dvScanCollapsed = !_dvScanCollapsed;
+  var jobsEl = document.getElementById('dv-scan-jobs');
+  var toggleEl = document.getElementById('dv-scan-toggle');
+  if (jobsEl) jobsEl.style.display = _dvScanCollapsed ? 'none' : '';
+  if (toggleEl) toggleEl.textContent = _dvScanCollapsed ? '\u25BC Expand' : '\u25B2 Collapse';
+}
+
+var _pulseScanCollapsed = false;
+function togglePulseScanResults() {
+  _pulseScanCollapsed = !_pulseScanCollapsed;
+  var jobsEl = document.getElementById('pulse-scan-jobs');
+  var toggleEl = document.getElementById('pulse-scan-toggle');
+  if (jobsEl) jobsEl.style.display = _pulseScanCollapsed ? 'none' : '';
+  if (toggleEl) toggleEl.textContent = _pulseScanCollapsed ? '\u25BC Expand' : '\u25B2 Collapse';
 }
 
 // ── Industry Leaders ──────────────────────────────────────────────────────
@@ -12943,6 +13182,7 @@ function renderJobMarketPulse(data, generatedAt, stale) {
 
   // Company cards
   var cards = data.companies || [];
+  _pulseAllCompanies = cards.map(function(c) { return c.company_name || c.name; }).filter(Boolean);
   if (cards.length === 0) {
     el('pulse-cards').innerHTML = '<div class="empty">No company cards generated.</div>';
   } else {
@@ -13284,6 +13524,8 @@ async function refreshNews() {
 
 // ── Deep Value ──────────────────────────────────────────────────────────────
 var _dvWatchlistAdded = {};
+var _dvAllCompanies = [];
+var _pulseAllCompanies = [];
 
 function dvEl(id) { return document.getElementById(id); }
 
@@ -13344,8 +13586,10 @@ function renderDvCard(c) {
 }
 
 function renderDvData(data, stale) {
+  var cos = data.companies || [];
+  _dvAllCompanies = cos.map(function(c) { return c.name; }).filter(Boolean);
   dvEl('dv-summary').textContent = data.market_summary || '';
-  dvEl('dv-grid').innerHTML = (data.companies || []).map(renderDvCard).join('');
+  dvEl('dv-grid').innerHTML = cos.map(renderDvCard).join('');
 
   var genAt = data.generated_at ? new Date(data.generated_at) : null;
   var metaParts = [];
@@ -13354,7 +13598,6 @@ function renderDvData(data, stale) {
   metaParts.push('Powered by Claude + Web Search');
   dvEl('dv-meta').textContent = metaParts.join(' \u2014 ');
 
-  var cos = data.companies || [];
   dvEl('dv-footer').textContent =
     cos.length + ' companies \u2014 ' + cos.filter(function(c) { return c.has_open_roles; }).length + ' with open roles \u2014 ' + (data.model_used || 'Claude');
 
