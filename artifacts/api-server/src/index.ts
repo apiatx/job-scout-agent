@@ -2180,11 +2180,21 @@ app.delete('/api/jobs/tier/:tier', async (req: Request, res: Response) => {
       stretch: 'Stretch Role',
       skip: 'Probably Skip',
       all: null,
+      new: 'new',
     };
     const tier = req.params.tier;
     if (!(tier in tierMap)) { res.status(400).json({ error: 'Invalid tier' }); return; }
     let result;
-    if (tierMap[tier] === null) {
+    if (tier === 'new') {
+      // Delete all unsaved jobs from the latest completed scout run
+      result = await pool.query(`
+        DELETE FROM jobs
+        WHERE saved_at IS NULL
+          AND scout_run_id = (
+            SELECT id FROM scout_runs WHERE status = 'completed' ORDER BY completed_at DESC LIMIT 1
+          )
+      `);
+    } else if (tierMap[tier] === null) {
       result = await pool.query(`DELETE FROM jobs WHERE saved_at IS NULL`);
     } else {
       result = await pool.query(
@@ -2194,6 +2204,24 @@ app.delete('/api/jobs/tier/:tier', async (req: Request, res: Response) => {
     }
     console.log(`[Jobs] Bulk deleted ${result.rowCount} jobs (tier=${tier})`);
     res.json({ ok: true, deleted: result.rowCount });
+  } catch (e: any) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Manually override a job's tier (user-initiated move to a different tab) ──
+app.patch('/api/jobs/:id/tier', async (req: Request, res: Response) => {
+  try {
+    const validTiers = ['Top Target', 'Fast Win', 'Stretch Role', 'Probably Skip'];
+    const { tier } = req.body as { tier?: string };
+    if (!tier || !validTiers.includes(tier)) {
+      res.status(400).json({ error: 'Invalid tier. Must be one of: ' + validTiers.join(', ') }); return;
+    }
+    const { rowCount } = await pool.query(
+      `UPDATE jobs SET opportunity_tier = $1 WHERE id = $2`,
+      [tier, req.params.id]
+    );
+    if (!rowCount) { res.status(404).json({ error: 'Job not found' }); return; }
+    console.log(`[Jobs] Manual tier override: job ${req.params.id} → ${tier}`);
+    res.json({ ok: true, tier });
   } catch (e: any) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -8952,13 +8980,9 @@ function showJobsTab(tab) {
   });
   var clearBtn = document.getElementById('clear-tab-btn');
   if (clearBtn) {
-    if (tab === 'new') {
-      clearBtn.style.display = 'none';
-    } else {
-      var tabLabels = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs' };
-      clearBtn.textContent = '\uD83D\uDDD1 Delete all ' + (tabLabels[tab] || tab);
-      clearBtn.style.display = '';
-    }
+    var tabLabels = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs', new:'New Jobs' };
+    clearBtn.textContent = '\uD83D\uDDD1 Delete all ' + (tabLabels[tab] || tab);
+    clearBtn.style.display = '';
   }
   renderJobs();
 }
@@ -8976,14 +9000,19 @@ async function deleteJob(id) {
 }
 
 async function clearTierJobs() {
-  var tabLabels = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs' };
+  var tabLabels = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs', new:'New Jobs' };
   var label = tabLabels[_currentJobsTab] || _currentJobsTab;
-  var count = _allJobs.filter(function(j) {
-    if (j.saved_at) return false;
-    return _currentJobsTab === 'all' || tierKey(j) === _currentJobsTab;
-  }).length;
+  var count;
+  if (_currentJobsTab === 'new') {
+    count = _allJobs.filter(function(j) { return !j.saved_at && j.is_from_latest_run; }).length;
+  } else {
+    count = _allJobs.filter(function(j) {
+      if (j.saved_at) return false;
+      return _currentJobsTab === 'all' || tierKey(j) === _currentJobsTab;
+    }).length;
+  }
   if (count === 0) { alert('No jobs in this tab to delete.'); return; }
-  if (!confirm('Permanently delete all ' + count + ' ' + label + ' jobs? This cannot be undone.')) return;
+  if (!confirm('Permanently delete all ' + count + ' ' + label + '? This cannot be undone.')) return;
   try {
     var res = await fetch('/api/jobs/tier/' + _currentJobsTab, { method: 'DELETE' });
     if (!res.ok) {
@@ -8997,6 +9026,26 @@ async function clearTierJobs() {
   } catch (e) {
     alert('Delete failed: ' + e);
   }
+}
+
+async function moveJobToTier(id, newTier) {
+  if (!newTier) return;
+  try {
+    var res = await fetch('/api/jobs/' + id + '/tier', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tier: newTier })
+    });
+    if (!res.ok) {
+      var err = await res.json().catch(function() { return {}; });
+      alert('Move failed: ' + (err.error || res.status));
+      return;
+    }
+    var j = _allJobs.find(function(x) { return x.id == id; });
+    if (j) { j.opportunity_tier = newTier; }
+    renderJobs();
+    updateTabCounts();
+  } catch (e) { alert('Move failed: ' + e); }
 }
 
 function isNew(j) {
@@ -9306,6 +9355,13 @@ function renderJobCard(j, opts) {
             '<option value="rejected"' + (userAction === 'rejected' ? ' selected' : '') + '>\u2715 Rejected</option>' +
             '<option value="skipped"' + (userAction === 'skipped' ? ' selected' : '') + '>\u2014 Skipped</option>' +
           '</select>' +
+          '<select class="btn btn-ghost btn-sm" data-jid="' + j.id + '" onchange="moveJobToTier(this.dataset.jid,this.value);this.selectedIndex=0" style="cursor:pointer;color:#a0aec0" title="Move this job to a different tab">' +
+            '<option value="">\u21C6 Move to\u2026</option>' +
+            '<option value="Top Target">\uD83C\uDFAF Top Target</option>' +
+            '<option value="Fast Win">\u26A1 Fast Win</option>' +
+            '<option value="Stretch Role">\uD83D\uDE80 Stretch</option>' +
+            '<option value="Probably Skip">\uD83D\uDEAB Probably Skip</option>' +
+          '</select>' +
           '<button class="' + saveClass + '" onclick="toggleSave(' + j.id + ')" id="save-btn-' + j.id + '">' + saveLabel + '</button>'
       ) +
     '</div>' +
@@ -9340,13 +9396,9 @@ function renderJobs() {
   // Sync the "Delete all in tab" button label with current tab
   var clearBtn = document.getElementById('clear-tab-btn');
   if (clearBtn) {
-    if (_currentJobsTab === 'new') {
-      clearBtn.style.display = 'none';
-    } else {
-      var _tabLbls = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs' };
-      clearBtn.textContent = '\uD83D\uDDD1 Delete all ' + (_tabLbls[_currentJobsTab] || _currentJobsTab);
-      clearBtn.style.display = '';
-    }
+    var _tabLbls = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs', new:'New Jobs' };
+    clearBtn.textContent = '\uD83D\uDDD1 Delete all ' + (_tabLbls[_currentJobsTab] || _currentJobsTab);
+    clearBtn.style.display = '';
   }
 
   updateTabCounts();
