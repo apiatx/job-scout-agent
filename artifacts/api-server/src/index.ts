@@ -542,6 +542,7 @@ async function initDb(): Promise<void> {
   await safeAddColumn('companies', 'last_scan_error', 'TEXT');
   await safeAddColumn('companies', 'detect_status', "TEXT NOT NULL DEFAULT 'manual'");
   await safeAddColumn('companies', 'ats_types_tried', "TEXT[] NOT NULL DEFAULT '{}'");
+  await safeAddColumn('companies', 'user_deleted', 'BOOLEAN NOT NULL DEFAULT false');
   // Gemini discovery columns — added when hybrid pipeline was introduced
   await safeAddColumn('jobs', 'gemini_grounding_metadata', 'JSONB');
   await safeAddColumn('jobs', 'ingestion_confidence', 'FLOAT');
@@ -1187,7 +1188,7 @@ app.put('/api/criteria', async (req: Request, res: Response) => {
 // Companies
 app.get('/api/companies', async (_req, res: Response) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM companies ORDER BY name');
+    const { rows } = await pool.query('SELECT * FROM companies WHERE user_deleted = false ORDER BY name');
     res.json(rows);
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
@@ -1205,7 +1206,7 @@ app.post('/api/companies', async (req: Request, res: Response) => {
 
 app.delete('/api/companies/:id', async (req: Request, res: Response) => {
   try {
-    await pool.query('DELETE FROM companies WHERE id=$1', [req.params.id]);
+    await pool.query('UPDATE companies SET user_deleted = true WHERE id=$1', [req.params.id]);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
@@ -7160,6 +7161,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="nav-group">
     <div class="nav-group-label">Search</div>
     <div class="tab active" id="tab-jobs" onclick="showTab('jobs')" data-tooltip="Your scored job board. Claude rates every listing Top Target / Fast Win / Stretch / Probably Skip against your resume and settings.">Scout</div>
+    <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Your Watchlist — tracks open roles at each company daily using Claude AI search. Also tells the scraper which ATS pages to hit and boosts their score.">Watchlist</div>
     <div class="tab" id="tab-intel" onclick="showTab('intel')" data-tooltip="Claude scans the web daily for companies actively hiring in your space. Market trends, emerging themes, hot companies to target now.">Career Intel</div>
     <div class="tab" id="tab-pulse" onclick="showTab('pulse')" data-tooltip="Job Market Pulse — which companies are hiring most aggressively, what roles are trending, salary patterns from your scout data, and Claude's verdict: true growth or hype?">Job Market Pulse</div>
     <div class="tab" id="tab-leaders" onclick="showTab('leaders')" data-tooltip="Claude-ranked top 5-10 sales-led companies per sector — SaaS, Cybersecurity, AI Infrastructure, Networking and more. The gold standard companies to target for your next move.">Industry Leaders</div>
@@ -7180,7 +7182,6 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="nav-group-label">Settings</div>
     <div class="tab" id="tab-settings" onclick="showTab('settings')" data-tooltip="Controls what the scout actually searches for: target roles, industries, locations, must-have skills, things to avoid, and salary floor. The scout won't run without this configured.">User Search Settings</div>
     <div class="tab" id="tab-positioning" onclick="showTab('positioning')" data-tooltip="Content studio — separate from the job search. Generates your LinkedIn headline, pitches, bios, and objection prep from your intake form. Never affects scoring or discovery.">Positioning Intake</div>
-    <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Your Company Watchlist — tracks open roles at each company daily using Claude AI search. Also tells the scraper which ATS pages to hit and boosts their score.">Company Watchlist</div>
     <div class="tab" id="tab-runs" onclick="showTab('runs')" data-tooltip="Full log of every scout run — jobs found, matches scored, errors, and timing. Use this to debug why a run found too many or too few results.">Run History</div>
   </div>
 </nav>
@@ -7729,7 +7730,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
 
 <div class="panel" id="panel-companies">
   <div style="margin-bottom:20px">
-    <div class="sec-title" style="margin-bottom:4px">Company Watchlist</div>
+    <div class="sec-title" style="margin-bottom:4px">Watchlist</div>
     <div style="font-size:12px;color:var(--muted)">Claude searches for open sales roles at each company daily. Green = matching roles found. Also boosts each company&rsquo;s score in your job board.</div>
   </div>
 
