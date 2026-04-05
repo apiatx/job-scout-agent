@@ -3972,11 +3972,10 @@ app.get('/api/scout/auto-status', async (_req, res: Response) => {
       "SELECT started_at FROM scout_runs WHERE status='completed' ORDER BY started_at DESC LIMIT 1"
     );
     const lastRun = rows[0]?.started_at ? new Date(rows[0].started_at) : null;
-    const hoursSince = lastRun ? (Date.now() - lastRun.getTime()) / 3_600_000 : null;
-    const nextRunInH = hoursSince != null ? Math.max(0, AUTO_RUN_THRESHOLD_H - hoursSince) : 0;
     res.json({
       last_run: lastRun,
-      next_run_in_hours: Math.round(nextRunInH * 10) / 10,
+      auto_run_enabled: false,
+      next_run_in_hours: null,
       threshold_hours: AUTO_RUN_THRESHOLD_H,
     });
   } catch (e) { res.status(500).json({ error: String(e) }); }
@@ -6315,22 +6314,9 @@ initDb()
       if (n > 0) console.log(`Startup reclassify: updated ${n} job tiers to match current logic`);
     } catch (e) { console.warn('Startup reclassify skipped:', e); }
 
-    // Background URL health check + canonical resolution for any unchecked jobs (non-blocking)
-    checkUrlHealthInBackground()
-      .then(() => runCanonicalResolutionInBackground(pool))
-      .catch(() => {});
-
-    // Start auto-scheduler: check immediately after 2 min, then every 15 min
-    setTimeout(checkAutoRun, 2 * 60 * 1000);
-    setInterval(checkAutoRun, AUTO_RUN_CHECK_MS);
-
-    // Weekly email: check every 15 min (Monday at send-time is the actual gate)
-    setInterval(checkWeeklyEmail, 15 * 60 * 1000);
-
-    // Watchlist scan is user-triggered only (via "Find Open Roles" buttons).
-    // Automatic background scanning was disabled because it called Claude Sonnet
-    // + web search for every watchlist company on a daily schedule, causing
-    // significant unintended API charges.
+    // All scheduled/automatic API calls are disabled.
+    // Every external API call (scout, watchlist scan, weekly email, URL resolution)
+    // is user-triggered only to prevent unintended charges.
 
     const server = app.listen(PORT, () => {
       console.log(`Job Scout Agent listening on port ${PORT}`);
@@ -11538,13 +11524,7 @@ async function loadAutoRunBadge() {
     var d = await r.json();
     var el = document.getElementById('auto-run-badge');
     if (!el) return;
-    if (d.next_run_in_hours <= 0) {
-      el.textContent = '\u23F0 Auto-run: due soon';
-    } else {
-      var h = d.next_run_in_hours;
-      var label = h < 1 ? 'in ' + Math.round(h * 60) + 'm' : 'in ' + Math.round(h) + 'h';
-      el.textContent = '\u23F0 Next auto-run ' + label;
-    }
+    el.textContent = '\u23F9 Auto-run: off';
     el.style.display = 'inline';
   } catch(e) { /* ignore */ }
 }
