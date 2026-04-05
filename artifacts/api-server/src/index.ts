@@ -37,7 +37,7 @@ const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT) || 8080;
 const AUTO_RUN_CHECK_MS = 15 * 60 * 1000;   // check every 15 min
-const AUTO_RUN_THRESHOLD_H = 20;             // trigger if no run in 20 hours
+const AUTO_RUN_THRESHOLD_H = 24;             // trigger if no run in 24 hours
 
 if (!process.env.DATABASE_URL) {
   console.error('ERROR: DATABASE_URL environment variable is not set.');
@@ -6118,8 +6118,8 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
     // Weekly email is handled by checkWeeklyEmail() scheduler — no per-run email
 
-    // Background auto-tailoring: pre-tailor top 3 Top Targets (fire-and-forget)
-    autotailorTopMatches(runId);
+    // Note: auto-tailoring disabled to prevent unintended background API spend.
+    // Users can tailor resumes manually from the job cards.
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     await pool.query(
@@ -6284,8 +6284,11 @@ async function checkAutoRun(): Promise<void> {
   try {
     const { rows: cRows } = await pool.query('SELECT id FROM criteria LIMIT 1');
     if (cRows.length === 0) return;
+    // Check both completed AND recently-started runs to avoid re-triggering
+    // after crashes/restarts (previously only checked 'completed' which caused
+    // repeated Opus+Haiku charges after any failed run)
     const { rows: runRows } = await pool.query(
-      "SELECT started_at FROM scout_runs WHERE status='completed' ORDER BY started_at DESC LIMIT 1"
+      "SELECT started_at FROM scout_runs WHERE started_at > NOW() - INTERVAL '24 hours' ORDER BY started_at DESC LIMIT 1"
     );
     if (runRows.length > 0) {
       const hoursSince = (Date.now() - new Date(runRows[0].started_at).getTime()) / 3_600_000;
@@ -6324,9 +6327,10 @@ initDb()
     // Weekly email: check every 15 min (Monday at send-time is the actual gate)
     setInterval(checkWeeklyEmail, 15 * 60 * 1000);
 
-    // Watchlist daily scan: check after 5 min startup delay, then every hour
-    setTimeout(checkWatchlistScan, 5 * 60 * 1000);
-    setInterval(checkWatchlistScan, 60 * 60 * 1000);
+    // Watchlist scan is user-triggered only (via "Find Open Roles" buttons).
+    // Automatic background scanning was disabled because it called Claude Sonnet
+    // + web search for every watchlist company on a daily schedule, causing
+    // significant unintended API charges.
 
     const server = app.listen(PORT, () => {
       console.log(`Job Scout Agent listening on port ${PORT}`);
