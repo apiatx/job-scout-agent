@@ -2973,7 +2973,18 @@ app.post('/api/linkedin-message/generate', async (req: Request, res: Response) =
       [job_id]
     );
     const { rows: spRows } = await pool.query("SELECT prompt_text FROM system_prompts WHERE prompt_name='linkedin_connection_message'");
-    const systemPrompt = spRows[0]?.prompt_text || '';
+    const LI_FALLBACK_SYSTEM_PROMPT = `You write LinkedIn connection request messages for enterprise sales professionals. You MUST return ONLY valid JSON — no prose, no explanation.
+
+Format:
+{"message":"<primary message under 300 chars>","alternative":"<alternate phrasing under 300 chars>"}
+
+Rules:
+- First-person, warm but professional
+- Reference the company or role specifically
+- End with a soft ask ("would love to connect")
+- STRICTLY under 300 characters each
+- Return ONLY the JSON object — nothing else`;
+    const systemPrompt = spRows[0]?.prompt_text || LI_FALLBACK_SYSTEM_PROMPT;
     const HMAnthropic3 = (await import('@anthropic-ai/sdk')).default;
     const hmClaude3 = new HMAnthropic3({ apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '' });
     const step = await hmClaude3.messages.create({
@@ -2996,12 +3007,19 @@ No research available — use what you know about the company
 MY KEY PROOF POINTS (pick the single most relevant one):
 ${resumeRows[0]?.resume_text?.slice(0, 2000) || job.description?.slice(0, 1000) || 'Enterprise sales professional with quota-carrying experience'}
 
-Generate the LinkedIn connection request message.`,
+Generate the LinkedIn connection request message. Return ONLY valid JSON: {"message":"...","alternative":"..."}`,
       }],
     });
     const rawText = step.content.filter((b: any) => b.type === 'text').map((b: any) => (b as any).text).join('').trim();
     const cleaned = rawText.replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
-    const parsed = JSON.parse(cleaned);
+    let parsed: Record<string, any>;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (_parseErr) {
+      // Claude returned plain text — wrap it directly as the message
+      const msgText = cleaned.length > 300 ? cleaned.slice(0, 297) + '...' : cleaned;
+      parsed = { message: msgText, alternative: '' };
+    }
     // Enforce 300 char limit
     if (parsed.message && parsed.message.length > 300) {
       parsed.message = parsed.message.slice(0, 297) + '...';
