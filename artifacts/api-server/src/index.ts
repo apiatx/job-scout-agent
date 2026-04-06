@@ -2973,15 +2973,19 @@ app.post('/api/linkedin-message/generate', async (req: Request, res: Response) =
       [job_id]
     );
     const { rows: spRows } = await pool.query("SELECT prompt_text FROM system_prompts WHERE prompt_name='linkedin_connection_message'");
-    const LI_FALLBACK_SYSTEM_PROMPT = `You write LinkedIn connection request messages for enterprise sales professionals. You MUST return ONLY valid JSON — no prose, no explanation.
+    const LI_FALLBACK_SYSTEM_PROMPT = `You write LinkedIn connection request messages. You MUST return ONLY valid JSON — no prose, no explanation.
 
 Format:
 {"message":"<primary message under 300 chars>","alternative":"<alternate phrasing under 300 chars>"}
 
-Rules:
-- First-person, warm but professional
-- Reference the company or role specifically
-- End with a soft ask ("would love to connect")
+Core principles — the message must feel like a REAL human reaching out, not a sales pitch:
+- Express genuine curiosity about the person's work, career journey, or their company's mission
+- Reference something specific about their role, company direction, or industry that shows you actually thought about THEM
+- Warm, conversational tone — like reaching out to someone you respect
+- NO numbers, NO metrics, NO percentages, NO dollar amounts, NO quota references — ever
+- NO brag phrases like "consistently closed", "drove X in pipeline", "top performer", etc.
+- The goal is to START a relationship, not close a deal
+- End with a simple, low-pressure ask like "would love to connect" or "would enjoy exchanging perspectives"
 - STRICTLY under 300 characters each
 - Return ONLY the JSON object — nothing else`;
     const systemPrompt = spRows[0]?.prompt_text || LI_FALLBACK_SYSTEM_PROMPT;
@@ -2993,21 +2997,15 @@ Rules:
       system: systemPrompt,
       messages: [{
         role: 'user',
-        content: `HIRING MANAGER:
-Name: ${hm.full_name}
-Title: ${hm.title || 'Unknown'}
-Company: ${hm.company}
+        content: `CONTEXT FOR PERSONALIZATION:
+- I'm reaching out to: ${hm.full_name}, ${hm.title || 'leader'} at ${hm.company}
+- I'm exploring the ${job.title} role at their company
+- Use what you know publicly about ${hm.company} — their mission, recent news, market position, or the space they operate in — to make the message feel genuinely informed and curious
+- The tone should feel like one professional reaching out to another because they find the person's work or company genuinely interesting
+- Do NOT mention my resume, experience metrics, quota numbers, or any specific performance data
+- Focus on THEM and their company, not on selling myself
 
-ROLE I'M APPLYING FOR:
-${job.title}
-
-COMPANY RESEARCH:
-No research available — use what you know about the company
-
-MY KEY PROOF POINTS (pick the single most relevant one):
-${resumeRows[0]?.resume_text?.slice(0, 2000) || job.description?.slice(0, 1000) || 'Enterprise sales professional with quota-carrying experience'}
-
-Generate the LinkedIn connection request message. Return ONLY valid JSON: {"message":"...","alternative":"..."}`,
+Write two short LinkedIn connection request messages (under 300 chars each) that feel human and genuine. Return ONLY valid JSON: {"message":"...","alternative":"..."}`,
       }],
     });
     const rawText = step.content.filter((b: any) => b.type === 'text').map((b: any) => (b as any).text).join('').trim();
