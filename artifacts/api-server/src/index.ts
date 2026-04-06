@@ -3041,6 +3041,33 @@ Write two short LinkedIn connection request messages (under 300 chars each) that
 });
 
 // ── LinkedIn message — mark sent ──────────────────────────────────────────
+app.get('/api/linkedin-message/draft', async (req: Request, res: Response) => {
+  try {
+    const hmId  = Number(req.query.hiring_manager_id);
+    const jobId = Number(req.query.job_id);
+    if (!hmId || !jobId) { res.status(400).json({ error: 'hiring_manager_id and job_id required' }); return; }
+    const { rows } = await pool.query(
+      `SELECT id, message_text, char_count, version, status, sent_at
+       FROM linkedin_messages
+       WHERE hiring_manager_id=$1 AND job_id=$2
+       ORDER BY version ASC`,
+      [hmId, jobId]
+    );
+    const v1 = rows.find(r => r.version === 1);
+    const v2 = rows.find(r => r.version === 2);
+    if (!v1 && !v2) { res.json({ exists: false }); return; }
+    res.json({
+      exists: true,
+      message:     v1?.message_text || '',
+      alternative: v2?.message_text || '',
+      char_count:     (v1?.message_text || '').length,
+      alt_char_count: (v2?.message_text || '').length,
+      status: v1?.status || v2?.status || 'draft',
+      sent_at: v1?.sent_at || v2?.sent_at || null,
+    });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 app.put('/api/linkedin-message/mark-sent', async (req: Request, res: Response) => {
   try {
     const { hiring_manager_id, job_id, status } = req.body as any;
@@ -8778,6 +8805,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div style="padding:20px;display:flex;flex-direction:column;gap:14px">
       <div id="li-msg-loading" style="text-align:center;padding:20px;color:var(--muted);font-size:13px">Drafting your message&hellip;</div>
       <div id="li-msg-content" style="display:none">
+        <div id="li-msg-status" style="display:none;font-size:11px;padding:5px 8px;border-radius:4px;margin-bottom:10px;background:rgba(0,200,110,.08);border:1px solid rgba(0,200,110,.2);color:#00c86e"></div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Version 1 &mdash; <span id="li-v1-count" style="font-weight:600;color:var(--text)">0</span>&thinsp;/&thinsp;300 chars</div>
         <textarea id="li-v1-text" rows="4" class="input-text" style="width:100%;box-sizing:border-box;resize:vertical;font-size:13px;line-height:1.5" oninput="updateLICount(this,'li-v1-count')"></textarea>
         <div style="display:flex;gap:6px;margin-top:4px">
@@ -10712,10 +10740,44 @@ async function openLIModal(hmId, jobId, btn) {
   _liMsgId = null;
   document.getElementById('li-msg-modal').style.display = 'flex';
   document.getElementById('li-msg-loading').style.display = '';
+  document.getElementById('li-msg-loading').textContent = 'Loading\u2026';
   document.getElementById('li-msg-content').style.display = 'none';
   document.getElementById('li-msg-error').style.display = 'none';
   document.getElementById('li-regen-btn').style.display = 'none';
   document.getElementById('li-sent-btn').style.display = 'none';
+  var statusEl = document.getElementById('li-msg-status');
+  if (statusEl) statusEl.style.display = 'none';
+
+  try {
+    var draftRes = await fetch('/api/linkedin-message/draft?hiring_manager_id=' + Number(hmId) + '&job_id=' + Number(jobId));
+    var draft = await draftRes.json();
+    if (draft.exists) {
+      _populateLIModal(draft.message || '', draft.alternative || '');
+      var statusEl = document.getElementById('li-msg-status');
+      if (statusEl) {
+        if (draft.status === 'sent') {
+          statusEl.textContent = '\u2713 Previously marked as sent';
+          statusEl.style.background = 'rgba(0,200,110,.08)';
+          statusEl.style.borderColor = 'rgba(0,200,110,.2)';
+          statusEl.style.color = '#00c86e';
+        } else {
+          statusEl.textContent = 'Saved draft \u2014 click Regenerate to create a new version';
+          statusEl.style.background = 'rgba(245,200,66,.06)';
+          statusEl.style.borderColor = 'rgba(245,200,66,.2)';
+          statusEl.style.color = '#f5c842';
+        }
+        statusEl.style.display = '';
+      }
+      document.getElementById('li-msg-loading').style.display = 'none';
+      document.getElementById('li-msg-content').style.display = '';
+      document.getElementById('li-regen-btn').style.display = '';
+      if (draft.status !== 'sent') document.getElementById('li-sent-btn').style.display = '';
+      return;
+    }
+  } catch(_) {}
+
+  // No saved draft — generate a new one
+  document.getElementById('li-msg-loading').textContent = 'Drafting your message\u2026';
   await generateLinkedInMessage();
 }
 
@@ -10723,10 +10785,22 @@ function closeLIModal() {
   document.getElementById('li-msg-modal').style.display = 'none';
 }
 
+function _populateLIModal(v1, v2) {
+  var v1El = document.getElementById('li-v1-text');
+  var v2El = document.getElementById('li-v2-text');
+  if (v1El) { v1El.value = v1; updateLICount(v1El, 'li-v1-count'); }
+  if (v2El) { v2El.value = v2; updateLICount(v2El, 'li-v2-count'); }
+}
+
 async function generateLinkedInMessage() {
   document.getElementById('li-msg-loading').style.display = '';
+  document.getElementById('li-msg-loading').textContent = 'Drafting your message\u2026';
   document.getElementById('li-msg-content').style.display = 'none';
   document.getElementById('li-msg-error').style.display = 'none';
+  document.getElementById('li-regen-btn').style.display = 'none';
+  document.getElementById('li-sent-btn').style.display = 'none';
+  var statusEl = document.getElementById('li-msg-status');
+  if (statusEl) statusEl.style.display = 'none';
   try {
     var res = await fetch('/api/linkedin-message/generate', {
       method: 'POST',
@@ -10735,12 +10809,7 @@ async function generateLinkedInMessage() {
     });
     var data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Generation failed');
-    var v1 = data.message || '';
-    var v2 = data.alternative || '';
-    var v1El = document.getElementById('li-v1-text');
-    var v2El = document.getElementById('li-v2-text');
-    if (v1El) { v1El.value = v1; updateLICount(v1El, 'li-v1-count'); }
-    if (v2El) { v2El.value = v2; updateLICount(v2El, 'li-v2-count'); }
+    _populateLIModal(data.message || '', data.alternative || '');
     _liMsgId = data.message_id || null;
     document.getElementById('li-msg-loading').style.display = 'none';
     document.getElementById('li-msg-content').style.display = '';
