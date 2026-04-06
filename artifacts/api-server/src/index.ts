@@ -7165,6 +7165,21 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .pipeline-empty{color:var(--muted);font-size:12px;text-align:center;padding:20px 0;font-style:italic}
 .prep-badge{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;background:rgba(129,140,248,.15);color:#818cf8;border:1px solid rgba(129,140,248,.3)}
 /* ── Interview Prep Modal ─────────────────────────────────────────────── */
+.add-job-btn{margin-left:auto;width:22px;height:22px;border-radius:50%;border:1px solid rgba(245,200,66,.4);background:rgba(245,200,66,.1);color:var(--gold);font-size:16px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s,border-color .15s;padding:0;flex-shrink:0}
+.add-job-btn:hover{background:rgba(245,200,66,.22);border-color:var(--gold)}
+.add-job-overlay{position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:1200;display:none;align-items:center;justify-content:center;padding:20px}
+.add-job-overlay.open{display:flex}
+.add-job-modal{background:#111;border:1px solid #2a2a2a;border-radius:14px;width:100%;max-width:560px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden}
+.add-job-modal-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:20px 20px 14px;border-bottom:1px solid #1e1e1e}
+.add-job-modal-title{font-size:16px;font-weight:700;color:var(--text)}
+.add-job-modal-body{padding:18px 20px;overflow-y:auto;display:flex;flex-direction:column;gap:14px}
+.add-job-modal-footer{display:flex;justify-content:flex-end;gap:8px;padding:14px 20px;border-top:1px solid #1e1e1e}
+.add-job-field{display:flex;flex-direction:column;gap:5px}
+.add-job-label{font-size:12px;font-weight:600;color:var(--text);letter-spacing:.02em}
+.add-job-input{background:#0a0a0a;border:1px solid #2a2a2a;border-radius:6px;color:var(--text);font-size:13px;padding:8px 10px;outline:none;transition:border-color .15s;width:100%;box-sizing:border-box}
+.add-job-input:focus{border-color:var(--gold)}
+.add-job-textarea{background:#0a0a0a;border:1px solid #2a2a2a;border-radius:6px;color:var(--text);font-size:13px;padding:8px 10px;outline:none;transition:border-color .15s;width:100%;box-sizing:border-box;min-height:200px;resize:vertical;font-family:inherit;line-height:1.5}
+.add-job-textarea:focus{border-color:var(--gold)}
 .prep-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1100;display:none;align-items:center;justify-content:center;padding:20px}
 .prep-modal-overlay.open{display:flex}
 .prep-modal{background:#111;border:1px solid #333;border-radius:14px;width:100%;max-width:680px;max-height:90vh;overflow:hidden;display:flex;flex-direction:column}
@@ -7422,7 +7437,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <!-- Kanban columns -->
   <div class="pipeline-columns" id="pipeline-columns">
     <div class="pipeline-col">
-      <div class="pipeline-col-header col-interested">&#x2795; Apply <span class="pipeline-col-count" id="pipe-count-interested">0</span></div>
+      <div class="pipeline-col-header col-interested">&#x2795; Apply <span class="pipeline-col-count" id="pipe-count-interested">0</span><button class="add-job-btn" onclick="openAddJobModal()" title="Add job manually">+</button></div>
       <div id="pipe-col-interested"></div>
     </div>
     <div class="pipeline-col">
@@ -7441,8 +7456,47 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="pipeline-empty" style="display:none;text-align:center;padding:48px 24px;color:var(--muted)">
     <div style="font-size:32px;margin-bottom:12px">&#x1F4CB;</div>
     <div style="font-size:15px;font-weight:600;margin-bottom:6px">Your pipeline is empty</div>
-    <div style="font-size:13px">Use the Track Status dropdown on any job card to add jobs here.</div>
-    <button class="btn btn-gold btn-sm" style="margin-top:16px" onclick="showTab('jobs')">Browse Jobs &rarr;</button>
+    <div style="font-size:13px">Track a job from Scout, or add one manually below.</div>
+    <div style="display:flex;gap:10px;justify-content:center;margin-top:16px;flex-wrap:wrap">
+      <button class="btn btn-gold btn-sm" onclick="showTab('jobs')">Browse Scout Jobs &rarr;</button>
+      <button class="btn btn-ghost btn-sm" onclick="openAddJobModal()">&#x2795; Add Job Manually</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Job Manually Modal -->
+<div class="add-job-overlay" id="add-job-overlay" onclick="if(event.target===this)closeAddJobModal()">
+  <div class="add-job-modal">
+    <div class="add-job-modal-header">
+      <div>
+        <div class="add-job-modal-title">&#x2795; Add Job Manually</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px">Paste a job description — Claude will score it and add it to your Apply column</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="closeAddJobModal()" style="flex-shrink:0">&#x2715;</button>
+    </div>
+    <div class="add-job-modal-body">
+      <div class="add-job-field">
+        <label class="add-job-label">Company Name <span style="color:#e55353">*</span></label>
+        <input id="add-job-company" class="add-job-input" type="text" placeholder="e.g. Nvidia" autocomplete="off" />
+      </div>
+      <div class="add-job-field">
+        <label class="add-job-label">Job Title <span style="color:var(--muted);font-weight:400">(optional — Claude will extract from description if blank)</span></label>
+        <input id="add-job-title" class="add-job-input" type="text" placeholder="e.g. Enterprise Account Executive" autocomplete="off" />
+      </div>
+      <div class="add-job-field">
+        <label class="add-job-label">Job Description <span style="color:#e55353">*</span></label>
+        <textarea id="add-job-desc" class="add-job-textarea" placeholder="Paste the full job description here&#x2026;"></textarea>
+      </div>
+      <div class="add-job-field">
+        <label class="add-job-label">Apply URL <span style="color:var(--muted);font-weight:400">(optional)</span></label>
+        <input id="add-job-url" class="add-job-input" type="url" placeholder="https://…" autocomplete="off" />
+      </div>
+      <div id="add-job-error" style="display:none;color:#e55353;font-size:12px;margin-top:4px"></div>
+    </div>
+    <div class="add-job-modal-footer">
+      <button class="btn btn-ghost btn-sm" onclick="closeAddJobModal()">Cancel</button>
+      <button class="btn btn-gold" id="add-job-save-btn" onclick="submitManualJob()">Save &amp; Score</button>
+    </div>
   </div>
 </div>
 
@@ -9858,6 +9912,79 @@ function renderPipelineCard(j, stage) {
       progressBtn + removeBtn +
     '</div>' +
   '</div>';
+}
+
+// ── Add Job Manually ───────────────────────────────────────────────────────
+function openAddJobModal() {
+  var overlay = document.getElementById('add-job-overlay');
+  if (!overlay) return;
+  document.getElementById('add-job-company').value = '';
+  document.getElementById('add-job-title').value = '';
+  document.getElementById('add-job-desc').value = '';
+  document.getElementById('add-job-url').value = '';
+  var errEl = document.getElementById('add-job-error');
+  if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+  var btn = document.getElementById('add-job-save-btn');
+  if (btn) { btn.disabled = false; btn.textContent = 'Save \u0026 Score'; }
+  overlay.classList.add('open');
+  setTimeout(function() {
+    var co = document.getElementById('add-job-company');
+    if (co) co.focus();
+  }, 60);
+}
+
+function closeAddJobModal() {
+  var overlay = document.getElementById('add-job-overlay');
+  if (overlay) overlay.classList.remove('open');
+}
+
+async function submitManualJob() {
+  var company = (document.getElementById('add-job-company').value || '').trim();
+  var title   = (document.getElementById('add-job-title').value || '').trim();
+  var desc    = (document.getElementById('add-job-desc').value || '').trim();
+  var url     = (document.getElementById('add-job-url').value || '').trim();
+  var errEl   = document.getElementById('add-job-error');
+  var btn     = document.getElementById('add-job-save-btn');
+
+  if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+
+  if (!company) {
+    if (errEl) { errEl.textContent = 'Company name is required.'; errEl.style.display = 'block'; }
+    document.getElementById('add-job-company').focus();
+    return;
+  }
+  if (!desc) {
+    if (errEl) { errEl.textContent = 'Job description is required.'; errEl.style.display = 'block'; }
+    document.getElementById('add-job-desc').focus();
+    return;
+  }
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Scoring with Claude\u2026'; }
+
+  try {
+    var body = { company: company, description: desc };
+    if (title) body.title = title;
+    if (url)   body.applyUrl = url;
+
+    var res = await fetch('/api/jobs/custom', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    var data = await res.json();
+    if (!res.ok) {
+      if (errEl) { errEl.textContent = data.error || 'Failed to save job. Please try again.'; errEl.style.display = 'block'; }
+      if (btn) { btn.disabled = false; btn.textContent = 'Save \u0026 Score'; }
+      return;
+    }
+
+    closeAddJobModal();
+    showTab('pipeline');
+    await loadPipeline();
+  } catch(e) {
+    if (errEl) { errEl.textContent = 'Network error — please try again.'; errEl.style.display = 'block'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Save \u0026 Score'; }
+  }
 }
 
 // ── Daily Actions ──────────────────────────────────────────────────────────
