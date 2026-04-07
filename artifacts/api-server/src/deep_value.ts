@@ -1,15 +1,15 @@
 /**
  * Deep Value Intelligence Engine
  *
- * Uses Gemini + Google Search grounding to identify cutting-edge infrastructure
+ * Uses Claude + web search to identify cutting-edge infrastructure
  * companies with the clearest "why you need this" customer value proposition.
  * Focus: non-SaaS infrastructure — Cloud, AI Infra, Data/Database, HPC, Semiconductors,
  * Photonics, Networking, Storage, Datacenter.
  *
- * The EXACT user prompt is passed to Gemini, with a structured JSON output wrapper.
+ * The EXACT user prompt is passed to Claude, with a structured JSON output wrapper.
  */
 
-import { GoogleGenAI, type GroundingChunk } from '@google/genai';
+import Anthropic from '@anthropic-ai/sdk';
 import type { Pool } from 'pg';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -43,32 +43,6 @@ export interface DeepValueResult {
   companies: DeepValueCompany[];
   model_used: string | null;
   grounding_sources_count: number;
-}
-
-// ── Model waterfall ────────────────────────────────────────────────────────────
-
-const BUILTIN_CANDIDATES = [
-  { modelName: 'gemini-3-flash-preview',   note: 'Gemini 3 Flash' },
-  { modelName: 'gemini-3.1-pro-preview',   note: 'Gemini 3.1 Pro' },
-  { modelName: 'gemini-flash-latest',      note: 'Gemini Flash (alias)' },
-  { modelName: 'gemini-pro-latest',        note: 'Gemini Pro (alias)' },
-];
-
-function isModelUnavailableError(err: unknown): boolean {
-  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  return msg.includes('model not found') || msg.includes('404') || msg.includes('not found') ||
-    msg.includes('not available') || msg.includes('unsupported model') ||
-    msg.includes('invalid model') || msg.includes('deprecated') ||
-    msg.includes('503') || msg.includes('unavailable') || msg.includes('high demand') ||
-    msg.includes('try again later') || msg.includes('overloaded') ||
-    msg.includes('resource_exhausted') || msg.includes('429') || msg.includes('timeout');
-}
-
-function buildCandidateChain() {
-  const envModel = process.env.GEMINI_MODEL?.trim();
-  if (!envModel) return [...BUILTIN_CANDIDATES];
-  const deduped = BUILTIN_CANDIDATES.filter(c => c.modelName !== envModel);
-  return [{ modelName: envModel, note: 'env override' }, ...deduped];
 }
 
 // ── DB helpers ─────────────────────────────────────────────────────────────────
@@ -143,20 +117,56 @@ export async function upsertCompanyJobScan(
   );
 }
 
-// ── Gemini generation ──────────────────────────────────────────────────────────
+// ── JSON repair helper ────────────────────────────────────────────────────────
+// Recovers from truncated JSON by finding the last fully-closed array element
+// and closing any remaining open brackets, so partial responses still parse.
+
+function repairTruncatedJson(raw: string): string {
+  let depth = 0, arrDepth = 0, lastGoodClose = -1;
+  let inStr = false, esc = false;
+
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (esc)            { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"')      { inStr = !inStr; continue; }
+    if (inStr)          continue;
+    if (c === '[')      arrDepth++;
+    if (c === ']')      arrDepth = Math.max(0, arrDepth - 1);
+    if (c === '{')      depth++;
+    if (c === '}') { depth--; if (depth === 0 && arrDepth > 0) lastGoodClose = i; }
+  }
+
+  const base = lastGoodClose !== -1 ? raw.slice(0, lastGoodClose + 1) : raw;
+  const stack: string[] = [];
+  const closer: Record<string, string> = { '[': ']', '{': '}' };
+  inStr = false; esc = false;
+  for (const c of base) {
+    if (esc)             { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"')       { inStr = !inStr; continue; }
+    if (inStr)           continue;
+    if (c === '[' || c === '{') stack.push(c);
+    if ((c === ']' || c === '}') && stack.length > 0) stack.pop();
+  }
+  return base + [...stack].reverse().map(o => closer[o]).join('');
+}
+
+// ── Claude generation ──────────────────────────────────────────────────────────
+
+const CLAUDE_MODEL = 'claude-sonnet-4-6';
 
 export async function generateDeepValue(criteria: {
   target_roles: string[];
   locations: string[];
   min_salary: number | null;
 }): Promise<DeepValueResult> {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
   if (!apiKey) {
-    throw new Error('GEMINI_API_KEY not set — configure it in Settings');
+    throw new Error('ANTHROPIC_API_KEY not set — configure it in Settings');
   }
 
-  const ai = new GoogleGenAI({ apiKey });
-  const candidates = buildCandidateChain();
+  const client = new Anthropic({ apiKey });
 
   // The EXACT user-specified prompt + structured JSON output instructions
   const userPromptCore = `What cutting edge companies have the clearest "why you need this" case when talking to customers. Only looking at non-saas tools, moreso 'infrastructure' like Cloud infra, AI Infra, data/database, high performance storage, HPC/Compute, semiconductors, photonics, networking, datacenter, etc.`;
@@ -194,85 +204,73 @@ Return ONLY valid JSON — no markdown, no prose, no code blocks:
   ]
 }`;
 
-  let lastError: unknown;
+  console.log(`[DeepValue] Generating with ${CLAUDE_MODEL} + web search`);
 
-  for (const candidate of candidates) {
+  const response = await client.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 16000,
+    tools: [{ type: 'web_search_20250305', name: 'web_search' }] as any[],
+    messages: [{ role: 'user', content: fullPrompt }],
+  });
+
+  const raw = response.content
+    .filter((b: any) => b.type === 'text')
+    .map((b: any) => b.text)
+    .join('\n');
+
+  const sourceCount = response.content.filter((b: any) => b.type === 'tool_use').length;
+
+  console.log(`[DeepValue] ${CLAUDE_MODEL} — ${raw.length} chars, ${sourceCount} web search calls`);
+
+  // Parse JSON — strip markdown code blocks if present
+  let jsonStr = raw.trim();
+  const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
+  const jsonMatch = jsonStr.match(/\{[\s\S]*/);
+  if (!jsonMatch) throw new Error(`No JSON object found in response. Preview: ${raw.slice(0, 300)}`);
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(jsonMatch[0]);
+  } catch {
+    // Response was truncated — repair and retry
+    console.warn(`[DeepValue] JSON truncated, attempting repair…`);
     try {
-      console.log(`[DeepValue] Trying model: ${candidate.modelName} (${candidate.note})`);
-
-      const response = await ai.models.generateContent({
-        model: candidate.modelName,
-        contents: fullPrompt,
-        config: {
-          tools: [{ googleSearch: {} }],
-          temperature: 0.3,
-          maxOutputTokens: 8192,
-        },
-      });
-
-      const raw = response.text ?? '';
-
-      // Collect grounding sources
-      const groundingChunks: GroundingChunk[] =
-        (response.candidates?.[0]?.groundingMetadata?.groundingChunks as GroundingChunk[] | undefined) ?? [];
-      const sourceCount = groundingChunks.length;
-
-      console.log(`[DeepValue] Model ${candidate.modelName} — ${raw.length} chars, ${sourceCount} grounding sources`);
-
-      // Parse JSON — strip markdown code blocks if present
-      let jsonStr = raw.trim();
-      const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
-      const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error(`No JSON object found in response. Preview: ${raw.slice(0, 300)}`);
-
-      let parsed: any;
-      try {
-        parsed = JSON.parse(jsonMatch[0]);
-      } catch (parseErr) {
-        throw new Error(`JSON parse failed: ${parseErr}. Preview: ${jsonMatch[0].slice(0, 300)}`);
-      }
-
-      const companies: DeepValueCompany[] = (parsed.companies || []).map((c: any) => ({
-        name: c.name || '',
-        website: c.website || null,
-        category: c.category || 'Infrastructure',
-        stage: c.stage || null,
-        ticker: c.ticker || null,
-        is_public: Boolean(c.is_public),
-        tagline: c.tagline || '',
-        why_you_need_this: c.why_you_need_this || '',
-        customer_pain: c.customer_pain || '',
-        growth_signal: c.growth_signal || '',
-        notable_customers: Array.isArray(c.notable_customers) ? c.notable_customers : [],
-        open_roles: Array.isArray(c.open_roles)
-          ? c.open_roles.map((r: any) => ({ title: r.title || '', apply_url: r.apply_url || null, location: r.location || null }))
-          : [],
-        has_open_roles: Boolean(c.has_open_roles) || (Array.isArray(c.open_roles) && c.open_roles.length > 0),
-        source_citations: Array.isArray(c.source_citations)
-          ? c.source_citations.map((s: any) => ({ title: s.title || '', url: s.url || '' }))
-          : [],
-      }));
-
-      return {
-        generated_at: new Date().toISOString(),
-        market_summary: parsed.market_summary || '',
-        companies,
-        model_used: candidate.modelName,
-        grounding_sources_count: sourceCount,
-      };
-
-    } catch (err) {
-      lastError = err;
-      if (isModelUnavailableError(err)) {
-        console.warn(`[DeepValue] Model ${candidate.modelName} unavailable, trying next…`);
-        continue;
-      }
-      throw err;
+      parsed = JSON.parse(repairTruncatedJson(jsonMatch[0]));
+      console.log(`[DeepValue] Repair succeeded — recovered ${parsed.companies?.length ?? 0} companies`);
+    } catch (repairErr) {
+      throw new Error(`JSON parse failed even after repair: ${repairErr}. Preview: ${jsonMatch[0].slice(0, 300)}`);
     }
   }
 
-  throw new Error(`All Gemini models exhausted. Last error: ${lastError}`);
+  const companies: DeepValueCompany[] = (parsed.companies || []).map((c: any) => ({
+    name: c.name || '',
+    website: c.website || null,
+    category: c.category || 'Infrastructure',
+    stage: c.stage || null,
+    ticker: c.ticker || null,
+    is_public: Boolean(c.is_public),
+    tagline: c.tagline || '',
+    why_you_need_this: c.why_you_need_this || '',
+    customer_pain: c.customer_pain || '',
+    growth_signal: c.growth_signal || '',
+    notable_customers: Array.isArray(c.notable_customers) ? c.notable_customers : [],
+    open_roles: Array.isArray(c.open_roles)
+      ? c.open_roles.map((r: any) => ({ title: r.title || '', apply_url: r.apply_url || null, location: r.location || null }))
+      : [],
+    has_open_roles: Boolean(c.has_open_roles) || (Array.isArray(c.open_roles) && c.open_roles.length > 0),
+    source_citations: Array.isArray(c.source_citations)
+      ? c.source_citations.map((s: any) => ({ title: s.title || '', url: s.url || '' }))
+      : [],
+  }));
+
+  return {
+    generated_at: new Date().toISOString(),
+    market_summary: parsed.market_summary || '',
+    companies,
+    model_used: CLAUDE_MODEL,
+    grounding_sources_count: sourceCount,
+  };
 }
 
 // ── Watchlist job scan ─────────────────────────────────────────────────────────
@@ -282,11 +280,10 @@ export async function scanWatchlistCompanyJobs(
   companyName: string,
   criteria: { target_roles: string[]; locations: string[] }
 ): Promise<Array<{ title: string; apply_url: string | null; location: string | null }>> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('GEMINI_API_KEY not set');
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
-  const ai = new GoogleGenAI({ apiKey });
-  const candidates = buildCandidateChain();
+  const client = new Anthropic({ apiKey });
 
   const roles = (criteria.target_roles || []).join(', ') || 'Enterprise Account Executive, Sales Engineer, Strategic Account Executive';
   const locs = (criteria.locations || ['Remote']).join(', ');
@@ -303,40 +300,37 @@ Return ONLY valid JSON array (no markdown, no prose):
 If no matching open roles found, return: []
 Only include REAL, currently open positions. Do not make up job listings.`;
 
-  let lastError: unknown;
-  for (const candidate of candidates) {
-    try {
-      const response = await ai.models.generateContent({
-        model: candidate.modelName,
-        contents: prompt,
-        config: {
-          tools: [{ googleSearch: {} }],
-          temperature: 0.1,
-          maxOutputTokens: 1024,
-        },
-      });
+  try {
+    const response = await client.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 1024,
+      tools: [{ type: 'web_search_20250305', name: 'web_search' }] as any[],
+      messages: [{ role: 'user', content: prompt }],
+    });
 
-      const raw = response.text ?? '';
-      let jsonStr = raw.trim();
-      const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
-      const arrMatch = jsonStr.match(/\[[\s\S]*\]/);
-      if (!arrMatch) return [];
+    const raw = response.content
+      .filter((b: any) => b.type === 'text')
+      .map((b: any) => b.text)
+      .join('\n');
 
-      const parsed = JSON.parse(arrMatch[0]);
-      if (!Array.isArray(parsed)) return [];
-      return parsed.map((r: any) => ({
-        title: r.title || '',
-        apply_url: r.apply_url || null,
-        location: r.location || null,
-      }));
-    } catch (err) {
-      lastError = err;
-      if (isModelUnavailableError(err)) { continue; }
-      console.error(`[WatchlistScan] Error scanning ${companyName}:`, err);
-      return [];
-    }
+    let jsonStr = raw.trim();
+    const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (codeBlockMatch) jsonStr = codeBlockMatch[1].trim();
+    const arrMatch = jsonStr.match(/\[[\s\S]*\]/);
+    if (!arrMatch) return [];
+
+    const parsed = JSON.parse(arrMatch[0]);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((r: any) => ({
+      title: r.title || '',
+      apply_url: r.apply_url || null,
+      location: r.location || null,
+    }));
+  } catch (err) {
+    console.error(`[WatchlistScan] Error scanning ${companyName}:`, err);
+    return [];
   }
-  console.error(`[WatchlistScan] All models exhausted for ${companyName}:`, lastError);
-  return [];
+
+  // Suppress unused variable warning
+  void pool;
 }

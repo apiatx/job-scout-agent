@@ -1,0 +1,91 @@
+Read all relevant files completely before making any changes.
+Fix these issues in order:
+
+FIX 1 — Runtime crash: "job.salary.match is not a function"
+
+Find every place in the codebase where .match(), 
+.replace(), .includes(), .toLowerCase() or any other 
+string method is called directly on job.salary or any 
+salary-related field without first verifying it is a string.
+
+Fix each one with this safety pattern:
+const salaryStr = typeof job.salary === 'string'
+  ? job.salary
+  : job.salary != null
+    ? String(job.salary)
+    : ''
+
+Then use salaryStr for all string operations instead of 
+calling methods directly on job.salary.
+
+Apply this same pattern to any other field that could 
+be non-string but has string methods called on it 
+directly — job.compensation, job.salary_min, 
+job.salary_max, etc.
+
+FIX 2 — Glassdoor and ZipRecruiter TLSClientException
+
+Do not change any proxy format code. Instead:
+
+Add a pre-flight test at the start of the JobSpy run 
+that makes one small test request to Glassdoor and one 
+to ZipRecruiter before running the full search matrix.
+
+If the test request succeeds → run that source normally.
+If the test request fails with TLSClientException or 
+any connection error → log clearly:
+"Glassdoor: connection failed — skipping this run"
+"ZipRecruiter: connection failed — skipping this run"
+And skip that source entirely for this run rather than 
+attempting 15 searches that will all fail.
+
+This way working sources always run, broken sources 
+are skipped gracefully, and we never waste time on 
+guaranteed failures.
+
+FIX 3 — Deduplicate Claude company list by name
+
+After receiving the company list from Claude or cache,
+deduplicate by company name case-insensitive before 
+running any scraping. Keep first occurrence if duplicate.
+Log: "Removed X duplicate companies from Claude list"
+
+FIX 4 — Validate Greenhouse slugs before scraping
+
+After deduplication, for every company where ats_type 
+is "greenhouse", make one HEAD request to:
+https://boards-api.greenhouse.io/v1/boards/{slug}/jobs
+
+Run all HEAD requests in parallel with 5 second timeout.
+
+200 response → log "✓ {slug} valid" and keep as-is.
+404 or timeout → log "✗ {slug} invalid → converting to plain"
+and set ats_type to "plain" and identifier to
+https://www.{companyname}.com/careers where companyname
+is the company name lowercased with spaces removed.
+
+Also update the Claude company list generation prompt 
+to include this instruction:
+"Only specify ats_type greenhouse if you are highly 
+confident in the exact Greenhouse board slug. These 
+slugs are verified correct: purestorage, databricks, 
+coreweave, scaleai, cloudflare, mongodb, rubrik, 
+verkada, axonius, elastic, anthropic, cognite, 
+energyhub, ironmountainsolutions, scaleai, impinj, 
+commvault. For extremenetworks use ats_type lever. 
+If you are not certain of a company's exact slug, 
+use ats_type plain with the company's careers URL."
+
+FIX 5 — Replace Gemini in Job Recovery Engine with Claude
+
+In the Job Recovery Engine that runs at startup, find 
+all Gemini API calls and replace them with Claude API 
+calls using:
+model: claude-sonnet-4-6
+tools: [{ type: "web_search_20250305", name: "web_search" }]
+
+Keep all other recovery logic identical. If Claude 
+call fails for any reason, log the error and skip 
+that job without crashing.
+
+Push directly to main when done.

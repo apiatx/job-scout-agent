@@ -3,17 +3,17 @@
  *
  * Combines two data sources:
  *   1. Scout-collected jobs DB — raw hiring activity per company/role/salary
- *   2. Gemini + Google Search — real-time signal assessment per company
+ *   2. Claude + web search — real-time signal assessment per company
  *
- * For each company the scout has found jobs at, Gemini assesses:
+ * For each company the scout has found jobs at, Claude assesses:
  *   - Is this TRUE GROWTH (new funding, new product, new market)?
  *   - Or HYPE / FLUFF / DESPERATION (patching bad product with headcount)?
  *   - Or AI RISK (core offering soon automated away)?
  *
- * Model waterfall: gemini-3-flash-preview → gemini-3.1-pro-preview → gemini-flash-latest → gemini-pro-latest
+ * Model: claude-sonnet-4-6 with web_search tool
  */
 
-import { GoogleGenAI, type GroundingChunk } from '@google/genai';
+import Anthropic from '@anthropic-ai/sdk';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -66,29 +66,6 @@ export interface JobMarketPulseResult {
   grounding_sources_count: number;
 }
 
-// ── Model waterfall ───────────────────────────────────────────────────────────
-
-interface ModelCandidate { modelName: string; note: string }
-
-const CANDIDATES: ModelCandidate[] = [
-  { modelName: 'gemini-3-flash-preview',  note: 'Gemini 3 Flash — default' },
-  { modelName: 'gemini-3.1-pro-preview',  note: 'Gemini 3.1 Pro — quality' },
-  { modelName: 'gemini-flash-latest',     note: 'Flash alias' },
-  { modelName: 'gemini-pro-latest',       note: 'Pro alias' },
-];
-
-function isUnavailable(err: unknown): boolean {
-  const m = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  return m.includes('model not found') || m.includes('404') || m.includes('not found') ||
-         m.includes('not available') || m.includes('unsupported model') || m.includes('deprecated');
-}
-
-function candidateChain(): ModelCandidate[] {
-  const env = process.env.GEMINI_MODEL?.trim();
-  if (!env) return [...CANDIDATES];
-  return [{ modelName: env, note: 'env override' }, ...CANDIDATES.filter(c => c.modelName !== env)];
-}
-
 // ── Prompt ────────────────────────────────────────────────────────────────────
 
 function buildPulsePrompt(companies: ScoutCompanyStat[], criteria: { target_roles: string[]; industries: string[]; min_salary: number | null }): string {
@@ -109,7 +86,7 @@ ${criteria.min_salary ? `SALARY FLOOR: $${criteria.min_salary.toLocaleString()}+
 COMPANIES WITH ACTIVE JOB POSTINGS (scout-collected data):
 ${companyList}
 
-Use Google Search to research each company and classify its hiring signal. Apply a critical, skeptical lens:
+Use web search to research each company and classify its hiring signal. Apply a critical, skeptical lens:
 
 TRUE GROWTH signals:
 - New funding round (Series B+), recent IPO, profitable growth
@@ -176,23 +153,75 @@ Rules:
 - Each company must have at least one source_citation`;
 }
 
+// ── JSON repair helper ────────────────────────────────────────────────────────
+
+function repairTruncatedJson(raw: string): string {
+  let depth = 0, arrDepth = 0, lastGoodClose = -1;
+  let inStr = false, esc = false;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (esc)            { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"')      { inStr = !inStr; continue; }
+    if (inStr)          continue;
+    if (c === '[')      arrDepth++;
+    if (c === ']')      arrDepth = Math.max(0, arrDepth - 1);
+    if (c === '{')      depth++;
+    if (c === '}') { depth--; if (depth === 0 && arrDepth > 0) lastGoodClose = i; }
+  }
+  const base = lastGoodClose !== -1 ? raw.slice(0, lastGoodClose + 1) : raw;
+  const stack: string[] = [];
+  const closer: Record<string, string> = { '[': ']', '{': '}' };
+  inStr = false; esc = false;
+  for (const c of base) {
+    if (esc)             { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"')       { inStr = !inStr; continue; }
+    if (inStr)           continue;
+    if (c === '[' || c === '{') stack.push(c);
+    if ((c === ']' || c === '}') && stack.length > 0) stack.pop();
+  }
+  return base + [...stack].reverse().map(o => closer[o]).join('');
+}
+
 // ── Parser ────────────────────────────────────────────────────────────────────
 
 function parsePulseFromText(text: string): Partial<JobMarketPulseResult> | null {
-  const markerMatch = text.match(/PULSE_START\s*([\s\S]*?)\s*PULSE_END/);
-  if (markerMatch) {
-    try {
-      const p = JSON.parse(markerMatch[1].trim());
-      if (p?.companies) return p;
-    } catch { /* fall through */ }
+  // Strategy 1: PULSE_START / PULSE_END markers (PULSE_END may be absent if truncated)
+  const markerStart = text.indexOf('PULSE_START');
+  if (markerStart !== -1) {
+    const markerEnd = text.indexOf('PULSE_END');
+    const rawJson = markerEnd !== -1
+      ? text.slice(markerStart + 'PULSE_START'.length, markerEnd).trim()
+      : text.slice(markerStart + 'PULSE_START'.length).trim();
+    for (const attempt of [rawJson, repairTruncatedJson(rawJson)]) {
+      try {
+        const p = JSON.parse(attempt);
+        if (p?.companies) {
+          if (attempt !== rawJson) console.log(`[JobMarketPulse] Repaired truncated JSON — ${p.companies.length} companies`);
+          return p;
+        }
+      } catch { /* continue */ }
+    }
   }
-  const objMatches = (text.match(/\{[\s\S]*?"companies"\s*:\s*\[[\s\S]*?\]\s*\}/g) as string[] | null) ?? [];
-  for (const c of objMatches.sort((a, b) => b.length - a.length)) {
-    try {
-      const p = JSON.parse(c);
-      if (p?.companies?.length > 0) return p;
-    } catch { /* continue */ }
+
+  // Strategy 2: largest JSON blob with 'companies' key, with repair fallback
+  const jsonStart = text.indexOf('{');
+  if (jsonStart !== -1) {
+    const candidate = text.slice(jsonStart);
+    if (candidate.includes('"companies"')) {
+      for (const attempt of [candidate, repairTruncatedJson(candidate)]) {
+        try {
+          const p = JSON.parse(attempt);
+          if (p?.companies?.length > 0) {
+            if (attempt !== candidate) console.log(`[JobMarketPulse] Repaired truncated JSON — ${p.companies.length} companies`);
+            return p;
+          }
+        } catch { /* continue */ }
+      }
+    }
   }
+
   console.log('[JobMarketPulse] Could not parse JSON. Preview:', text.slice(0, 400));
   return null;
 }
@@ -238,78 +267,69 @@ function signalDefaultLabel(s: PulseSignal): string {
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
+const CLAUDE_MODEL = 'claude-sonnet-4-6';
+
 export async function generateJobMarketPulse(
   scoutStats: ScoutCompanyStat[],
   criteria: { target_roles: string[]; industries: string[]; min_salary: number | null },
 ): Promise<JobMarketPulseResult> {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not configured');
 
-  const timeoutMs = parseInt(process.env.GEMINI_TIMEOUT_SECONDS ?? '45', 10) * 1000;
-  const chain = candidateChain();
+  const client = new Anthropic({ apiKey });
   const prompt = buildPulsePrompt(scoutStats, criteria);
-  const ai = new GoogleGenAI({ apiKey });
-
   const statMap = new Map(scoutStats.map(s => [s.company_name.toLowerCase(), s]));
 
   console.log(`\n──── JOB MARKET PULSE GENERATION ─────────────────────────────`);
-  console.log(`[JobMarketPulse] ${scoutStats.length} companies to assess | chain: ${chain.map(c => c.modelName).join(' → ')}`);
+  console.log(`[JobMarketPulse] ${scoutStats.length} companies to assess | model: ${CLAUDE_MODEL}`);
 
-  for (const { modelName, note } of chain) {
-    console.log(`[JobMarketPulse] Trying: ${modelName} (${note})`);
-    try {
-      const req = ai.models.generateContent({
-        model: modelName,
-        contents: prompt,
-        config: { tools: [{ googleSearch: {} }], temperature: 0.25 },
-      });
-      const resp = await Promise.race([req, new Promise<never>((_, r) => setTimeout(() => r(new Error(`Timeout ${timeoutMs / 1000}s`)), timeoutMs))]);
-      const text = resp.text ?? '';
-      const meta = resp.candidates?.[0]?.groundingMetadata ?? {};
-      const groundingSources = ((meta.groundingChunks ?? []) as GroundingChunk[]).filter(c => c.web?.uri).length;
+  const response = await client.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 16000,
+    tools: [{ type: 'web_search_20250305', name: 'web_search' }] as any[],
+    messages: [{ role: 'user', content: prompt }],
+  });
 
-      console.log(`[JobMarketPulse] ✓ ${modelName} — ${groundingSources} grounding sources`);
+  const text = response.content
+    .filter((b: any) => b.type === 'text')
+    .map((b: any) => b.text)
+    .join('\n');
 
-      const parsed = parsePulseFromText(text);
-      if (!parsed) throw new Error('Could not parse structured output');
+  const groundingSources = response.content.filter((b: any) => b.type === 'tool_use').length;
 
-      // Merge scout stats into each card
-      const cards: PulseCompanyCard[] = (parsed.companies ?? []).map((raw: Partial<PulseCompanyCard>) => {
-        const stat = statMap.get((raw.company_name || '').toLowerCase());
-        return normaliseCard(raw, stat);
-      });
+  console.log(`[JobMarketPulse] ✓ ${CLAUDE_MODEL} — ${groundingSources} web search calls`);
 
-      // Sort: pursue first, then by signal quality, then by scout job count
-      const sigOrder: Record<PulseSignal, number> = { true_growth:5, cautious:4, unknown:3, hype_risk:2, desperate_hiring:1, ai_risk:0 };
-      const recOrder: Record<string, number> = { pursue:4, watch:3, caution:2, avoid:1 };
-      cards.sort((a, b) => {
-        const ro = (recOrder[b.recommendation] ?? 0) - (recOrder[a.recommendation] ?? 0);
-        if (ro !== 0) return ro;
-        return (sigOrder[b.signal] ?? 0) - (sigOrder[a.signal] ?? 0);
-      });
+  const parsed = parsePulseFromText(text);
+  if (!parsed) throw new Error('Could not parse structured output');
 
-      console.log(`[JobMarketPulse] ${cards.length} company cards | mood: ${parsed.market_mood}`);
-      console.log(`──────────────────────────────────────────────────────────────`);
+  // Merge scout stats into each card
+  const cards: PulseCompanyCard[] = (parsed.companies ?? []).map((raw: Partial<PulseCompanyCard>) => {
+    const stat = statMap.get((raw.company_name || '').toLowerCase());
+    return normaliseCard(raw, stat);
+  });
 
-      return {
-        generated_at: new Date().toISOString(),
-        pulse_headline: parsed.pulse_headline ?? '',
-        market_mood: (['hot','warm','cooling','mixed'].includes(parsed.market_mood as string) ? parsed.market_mood : 'mixed') as JobMarketPulseResult['market_mood'],
-        market_commentary: parsed.market_commentary ?? '',
-        stats: buildStats(scoutStats, criteria),
-        companies: cards,
-        model_used: modelName,
-        grounding_sources_count: groundingSources,
-      };
+  // Sort: pursue first, then by signal quality, then by scout job count
+  const sigOrder: Record<PulseSignal, number> = { true_growth:5, cautious:4, unknown:3, hype_risk:2, desperate_hiring:1, ai_risk:0 };
+  const recOrder: Record<string, number> = { pursue:4, watch:3, caution:2, avoid:1 };
+  cards.sort((a, b) => {
+    const ro = (recOrder[b.recommendation] ?? 0) - (recOrder[a.recommendation] ?? 0);
+    if (ro !== 0) return ro;
+    return (sigOrder[b.signal] ?? 0) - (sigOrder[a.signal] ?? 0);
+  });
 
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (isUnavailable(err)) { console.warn(`[JobMarketPulse] ✗ ${modelName} unavailable — trying next`); continue; }
-      console.error(`[JobMarketPulse] ✗ ${modelName} failed: ${msg}`);
-      throw err;
-    }
-  }
-  throw new Error('All Job Market Pulse model candidates exhausted');
+  console.log(`[JobMarketPulse] ${cards.length} company cards | mood: ${parsed.market_mood}`);
+  console.log(`──────────────────────────────────────────────────────────────`);
+
+  return {
+    generated_at: new Date().toISOString(),
+    pulse_headline: parsed.pulse_headline ?? '',
+    market_mood: (['hot','warm','cooling','mixed'].includes(parsed.market_mood as string) ? parsed.market_mood : 'mixed') as JobMarketPulseResult['market_mood'],
+    market_commentary: parsed.market_commentary ?? '',
+    stats: buildStats(scoutStats, criteria),
+    companies: cards,
+    model_used: CLAUDE_MODEL,
+    grounding_sources_count: groundingSources,
+  };
 }
 
 // ── Stats builder (from raw DB data, no AI needed) ────────────────────────────
@@ -333,6 +353,8 @@ export function buildStats(stats: ScoutCompanyStat[], criteria: { target_roles: 
     .sort((a, b) => b[1] - a[1])
     .slice(0, 8)
     .map(([role, count]) => ({ role, count }));
+
+  void salarySum; void salaryCnt; void salaryHits; void criteria;
 
   return {
     top_roles,

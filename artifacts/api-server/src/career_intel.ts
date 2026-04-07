@@ -2,18 +2,13 @@
  * Career Intel Service
  *
  * Generates daily-refreshing company intelligence cards tailored to the user's
- * job-search settings using Gemini + Google Search grounding.
+ * job-search settings using Claude + web search.
  *
  * Architecture contract:
- *   Gemini = discovery + synthesis ONLY
+ *   Claude = discovery + synthesis ONLY
  *   This module does NOT touch the jobs pipeline, scoring, or Claude tailoring
  *
- * Model waterfall (same ordering as gemini_discovery.ts):
- *   1. GEMINI_MODEL env override (if set)
- *   2. gemini-3-flash-preview  — speed/cost default
- *   3. gemini-3.1-pro-preview  — quality mode
- *   4. gemini-flash-latest     — alias fallback
- *   5. gemini-pro-latest       — alias fallback
+ * Model: claude-sonnet-4-6 with web_search tool
  *
  * Refresh behaviour:
  *   - Results persisted to `career_intel` DB table
@@ -21,7 +16,7 @@
  *   - POST /api/career-intel/refresh triggers synchronous regeneration
  */
 
-import { GoogleGenAI, type GroundingChunk } from '@google/genai';
+import Anthropic from '@anthropic-ai/sdk';
 
 // ── Output types ──────────────────────────────────────────────────────────────
 
@@ -74,48 +69,6 @@ export interface CareerIntelCriteria {
   vertical_niches: string[];
 }
 
-// ── Model waterfall ───────────────────────────────────────────────────────────
-
-interface ModelCandidate {
-  modelName: string;
-  note: string;
-}
-
-const BUILTIN_CANDIDATES: ModelCandidate[] = [
-  { modelName: 'gemini-3-flash-preview',  note: 'Gemini 3 Flash — speed/cost default' },
-  { modelName: 'gemini-3.1-pro-preview',  note: 'Gemini 3.1 Pro — quality mode' },
-  { modelName: 'gemini-flash-latest',     note: 'alias — resolves to latest Flash' },
-  { modelName: 'gemini-pro-latest',       note: 'alias — resolves to latest Pro' },
-];
-
-function isModelUnavailableError(err: unknown): boolean {
-  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  return (
-    msg.includes('model not found') ||
-    msg.includes('404') ||
-    msg.includes('not found') ||
-    msg.includes('not available') ||
-    msg.includes('unsupported model') ||
-    msg.includes('invalid model') ||
-    msg.includes('deprecated') ||
-    msg.includes('503') ||
-    msg.includes('unavailable') ||
-    msg.includes('high demand') ||
-    msg.includes('try again later') ||
-    msg.includes('overloaded') ||
-    msg.includes('resource_exhausted') ||
-    msg.includes('429') ||
-    msg.includes('timeout')
-  );
-}
-
-function buildCandidateChain(): ModelCandidate[] {
-  const envModel = process.env.GEMINI_MODEL?.trim();
-  if (!envModel) return [...BUILTIN_CANDIDATES];
-  const deduped = BUILTIN_CANDIDATES.filter(c => c.modelName !== envModel);
-  return [{ modelName: envModel, note: 'user-configured via GEMINI_MODEL env var' }, ...deduped];
-}
-
 // ── Prompt builder ────────────────────────────────────────────────────────────
 
 function buildIntelPrompt(criteria: CareerIntelCriteria): string {
@@ -130,7 +83,7 @@ function buildIntelPrompt(criteria: CareerIntelCriteria): string {
   return `You are a senior career intelligence analyst specializing in B2B SaaS and tech job markets.
 Today's date: ${today}
 
-Use Google Search to research and synthesize current company intelligence for a job seeker with these preferences:
+Use web search to research and synthesize current company intelligence for a job seeker with these preferences:
 
 TARGET ROLES: ${roles}
 INDUSTRIES: ${inds}${niches ? `\nVERTICAL NICHES: ${niches}` : ''}${keywords ? `\nKEY SKILLS: ${keywords}` : ''}${avoid ? `\nAVOID: ${avoid}` : ''}
@@ -201,6 +154,37 @@ Rules:
 - Prefer companies hiring for roles matching: ${roles}`;
 }
 
+// ── JSON repair helper ────────────────────────────────────────────────────────
+
+function repairTruncatedJson(raw: string): string {
+  let depth = 0, arrDepth = 0, lastGoodClose = -1;
+  let inStr = false, esc = false;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (esc)            { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"')      { inStr = !inStr; continue; }
+    if (inStr)          continue;
+    if (c === '[')      arrDepth++;
+    if (c === ']')      arrDepth = Math.max(0, arrDepth - 1);
+    if (c === '{')      depth++;
+    if (c === '}') { depth--; if (depth === 0 && arrDepth > 0) lastGoodClose = i; }
+  }
+  const base = lastGoodClose !== -1 ? raw.slice(0, lastGoodClose + 1) : raw;
+  const stack: string[] = [];
+  const closer: Record<string, string> = { '[': ']', '{': '}' };
+  inStr = false; esc = false;
+  for (const c of base) {
+    if (esc)             { esc = false; continue; }
+    if (c === '\\' && inStr) { esc = true; continue; }
+    if (c === '"')       { inStr = !inStr; continue; }
+    if (inStr)           continue;
+    if (c === '[' || c === '{') stack.push(c);
+    if ((c === ']' || c === '}') && stack.length > 0) stack.pop();
+  }
+  return base + [...stack].reverse().map(o => closer[o]).join('');
+}
+
 // ── Response parser ───────────────────────────────────────────────────────────
 
 function parseIntelFromText(text: string): Omit<CareerIntelResult, 'model_used' | 'grounding_sources_count'> | null {
@@ -210,16 +194,33 @@ function parseIntelFromText(text: string): Omit<CareerIntelResult, 'model_used' 
     try {
       const parsed = JSON.parse(markerMatch[1].trim());
       if (parsed && parsed.companies) return parsed;
-    } catch { /* fall through */ }
+    } catch {
+      // Marker content may be truncated — try repair
+      try {
+        const parsed = JSON.parse(repairTruncatedJson(markerMatch[1].trim()));
+        if (parsed && Array.isArray(parsed.companies) && parsed.companies.length > 0) {
+          console.log(`[CareerIntel] Repaired truncated marker JSON — ${parsed.companies.length} companies`);
+          return parsed;
+        }
+      } catch { /* fall through */ }
+    }
   }
 
-  // Strategy 2: largest JSON object with 'companies' key
-  const objMatches = (text.match(/\{[\s\S]*?"companies"\s*:\s*\[[\s\S]*?\]\s*\}/g) as string[] | null) ?? [];
-  for (const candidate of objMatches.sort((a, b) => b.length - a.length)) {
-    try {
-      const parsed = JSON.parse(candidate);
-      if (parsed && Array.isArray(parsed.companies) && parsed.companies.length > 0) return parsed;
-    } catch { /* continue */ }
+  // Strategy 2: Find JSON starting at first '{' with 'companies' key, try repair if needed
+  const jsonStart = text.indexOf('{');
+  if (jsonStart !== -1) {
+    const candidate = text.slice(jsonStart);
+    if (candidate.includes('"companies"')) {
+      for (const attempt of [candidate, repairTruncatedJson(candidate)]) {
+        try {
+          const parsed = JSON.parse(attempt);
+          if (parsed && Array.isArray(parsed.companies) && parsed.companies.length > 0) {
+            if (attempt !== candidate) console.log(`[CareerIntel] Repaired truncated JSON — ${parsed.companies.length} companies`);
+            return parsed;
+          }
+        } catch { /* continue */ }
+      }
+    }
   }
 
   console.log('[CareerIntel] Could not parse structured output. Preview:', text.slice(0, 500));
@@ -279,75 +280,49 @@ function rankAndNormaliseCards(
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-export async function generateCareerIntel(criteria: CareerIntelCriteria): Promise<CareerIntelResult> {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
+const CLAUDE_MODEL = 'claude-sonnet-4-6';
 
-  const timeoutMs = parseInt(process.env.GEMINI_TIMEOUT_SECONDS ?? '45', 10) * 1000;
-  const candidates = buildCandidateChain();
+export async function generateCareerIntel(criteria: CareerIntelCriteria): Promise<CareerIntelResult> {
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not configured');
+
+  const client = new Anthropic({ apiKey });
   const prompt = buildIntelPrompt(criteria);
-  const ai = new GoogleGenAI({ apiKey });
 
   console.log(`\n──── CAREER INTEL GENERATION ─────────────────────────────────`);
-  console.log(`[CareerIntel] Candidate chain: ${candidates.map(c => c.modelName).join(' → ')}`);
+  console.log(`[CareerIntel] Model: ${CLAUDE_MODEL} with web search`);
 
-  for (const candidate of candidates) {
-    const { modelName, note } = candidate;
-    console.log(`[CareerIntel] Trying: ${modelName} (${note})`);
+  const response = await client.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 16000,
+    tools: [{ type: 'web_search_20250305', name: 'web_search' }] as any[],
+    messages: [{ role: 'user', content: prompt }],
+  });
 
-    try {
-      const requestPromise = ai.models.generateContent({
-        model: modelName,
-        contents: prompt,
-        config: {
-          tools: [{ googleSearch: {} }],
-          temperature: 0.2,
-        },
-      });
+  const text = response.content
+    .filter((b: any) => b.type === 'text')
+    .map((b: any) => b.text)
+    .join('\n');
 
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Timeout after ${timeoutMs / 1000}s`)), timeoutMs)
-      );
+  const groundingSources = response.content.filter((b: any) => b.type === 'tool_use').length;
 
-      const response = await Promise.race([requestPromise, timeoutPromise]);
-      const text = response.text ?? '';
-      const groundingMeta = response.candidates?.[0]?.groundingMetadata ?? {};
+  console.log(`[CareerIntel] ✓ ${CLAUDE_MODEL} — ${groundingSources} web search calls, ${text.length} chars`);
 
-      const webSearchQueries: string[] = groundingMeta.webSearchQueries ?? [];
-      const groundingSources = (groundingMeta.groundingChunks ?? [])
-        .filter((c: GroundingChunk) => c.web?.uri)
-        .length;
-
-      console.log(`[CareerIntel] ✓ Model: ${modelName} — ${groundingSources} grounding sources, ${webSearchQueries.length} queries`);
-
-      const parsed = parseIntelFromText(text);
-      if (!parsed) {
-        throw new Error('Could not parse structured output from model response');
-      }
-
-      const ranked = rankAndNormaliseCards(parsed.companies ?? [], criteria, webSearchQueries);
-      console.log(`[CareerIntel] ${ranked.length} company cards ranked`);
-      console.log(`──────────────────────────────────────────────────────────────`);
-
-      return {
-        generated_at: new Date().toISOString(),
-        market_summary: parsed.market_summary ?? '',
-        themes: Array.isArray(parsed.themes) ? parsed.themes : [],
-        companies: ranked,
-        model_used: modelName,
-        grounding_sources_count: groundingSources,
-      };
-
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (isModelUnavailableError(err)) {
-        console.warn(`[CareerIntel] ✗ ${modelName} unavailable: ${msg} — trying next`);
-        continue;
-      }
-      console.error(`[CareerIntel] ✗ ${modelName} failed: ${msg}`);
-      throw err; // Non-availability errors bubble up
-    }
+  const parsed = parseIntelFromText(text);
+  if (!parsed) {
+    throw new Error('Could not parse structured output from model response');
   }
 
-  throw new Error(`All Career Intel model candidates exhausted: ${candidates.map(c => c.modelName).join(', ')}`);
+  const ranked = rankAndNormaliseCards(parsed.companies ?? [], criteria, []);
+  console.log(`[CareerIntel] ${ranked.length} company cards ranked`);
+  console.log(`──────────────────────────────────────────────────────────────`);
+
+  return {
+    generated_at: new Date().toISOString(),
+    market_summary: parsed.market_summary ?? '',
+    themes: Array.isArray(parsed.themes) ? parsed.themes : [],
+    companies: ranked,
+    model_used: CLAUDE_MODEL,
+    grounding_sources_count: groundingSources,
+  };
 }

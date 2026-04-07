@@ -1,4 +1,5 @@
 import express, { type Request, type Response } from 'express';
+import { createHash } from 'crypto';
 import pg from 'pg';
 import multer from 'multer';
 import * as pdfParseLib from 'pdf-parse';
@@ -7,7 +8,8 @@ import mammoth from 'mammoth';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, UnderlineType } from 'docx';
 import { scrapeGreenhouseJobs, scrapeLeverJobs, scrapeWorkdayJobs, runJobSpyScraper, proxyConfigured } from './scraper.js';
 import type { ScrapedJob } from './scraper.js';
-import { runGeminiJobDiscovery, deduplicateJobLists, isDirectCompanyUrl, normalizeUrl as normalizeJobUrl } from './gemini_discovery.js';
+import { isDirectCompanyUrl, normalizeUrl as normalizeJobUrl } from './gemini_discovery.js';
+// [Removed] Gemini Discovery imports (runGeminiJobDiscovery, deduplicateJobLists)
 import { runCanonicalResolutionInBackground, computeLinkConfidence, classifySourceTrust, enrichJobsPreScoring } from './link_validator.js';
 import { generateCareerIntel } from './career_intel.js';
 import type { CareerIntelCriteria } from './career_intel.js';
@@ -26,8 +28,7 @@ import {
   getOutputs, generateOutputs, getObjections, generateObjections,
   getNarrative, saveNarrative, draftNarrative
 } from './positioning.js';
-import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, filterUnsafeCompanies, rescoreJobOpportunity, computeTier, generateCoverLetterWithClaude, tailorResumeV2WithClaude, detectTerritory, analyzeTerritoryContext, getCompanyMomentum, DEFAULT_COVER_LETTER_INSTRUCTIONS } from './agent.js';
-import type { MomentumScore } from './agent.js';
+import { scoreJobsWithClaude, tailorResumeWithClaude, researchCompanyWithClaude, rescoreJobOpportunity, computeTier, generateCoverLetterWithClaude, tailorResumeV2WithClaude, detectTerritory, analyzeTerritoryContext, DEFAULT_COVER_LETTER_INSTRUCTIONS } from './agent.js';
 import type { SubScores, OpportunityTier, TierSettings, TailoringAnalysis } from './agent.js';
 import { estimateSalary, type SalaryEstimate } from './lib/salary.js';
 // RepVue: link-out only (no scraping — RepVue blocks automated requests)
@@ -36,7 +37,7 @@ const { Pool } = pg;
 const app = express();
 const PORT = Number(process.env.PORT) || 8080;
 const AUTO_RUN_CHECK_MS = 15 * 60 * 1000;   // check every 15 min
-const AUTO_RUN_THRESHOLD_H = 20;             // trigger if no run in 20 hours
+const AUTO_RUN_THRESHOLD_H = 24;             // trigger if no run in 24 hours
 
 if (!process.env.DATABASE_URL) {
   console.error('ERROR: DATABASE_URL environment variable is not set.');
@@ -373,6 +374,13 @@ async function initDb(): Promise<void> {
       created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS scout_company_list (
+      id            SERIAL PRIMARY KEY,
+      settings_hash TEXT NOT NULL,
+      companies_json JSONB NOT NULL,
+      created_at    TIMESTAMP DEFAULT NOW()
+    );
+
     -- Enhancement 1: API usage tracking
     CREATE TABLE IF NOT EXISTS api_usage (
       id           SERIAL PRIMARY KEY,
@@ -534,6 +542,7 @@ async function initDb(): Promise<void> {
   await safeAddColumn('companies', 'last_scan_error', 'TEXT');
   await safeAddColumn('companies', 'detect_status', "TEXT NOT NULL DEFAULT 'manual'");
   await safeAddColumn('companies', 'ats_types_tried', "TEXT[] NOT NULL DEFAULT '{}'");
+  await safeAddColumn('companies', 'user_deleted', 'BOOLEAN NOT NULL DEFAULT false');
   // Gemini discovery columns — added when hybrid pipeline was introduced
   await safeAddColumn('jobs', 'gemini_grounding_metadata', 'JSONB');
   await safeAddColumn('jobs', 'ingestion_confidence', 'FLOAT');
@@ -1179,7 +1188,7 @@ app.put('/api/criteria', async (req: Request, res: Response) => {
 // Companies
 app.get('/api/companies', async (_req, res: Response) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM companies ORDER BY name');
+    const { rows } = await pool.query('SELECT * FROM companies WHERE user_deleted = false ORDER BY name');
     res.json(rows);
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
@@ -1197,7 +1206,7 @@ app.post('/api/companies', async (req: Request, res: Response) => {
 
 app.delete('/api/companies/:id', async (req: Request, res: Response) => {
   try {
-    await pool.query('DELETE FROM companies WHERE id=$1', [req.params.id]);
+    await pool.query('UPDATE companies SET user_deleted = true WHERE id=$1', [req.params.id]);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
@@ -1454,7 +1463,7 @@ function buildRankExplanation(job: Record<string, unknown>, detScore: number): s
 
   const src = job.source as string ?? '';
   if (['Greenhouse','Lever','Workday'].includes(src)) parts.push(`found via direct ${src} ATS`);
-  else if (src === 'Gemini') parts.push('discovered via Gemini + Google Search grounding');
+  else if (src === 'Gemini') parts.push('discovered via AI web search');
 
   return parts.join('; ');
 }
@@ -1606,10 +1615,19 @@ app.get('/api/jobs', async (req: Request, res: Response) => {
       }
     }
 
+    // Find the most recent completed scout run so we can flag "new from latest run"
+    const { rows: latestRunRows } = await pool.query(
+      `SELECT id FROM scout_runs WHERE status='completed' ORDER BY completed_at DESC LIMIT 1`
+    );
+    const latestRunId: number | null = latestRunRows.length > 0 ? latestRunRows[0].id : null;
+
     // Enrich every job record with computed explanation fields:
     // deterministic_score, direct_company_page_found, explanation_for_rank,
     // matched_settings, gemini_web_search_queries, gemini_sources, source_found_from, is_live
-    const enriched = rows.map((j: Record<string, unknown>) => enrichJobRecord(j, criteriaForReport));
+    const enriched = rows.map((j: Record<string, unknown>) => ({
+      ...enrichJobRecord(j, criteriaForReport),
+      is_from_latest_run: latestRunId !== null && j.scout_run_id === latestRunId,
+    }));
 
     res.json(enriched);
   } catch (e) { res.status(500).json({ error: String(e) }); }
@@ -1894,8 +1912,7 @@ app.post('/api/industry-news/refresh', async (_req, res: Response) => {
   newsRefreshRunning = true;
   res.json({ started: true });
   try {
-    const geminiKey = process.env.GEMINI_API_KEY ?? '';
-    await refreshIndustryNews(pool, geminiKey);
+    await refreshIndustryNews(pool, '');
   } catch (e) {
     console.error('[IndustryNews] Refresh failed:', e);
   } finally {
@@ -2076,14 +2093,6 @@ app.post('/api/jobs/custom', async (req: Request, res: Response) => {
     const { rows: companyRows } = await pool.query('SELECT name FROM companies');
     const companyNames = companyRows.map((r: any) => r.name as string);
 
-    const criteriaText = [
-      criteria.target_roles?.length ? `Target roles: ${criteria.target_roles.join(', ')}` : '',
-      criteria.industries?.length ? `Target industries: ${criteria.industries.join(', ')}` : '',
-      criteria.locations?.length ? `Preferred locations: ${criteria.locations.join(', ')}` : '',
-      criteria.must_have?.length ? `Must have: ${criteria.must_have.join(', ')}` : '',
-      criteria.nice_to_have?.length ? `Nice to have: ${criteria.nice_to_have.join(', ')}` : '',
-    ].filter(Boolean).join('\n');
-
     const tierSettings = {
       verticalNiches: criteria.vertical_niches ?? [],
       topTargetScore: criteria.top_target_score ?? 65,
@@ -2091,6 +2100,18 @@ app.post('/api/jobs/custom', async (req: Request, res: Response) => {
       stretchScore: criteria.stretch_score ?? 55,
       experienceLevels: criteria.experience_levels ?? ['senior'],
     };
+
+    const _customNiches: string[] = criteria.vertical_niches ?? [];
+    const criteriaText = [
+      criteria.target_roles?.length ? `Target roles: ${criteria.target_roles.join(', ')}` : '',
+      criteria.industries?.length ? `Target industries (company MUST primarily operate in one of these): ${criteria.industries.join(', ')}` : '',
+      criteria.locations?.length ? `Preferred locations: ${criteria.locations.join(', ')}` : '',
+      criteria.must_have?.length ? `Must have: ${criteria.must_have.join(', ')}` : '',
+      criteria.nice_to_have?.length ? `Nice to have: ${criteria.nice_to_have.join(', ')}` : '',
+      _customNiches.length
+        ? `EXCLUDED INDUSTRY NICHES — candidate has background in these but actively does NOT want roles here. If the company's PRIMARY business is in one of these verticals, set companyQuality to max 8. If the job TITLE contains any of these niche terms, set roleFit to max 5. Excluded: ${_customNiches.join(', ')}`
+        : '',
+    ].filter(Boolean).join('\n');
 
     const preApprovedSection = companyNames.length > 0
       ? `PRE-APPROVED COMPANIES:\n${companyNames.join(', ')}`
@@ -2100,7 +2121,7 @@ app.post('/api/jobs/custom', async (req: Request, res: Response) => {
     const customUrl = rawUrl?.trim() || `custom://${company.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
 
     const result = await rescoreJobOpportunity(
-      { id: 0, title: rawTitle?.trim() || company + ' — Custom Role', company, location: 'See description', salary: null, applyUrl: customUrl, description },
+      { id: 0, title: rawTitle?.trim() || company + ' — Custom Role', company, location: 'See description', salary: undefined, applyUrl: customUrl, description: description ?? undefined },
       criteriaText, preApprovedSection, companyNames, tierSettings,
       criteria.min_salary ?? null, resume || undefined, criteria.min_ote ?? null,
     );
@@ -2148,6 +2169,70 @@ app.delete('/api/jobs/:id/save', async (req: Request, res: Response) => {
     if (rows.length === 0) { res.status(404).json({ error: 'Job not found' }); return; }
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Bulk delete all unsaved jobs in a tier ────────────────────────────────────
+// Must be defined before DELETE /api/jobs/:id to avoid route collision
+app.delete('/api/jobs/tier/:tier', async (req: Request, res: Response) => {
+  try {
+    const tierMap: Record<string, string | null> = {
+      target: 'Top Target',
+      win: 'Fast Win',
+      stretch: 'Stretch Role',
+      skip: 'Probably Skip',
+      all: null,
+      new: 'new',
+    };
+    const tier = req.params.tier;
+    if (!(tier in tierMap)) { res.status(400).json({ error: 'Invalid tier' }); return; }
+    let result;
+    if (tier === 'new') {
+      // Delete all unsaved jobs from the latest completed scout run
+      result = await pool.query(`
+        DELETE FROM jobs
+        WHERE saved_at IS NULL
+          AND scout_run_id = (
+            SELECT id FROM scout_runs WHERE status = 'completed' ORDER BY completed_at DESC LIMIT 1
+          )
+      `);
+    } else if (tierMap[tier] === null) {
+      result = await pool.query(`DELETE FROM jobs WHERE saved_at IS NULL`);
+    } else {
+      result = await pool.query(
+        `DELETE FROM jobs WHERE opportunity_tier = $1 AND saved_at IS NULL`,
+        [tierMap[tier]]
+      );
+    }
+    console.log(`[Jobs] Bulk deleted ${result.rowCount} jobs (tier=${tier})`);
+    res.json({ ok: true, deleted: result.rowCount });
+  } catch (e: any) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Manually override a job's tier (user-initiated move to a different tab) ──
+app.patch('/api/jobs/:id/tier', async (req: Request, res: Response) => {
+  try {
+    const validTiers = ['Top Target', 'Fast Win', 'Stretch Role', 'Probably Skip'];
+    const { tier } = req.body as { tier?: string };
+    if (!tier || !validTiers.includes(tier)) {
+      res.status(400).json({ error: 'Invalid tier. Must be one of: ' + validTiers.join(', ') }); return;
+    }
+    const { rowCount } = await pool.query(
+      `UPDATE jobs SET opportunity_tier = $1 WHERE id = $2`,
+      [tier, req.params.id]
+    );
+    if (!rowCount) { res.status(404).json({ error: 'Job not found' }); return; }
+    console.log(`[Jobs] Manual tier override: job ${req.params.id} → ${tier}`);
+    res.json({ ok: true, tier });
+  } catch (e: any) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Permanently delete a single job ──────────────────────────────────────────
+app.delete('/api/jobs/:id', async (req: Request, res: Response) => {
+  try {
+    const { rowCount } = await pool.query(`DELETE FROM jobs WHERE id = $1`, [req.params.id]);
+    if (!rowCount) { res.status(404).json({ error: 'Job not found' }); return; }
+    res.json({ ok: true });
+  } catch (e: any) { res.status(500).json({ error: String(e) }); }
 });
 
 // ── User action tracking (applied, interested, skipped, etc.) ─────────────
@@ -2503,59 +2588,7 @@ Rules: AE reports to Director/VP; Director reports to VP/SVP; Manager reports to
       }
     }
 
-    // ── Step 2.7: Gemini web search (fires when CSE/Apollo are unavailable) ─
-    let geminiWebSearchText = '';
-    const geminiHMKey = process.env.GEMINI_API_KEY?.trim();
-    if (!usedCache && geminiHMKey) {
-      try {
-        const { GoogleGenAI } = await import('@google/genai');
-        const hmGenAI = new GoogleGenAI({ apiKey: geminiHMKey });
-        const kwArr = Array.isArray(analysis.manager_seniority_keywords) && analysis.manager_seniority_keywords.length > 0
-          ? analysis.manager_seniority_keywords.slice(0, 4)
-          : ['VP Sales', 'Director of Sales', 'Regional Sales Director', 'Head of Sales'];
-        const regionStr = analysis.region ? ` ${analysis.region}` : (location ? ` ${location}` : '');
-        const managerTitle = analysis.manager_likely_title || 'VP Sales or Director of Sales';
-
-        // Two targeted prompts run in parallel for more coverage
-        const prompt1 = `Find the hiring manager for a ${roleTitle} position at ${companyName}. ` +
-          `Specifically search for: who is the current ${managerTitle} at ${companyName}${regionStr ? ' covering the' + regionStr + ' territory' : ''}? ` +
-          `Search LinkedIn profiles at ${companyName} for people with titles like: ${kwArr.join(', ')}. ` +
-          `For EVERY person you find at ${companyName} in a sales leadership role, give me their FULL NAME, exact current TITLE, and LinkedIn profile URL. ` +
-          `Be specific — I need real names of real people currently at ${companyName}.`;
-
-        const prompt2 = `Search for ${companyName} sales leadership team. ` +
-          `Find people at ${companyName} with the following titles: ${kwArr.join(', ')}${regionStr ? ' in ' + regionStr : ''}. ` +
-          `Also search: "${companyName} ${kwArr[0]} LinkedIn" and "${companyName} ${kwArr[1] || 'Director of Sales'} site:linkedin.com". ` +
-          `List each person's full name, title, and LinkedIn URL. ` +
-          `Also check ${companyName}'s website leadership/team page and any recent press releases that name their sales executives.`;
-
-        const hmModels = ['gemini-3-flash-preview', 'gemini-flash-latest', 'gemini-pro-latest'];
-        for (const hmModel of hmModels) {
-          try {
-            const [r1, r2] = await Promise.allSettled([
-              hmGenAI.models.generateContent({ model: hmModel, contents: prompt1, config: { tools: [{ googleSearch: {} }] } }),
-              hmGenAI.models.generateContent({ model: hmModel, contents: prompt2, config: { tools: [{ googleSearch: {} }] } }),
-            ]);
-            const texts = ([r1, r2] as any[])
-              .filter(r => r.status === 'fulfilled' && r.value?.text)
-              .map((r, i) => `SEARCH ${i + 1}:\n${r.value.text}`);
-            if (texts.length > 0) {
-              geminiWebSearchText = texts.join('\n\n---\n\n');
-              enrichmentSource = 'gemini';
-              console.log(`[HiringManager] Gemini web search (${hmModel}): ${geminiWebSearchText.length} chars from ${texts.length}/2 queries`);
-            }
-            break;
-          } catch (hmModelErr: any) {
-            const msg = hmModelErr instanceof Error ? hmModelErr.message : String(hmModelErr);
-            const isUnavail = msg.includes('not found') || msg.includes('404') || msg.includes('deprecated') || msg.includes('not available');
-            console.warn(`[HiringManager] Gemini model ${hmModel} failed: ${msg.slice(0, 120)}`);
-            if (!isUnavail) break;
-          }
-        }
-      } catch (geminiHMErr) {
-        console.warn('[HiringManager] Gemini web search failed:', geminiHMErr instanceof Error ? geminiHMErr.message : geminiHMErr);
-      }
-    }
+    // [Removed] Gemini web search (Step 2.7)
 
     // Build flattened results text for Claude
     let flattenedResults = '';
@@ -2570,7 +2603,7 @@ Rules: AE reports to Director/VP; Director reports to VP/SVP; Manager reports to
           `Apollo Result: ${p.first_name || ''} ${p.last_name || ''} - ${p.title || ''} at ${p.organization?.name || companyName}. Location: ${p.city || ''} ${p.state || ''}. LinkedIn: ${p.linkedin_url || 'N/A'}`
         ).join('\n')
         : '';
-      const parts = [cseText, apolloText, geminiWebSearchText ? 'WEB SEARCH RESULTS (via Gemini):\n' + geminiWebSearchText : ''].filter(Boolean);
+      const parts = [cseText, apolloText].filter(Boolean);
       flattenedResults = parts.length > 0 ? parts.join('\n\n---\n\n') : 'No search results available.';
     }
 
@@ -2634,39 +2667,7 @@ ${flattenedResults}`;
       }
     }
 
-    // ── Step 3.5: Gemini fallback identification when Claude is down ──────
-    if (!claudeStep3Success && geminiHMKey && geminiWebSearchText) {
-      try {
-        const { GoogleGenAI } = await import('@google/genai');
-        const fallbackGenAI = new GoogleGenAI({ apiKey: geminiHMKey });
-        const fallbackPrompt = `Based on the following web search results, identify the most likely hiring manager for a ${roleTitle} position at ${companyName}${analysis.region ? ' in ' + analysis.region : ''}.
-
-The hiring manager is the person this role REPORTS TO — typically a ${analysis.manager_likely_title || 'Director or VP of Sales'}.
-
-Search results:
-${geminiWebSearchText.slice(0, 6000)}
-
-Return ONLY this JSON (no other text):
-{"full_name":"First Last or null","title":"their title or null","linkedin_url":"URL or null","confidence":"high/medium/low","reasoning":"one sentence"}`;
-
-        const fbResp = await fallbackGenAI.models.generateContent({
-          model: 'gemini-3-flash-preview',
-          contents: fallbackPrompt,
-        });
-        const fbText = ((fbResp as any).text || '').trim();
-        const fbMatch = fbText.match(/\{[\s\S]*\}/);
-        if (fbMatch) {
-          const fbData = JSON.parse(fbMatch[0]);
-          if (fbData.full_name) {
-            hmData = { ...fbData, alternative: null };
-            enrichmentSource = enrichmentSource === 'gemini' ? 'gemini' : 'gemini-fallback';
-            console.log(`[HiringManager] Step 3 Gemini fallback identified: ${hmData.full_name} [${hmData.confidence}]`);
-          }
-        }
-      } catch (fbErr) {
-        console.warn('[HiringManager] Step 3 Gemini fallback failed:', fbErr instanceof Error ? fbErr.message.slice(0, 80) : fbErr);
-      }
-    }
+    // [Removed] Gemini fallback identification (Step 3.5)
 
     // ── Step 3.5: Apollo enrichment for found HM (Enhancement 1) ─────────
     let apolloEmail: string | null = null;
@@ -2711,7 +2712,7 @@ Return ONLY this JSON (no other text):
         hmData.confidence || 'none',
         hmData.reasoning || null,
         hmData.alternative ? JSON.stringify(hmData.alternative) : null,
-        (allResults.length === 0 && apolloResults.length === 0 && !geminiWebSearchText && !usedCache) ? 'No search results found — add manually' : null,
+        (allResults.length === 0 && apolloResults.length === 0 && !usedCache) ? 'No search results found — add manually' : null,
         enrichmentSource,
         apolloId,
         apolloEmail,
@@ -2972,7 +2973,22 @@ app.post('/api/linkedin-message/generate', async (req: Request, res: Response) =
       [job_id]
     );
     const { rows: spRows } = await pool.query("SELECT prompt_text FROM system_prompts WHERE prompt_name='linkedin_connection_message'");
-    const systemPrompt = spRows[0]?.prompt_text || '';
+    const LI_FALLBACK_SYSTEM_PROMPT = `You write LinkedIn connection request messages. You MUST return ONLY valid JSON — no prose, no explanation.
+
+Format:
+{"message":"<primary message under 300 chars>","alternative":"<alternate phrasing under 300 chars>"}
+
+Core principles — the message must feel like a REAL human reaching out, not a sales pitch:
+- Express genuine curiosity about the person's work, career journey, or their company's mission
+- Reference something specific about their role, company direction, or industry that shows you actually thought about THEM
+- Warm, conversational tone — like reaching out to someone you respect
+- NO numbers, NO metrics, NO percentages, NO dollar amounts, NO quota references — ever
+- NO brag phrases like "consistently closed", "drove X in pipeline", "top performer", etc.
+- The goal is to START a relationship, not close a deal
+- End with a simple, low-pressure ask like "would love to connect" or "would enjoy exchanging perspectives"
+- STRICTLY under 300 characters each
+- Return ONLY the JSON object — nothing else`;
+    const systemPrompt = spRows[0]?.prompt_text || LI_FALLBACK_SYSTEM_PROMPT;
     const HMAnthropic3 = (await import('@anthropic-ai/sdk')).default;
     const hmClaude3 = new HMAnthropic3({ apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '' });
     const step = await hmClaude3.messages.create({
@@ -2981,26 +2997,27 @@ app.post('/api/linkedin-message/generate', async (req: Request, res: Response) =
       system: systemPrompt,
       messages: [{
         role: 'user',
-        content: `HIRING MANAGER:
-Name: ${hm.full_name}
-Title: ${hm.title || 'Unknown'}
-Company: ${hm.company}
+        content: `CONTEXT FOR PERSONALIZATION:
+- I'm reaching out to: ${hm.full_name}, ${hm.title || 'leader'} at ${hm.company}
+- I'm exploring the ${job.title} role at their company
+- Use what you know publicly about ${hm.company} — their mission, recent news, market position, or the space they operate in — to make the message feel genuinely informed and curious
+- The tone should feel like one professional reaching out to another because they find the person's work or company genuinely interesting
+- Do NOT mention my resume, experience metrics, quota numbers, or any specific performance data
+- Focus on THEM and their company, not on selling myself
 
-ROLE I'M APPLYING FOR:
-${job.title}
-
-COMPANY RESEARCH:
-No research available — use what you know about the company
-
-MY KEY PROOF POINTS (pick the single most relevant one):
-${resumeRows[0]?.resume_text?.slice(0, 2000) || job.description?.slice(0, 1000) || 'Enterprise sales professional with quota-carrying experience'}
-
-Generate the LinkedIn connection request message.`,
+Write two short LinkedIn connection request messages (under 300 chars each) that feel human and genuine. Return ONLY valid JSON: {"message":"...","alternative":"..."}`,
       }],
     });
     const rawText = step.content.filter((b: any) => b.type === 'text').map((b: any) => (b as any).text).join('').trim();
     const cleaned = rawText.replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
-    const parsed = JSON.parse(cleaned);
+    let parsed: Record<string, any>;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (_parseErr) {
+      // Claude returned plain text — wrap it directly as the message
+      const msgText = cleaned.length > 300 ? cleaned.slice(0, 297) + '...' : cleaned;
+      parsed = { message: msgText, alternative: '' };
+    }
     // Enforce 300 char limit
     if (parsed.message && parsed.message.length > 300) {
       parsed.message = parsed.message.slice(0, 297) + '...';
@@ -3024,6 +3041,33 @@ Generate the LinkedIn connection request message.`,
 });
 
 // ── LinkedIn message — mark sent ──────────────────────────────────────────
+app.get('/api/linkedin-message/draft', async (req: Request, res: Response) => {
+  try {
+    const hmId  = Number(req.query.hiring_manager_id);
+    const jobId = Number(req.query.job_id);
+    if (!hmId || !jobId) { res.status(400).json({ error: 'hiring_manager_id and job_id required' }); return; }
+    const { rows } = await pool.query(
+      `SELECT id, message_text, char_count, version, status, sent_at
+       FROM linkedin_messages
+       WHERE hiring_manager_id=$1 AND job_id=$2
+       ORDER BY version ASC`,
+      [hmId, jobId]
+    );
+    const v1 = rows.find(r => r.version === 1);
+    const v2 = rows.find(r => r.version === 2);
+    if (!v1 && !v2) { res.json({ exists: false }); return; }
+    res.json({
+      exists: true,
+      message:     v1?.message_text || '',
+      alternative: v2?.message_text || '',
+      char_count:     (v1?.message_text || '').length,
+      alt_char_count: (v2?.message_text || '').length,
+      status: v1?.status || v2?.status || 'draft',
+      sent_at: v1?.sent_at || v2?.sent_at || null,
+    });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 app.put('/api/linkedin-message/mark-sent', async (req: Request, res: Response) => {
   try {
     const { hiring_manager_id, job_id, status } = req.body as any;
@@ -3751,11 +3795,27 @@ app.post('/api/jobs/:id/tailor-resume', async (req: Request, res: Response) => {
   }
 });
 
-// ── Targeted company scan (Career Intel / Pre-IPO → open roles) ───────────
+// ── Targeted company scan (Career Intel / Pre-IPO / Industry Leaders / Deep Value / Pulse) ──
 // POST /api/jobs/targeted-scan
-// Body: { companies: string[], source: 'intel' | 'preipo' }
-// Runs Gemini discovery scoped to the listed companies, scores with Claude,
+// Body: { companies: string[], source: string }
+// Runs ATS scraping + JobSpy filtered to the listed companies, scores with Claude Haiku,
 // saves matches to DB, and returns the scored jobs for display.
+
+function formatJobForTargetedResponse(job: Record<string, unknown>) {
+  return {
+    title: job.title,
+    company: job.company,
+    location: job.location,
+    salary: job.salary,
+    apply_url: job.apply_url,
+    canonical_url: job.canonical_url,
+    match_score: job.match_score,
+    opportunity_tier: job.opportunity_tier,
+    why_good_fit: job.why_good_fit,
+    source: job.source,
+  };
+}
+
 app.post('/api/jobs/targeted-scan', async (req: Request, res: Response) => {
   try {
     const { companies, source } = req.body as { companies?: string[]; source?: string };
@@ -3764,126 +3824,184 @@ app.post('/api/jobs/targeted-scan', async (req: Request, res: Response) => {
       return;
     }
 
-    const companyNames = companies.map((c: string) => c.trim()).filter(Boolean).slice(0, 20);
-    const scanSource = source === 'preipo' ? 'preipo-scan' : 'intel-scan';
-
+    const companyNames = companies.map((c: string) => c.trim()).filter(Boolean).slice(0, 25);
+    const scanSource = source ?? 'targeted-scan';
     console.log(`\n──── TARGETED SCAN (${scanSource}) ────────────────────────────────`);
     console.log(`Companies (${companyNames.length}): ${companyNames.join(', ')}`);
 
     // Load criteria
     const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
-    const criteria = cRows[0] as any ?? {};
-    const { rows: resumeRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
-    const candidateResume: string = resumeRows[0]?.value ?? '';
-
-    const geminiCriteria = {
-      target_roles:  criteria.target_roles  ?? [],
-      locations:     criteria.locations     ?? ['Remote'],
-      work_type:     criteria.work_type     ?? 'any',
-      must_have:     criteria.must_have     ?? [],
-      nice_to_have:  criteria.nice_to_have  ?? [],
-      avoid:         criteria.avoid         ?? [],
-      industries:    criteria.industries    ?? [],
-      min_salary:    criteria.min_salary    ?? null,
-      company_focus: companyNames,
+    if (cRows.length === 0) {
+      res.status(400).json({ error: 'No search criteria configured — set up User Search Settings first' });
+      return;
+    }
+    const criteria = cRows[0] as any;
+    const tierSettings: TierSettings = {
+      verticalNiches: criteria.vertical_niches ?? [],
+      topTargetScore: criteria.top_target_score ?? 65,
+      fastWinScore: criteria.fast_win_score ?? 55,
+      stretchScore: criteria.stretch_score ?? 55,
+      experienceLevels: criteria.experience_levels ?? ['senior'],
     };
 
-    // Run Gemini with company-focused prompt (15s timeout — user is waiting interactively)
-    console.log('[TargetedScan] Calling Gemini discovery…');
-    const geminiResult = await runGeminiJobDiscovery(geminiCriteria, { timeoutMs: 15000 });
+    // Look up companies in DB to get ATS info
+    const { rows: dbCompanies } = await pool.query('SELECT * FROM companies WHERE user_deleted = false');
+    const dbMap = new Map<string, Record<string, unknown>>();
+    for (const co of dbCompanies) dbMap.set((co.name as string).toLowerCase(), co as Record<string, unknown>);
 
-    if (geminiResult.skipped) {
-      console.log(`[TargetedScan] Gemini skipped: ${geminiResult.skipReason}`);
-      res.json({ jobs: [], skipped: true, skip_reason: geminiResult.skipReason });
-      return;
-    }
-
-    console.log(`[TargetedScan] Gemini returned ${geminiResult.jobs.length} raw jobs`);
-
-    // Deduplicate against existing jobs in DB
-    const { rows: existingRows } = await pool.query('SELECT apply_url FROM jobs');
-    const seenUrls = new Set(existingRows.map((r: any) => r.apply_url as string));
-    const newJobs = geminiResult.jobs.filter(j => !seenUrls.has(j.applyUrl));
-    console.log(`[TargetedScan] ${newJobs.length} new (${geminiResult.jobs.length - newJobs.length} already in DB)`);
-
-    if (newJobs.length === 0 && geminiResult.jobs.length === 0) {
-      res.json({ jobs: [], count: 0 });
-      return;
-    }
-
-    // Score with Claude (use all Gemini results, even if URL already in DB — we still return them)
-    const toScore = geminiResult.jobs.slice(0, 25);
-    const { rows: tierRows } = await pool.query("SELECT value FROM settings WHERE key='tier_settings'");
-    const tierSettings = tierRows[0]?.value ? JSON.parse(tierRows[0].value) : {};
-
-    console.log(`[TargetedScan] Scoring ${toScore.length} jobs with Claude…`);
-    const matches = await scoreJobsWithClaude(
-      toScore.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
-      {
-        targetRoles:        criteria.target_roles       ?? [],
-        industries:         criteria.industries         ?? [],
-        minSalary:          criteria.min_salary         ?? null,
-        minOte:             criteria.min_ote            ?? null,
-        locations:          criteria.locations          ?? ['Remote'],
-        allowedWorkModes:   criteria.allowed_work_modes ?? [],
-        mustHave:           criteria.must_have          ?? [],
-        niceToHave:         criteria.nice_to_have       ?? [],
-        avoid:              criteria.avoid              ?? [],
-        preApprovedCompanies: companyNames,
-        tierSettings,
-        candidateResume: candidateResume || undefined,
-        acceptedExperienceLevels: criteria.experience_levels ?? ['senior'],
+    // Build scout list: DB-matched companies get real ATS info; others get plain fallback
+    const scoutList: ScoutCompanyEntry[] = companyNames.map(name => {
+      const dbCo = dbMap.get(name.toLowerCase());
+      if (dbCo) {
+        let identifier = '';
+        if (dbCo.ats_type === 'workday') {
+          const sub = ((dbCo.careers_url as string) ?? '').replace('.myworkdayjobs.com', '');
+          identifier = `${sub}|${(dbCo.ats_slug as string) ?? ''}`;
+        } else {
+          identifier = (dbCo.ats_slug as string) ?? (dbCo.careers_url as string) ?? '';
+        }
+        return { name, ats_type: dbCo.ats_type as ScoutCompanyEntry['ats_type'], identifier, reason: 'From watchlist DB' };
       }
-    );
-
-    console.log(`[TargetedScan] Claude returned ${matches.length} scored matches`);
-
-    // Save new (not-yet-in-DB) matches to the jobs table
-    const allowedWorkModes: string[] = criteria.allowed_work_modes ?? [];
-    let saved = 0;
-    for (const m of matches) {
-      if (!seenUrls.has(m.applyUrl)) {
-        const loc = (m.location ?? '').trim();
-        const locationOk = checkJobLocation(loc, criteria.locations ?? [], false, allowedWorkModes);
-        const finalTier = !locationOk
-          ? 'Probably Skip'
-          : (m.subScores && m.matchScore)
-            ? computeTier(m.matchScore, m.aiRisk, m.subScores, m.title, m.company, loc, tierSettings)
-            : (m.opportunityTier ?? 'unscored');
-
-        try {
-          await pool.query(
-            `INSERT INTO jobs (title, company, location, salary, apply_url, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_score, ai_risk_reason, opportunity_tier, sub_scores)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-             ON CONFLICT (apply_url) DO NOTHING`,
-            [m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.whyGoodFit, m.matchScore, scanSource, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskScore ?? null, m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null)]
-          );
-          saved++;
-        } catch (_e) { /* ignore individual insert errors */ }
-      }
-    }
-    console.log(`[TargetedScan] Saved ${saved} new jobs to DB`);
-    console.log(`───────────────────────────────────────────────────────────`);
-
-    // Return scored matches for immediate display
-    res.json({
-      jobs: matches.map(m => ({
-        id: null,
-        title: m.title,
-        company: m.company,
-        location: m.location,
-        salary: m.salary,
-        apply_url: m.applyUrl,
-        why_good_fit: m.whyGoodFit,
-        match_score: m.matchScore,
-        opportunity_tier: m.opportunityTier,
-        ai_risk: m.aiRisk,
-        source: scanSource,
-      })),
-      count: matches.length,
-      saved,
-      model_used: geminiResult.modelUsed,
+      const safeName = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return { name, ats_type: 'plain' as ScoutCompanyEntry['ats_type'], identifier: `https://www.${safeName}.com/careers`, reason: 'Company name search' };
     });
+
+    const atsTitleFilter = buildRoleExperienceFilter(criteria.target_roles ?? [], criteria.experience_levels ?? []);
+    type TargetedJob = { title: string; company: string; location: string; salary?: string; applyUrl: string; description?: string; datePosted?: string; source: string };
+    const allJobs: TargetedJob[] = [];
+
+    // ── Stage 1: ATS scraping for recognized companies ──
+    for (const entry of scoutList) {
+      try {
+        if (entry.ats_type === 'greenhouse' && entry.identifier) {
+          const jobs = await scrapeGreenhouseJobs(entry.identifier, entry.name, atsTitleFilter ?? undefined);
+          allJobs.push(...jobs.map(j => ({ ...j, source: 'Greenhouse' })));
+          console.log(`[TargetedScan] Greenhouse ${entry.name}: ${jobs.length} jobs`);
+        } else if (entry.ats_type === 'lever' && entry.identifier) {
+          const jobs = await scrapeLeverJobs(entry.identifier, entry.name, atsTitleFilter ?? undefined);
+          allJobs.push(...jobs.map(j => ({ ...j, source: 'Lever' })));
+          console.log(`[TargetedScan] Lever ${entry.name}: ${jobs.length} jobs`);
+        } else if (entry.ats_type === 'workday' && entry.identifier) {
+          const pipeIdx = entry.identifier.indexOf('|');
+          const rawSub = pipeIdx >= 0 ? entry.identifier.slice(0, pipeIdx) : entry.identifier;
+          const boardSlug = pipeIdx >= 0 ? entry.identifier.slice(pipeIdx + 1) : '';
+          const subdomain = rawSub.includes('.myworkdayjobs.com') ? rawSub : `${rawSub}.myworkdayjobs.com`;
+          const jobs = await scrapeWorkdayJobs(entry.name, subdomain, boardSlug);
+          const filtered = atsTitleFilter ? jobs.filter(j => atsTitleFilter.test(j.title)) : jobs;
+          allJobs.push(...filtered.map(j => ({ ...j, source: 'Workday' })));
+          console.log(`[TargetedScan] Workday ${entry.name}: ${filtered.length} jobs`);
+        }
+      } catch (e) {
+        console.error(`[TargetedScan] ATS error for ${entry.name}:`, e);
+      }
+    }
+
+    // ── Stage 2: JobSpy — run broad search then filter to requested companies only ──
+    try {
+      const jobSpyResults = await runJobSpyScraper({
+        target_roles: criteria.target_roles ?? [],
+        locations:    criteria.locations    ?? [],
+        industries:   criteria.industries   ?? [],
+        proxy_url:    criteria.proxy_url    ?? '',
+      });
+      const nameSet = new Set(companyNames.map(n => n.toLowerCase()));
+      const filtered = jobSpyResults.filter(j => nameSet.has(((j.company as string) ?? '').toLowerCase()));
+      console.log(`[TargetedScan] JobSpy: ${jobSpyResults.length} total → ${filtered.length} matching requested companies`);
+      allJobs.push(...filtered.map(j => {
+        const src = ((j.source as string) ?? '').toLowerCase();
+        const displaySrc = src === 'linkedin' ? 'LinkedIn' : src === 'indeed' ? 'Indeed' : src === 'glassdoor' ? 'Glassdoor' : src === 'ziprecruiter' ? 'ZipRecruiter' : 'JobSpy';
+        return { ...j, source: displaySrc } as TargetedJob;
+      }));
+    } catch (e) {
+      console.error('[TargetedScan] JobSpy error:', e);
+    }
+
+    console.log(`[TargetedScan] Total raw listings: ${allJobs.length}`);
+
+    // ── Stage 3: Title filter + dedup ──
+    const titleFilter = buildRoleExperienceFilter(criteria.target_roles ?? [], criteria.experience_levels ?? []);
+    const titleFiltered = allJobs.filter(j => !titleFilter || titleFilter.test(j.title));
+    const seenUrls = new Set<string>();
+    const deduped = titleFiltered.filter(j => { if (seenUrls.has(j.applyUrl)) return false; seenUrls.add(j.applyUrl); return true; });
+    console.log(`[TargetedScan] After title filter + dedup: ${deduped.length}`);
+
+    if (deduped.length === 0) {
+      res.json({ jobs: [] });
+      return;
+    }
+
+    // ── Stage 4: Skip already-scored DB jobs (return them directly) ──
+    const { rows: existingJobs } = await pool.query('SELECT apply_url FROM jobs');
+    const existingUrls = new Set(existingJobs.map((r: Record<string, unknown>) => r.apply_url as string));
+    const newJobs = deduped.filter(j => !existingUrls.has(j.applyUrl));
+    const alreadyInDb = deduped.filter(j => existingUrls.has(j.applyUrl));
+
+    console.log(`[TargetedScan] ${newJobs.length} new + ${alreadyInDb.length} already in DB`);
+
+    // ── Stage 5: Score new jobs with Claude Haiku ──
+    const { rows: resumeRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
+    const candidateResume: string = resumeRows[0]?.value ?? '';
+    const savedJobs: Record<string, unknown>[] = [];
+
+    if (newJobs.length > 0) {
+      const matches = await scoreJobsWithClaude(
+        newJobs.slice(0, 30).map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
+        {
+          targetRoles: criteria.target_roles,
+          industries: criteria.industries,
+          minSalary: criteria.min_salary,
+          minOte: criteria.min_ote ?? null,
+          locations: criteria.locations,
+          allowedWorkModes: criteria.allowed_work_modes ?? [],
+          mustHave: criteria.must_have,
+          niceToHave: criteria.nice_to_have,
+          avoid: criteria.avoid,
+          preApprovedCompanies: companyNames,
+          tierSettings,
+          candidateResume: candidateResume || undefined,
+          acceptedExperienceLevels: criteria.experience_levels ?? ['senior'],
+        }
+      );
+      console.log(`[TargetedScan] Claude scored: ${matches.length} matches from ${newJobs.length} candidates`);
+
+      for (const m of matches) {
+        const matchedJob = newJobs.find(j => j.applyUrl === m.applyUrl);
+        const jobSource = matchedJob?.source ?? '';
+        const datePosted = matchedJob?.datePosted ?? null;
+        const loc = (m.location ?? '').trim();
+        const finalTier = m.subScores && m.matchScore
+          ? computeTier(m.matchScore, m.aiRisk, m.subScores, m.title, m.company, loc, tierSettings)
+          : (m.opportunityTier ?? 'unscored');
+
+        const { rows: inserted } = await pool.query(
+          `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, original_url, original_title, original_description, description, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_score, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+           ON CONFLICT (apply_url) DO NOTHING RETURNING *`,
+          [null, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.applyUrl, m.title, m.description ?? null, m.description ?? null, m.whyGoodFit, m.matchScore, jobSource, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskScore ?? null, m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), null, null, null, datePosted]
+        );
+        if (inserted.length > 0) savedJobs.push(inserted[0] as Record<string, unknown>);
+      }
+
+      const newIds = savedJobs.map(j => j.id as number);
+      if (newIds.length > 0) checkUrlHealthInBackground(newIds).catch(() => {});
+    }
+
+    // Fetch already-scored DB jobs for the requested companies and merge
+    let existingMatches: Record<string, unknown>[] = [];
+    if (alreadyInDb.length > 0) {
+      const { rows } = await pool.query(
+        `SELECT * FROM jobs WHERE apply_url = ANY($1::text[]) AND opportunity_tier != 'Probably Skip' ORDER BY match_score DESC LIMIT 20`,
+        [alreadyInDb.map(j => j.applyUrl)]
+      );
+      existingMatches = rows as Record<string, unknown>[];
+    }
+
+    const allResults = [
+      ...savedJobs.filter(j => j.opportunity_tier !== 'Probably Skip'),
+      ...existingMatches,
+    ].sort((a, b) => ((b.match_score as number) ?? 0) - ((a.match_score as number) ?? 0));
+
+    res.json({ jobs: allResults.map(formatJobForTargetedResponse) });
   } catch (e) {
     console.error('[TargetedScan] Error:', e);
     res.status(500).json({ error: String(e) });
@@ -3897,11 +4015,10 @@ app.get('/api/scout/auto-status', async (_req, res: Response) => {
       "SELECT started_at FROM scout_runs WHERE status='completed' ORDER BY started_at DESC LIMIT 1"
     );
     const lastRun = rows[0]?.started_at ? new Date(rows[0].started_at) : null;
-    const hoursSince = lastRun ? (Date.now() - lastRun.getTime()) / 3_600_000 : null;
-    const nextRunInH = hoursSince != null ? Math.max(0, AUTO_RUN_THRESHOLD_H - hoursSince) : 0;
     res.json({
       last_run: lastRun,
-      next_run_in_hours: Math.round(nextRunInH * 10) / 10,
+      auto_run_enabled: false,
+      next_run_in_hours: null,
       threshold_hours: AUTO_RUN_THRESHOLD_H,
     });
   } catch (e) { res.status(500).json({ error: String(e) }); }
@@ -3941,9 +4058,10 @@ app.post('/api/jobs/rescore-all', async (req, res: Response) => {
       stretchScore: criteria.stretch_score ?? 55,
       experienceLevels: criteria.experience_levels ?? ['senior'],
     };
+    const _rescoreNiches: string[] = criteria.vertical_niches ?? [];
     const criteriaText = [
       criteria.target_roles?.length ? `Target roles: ${criteria.target_roles.join(', ')}` : '',
-      criteria.industries?.length ? `Target industries: ${criteria.industries.join(', ')}` : '',
+      criteria.industries?.length ? `Target industries (company MUST primarily operate in one of these): ${criteria.industries.join(', ')}` : '',
       criteria.locations?.length ? `Preferred locations: ${criteria.locations.join(', ')}` : '',
       (() => {
         const modes: string[] = criteria.allowed_work_modes ?? [];
@@ -3956,6 +4074,9 @@ app.post('/api/jobs/rescore-all', async (req, res: Response) => {
       criteria.must_have?.length ? `Must have: ${criteria.must_have.join(', ')}` : '',
       criteria.nice_to_have?.length ? `Nice to have: ${criteria.nice_to_have.join(', ')}` : '',
       criteria.avoid?.length ? `Avoid (automatic disqualifier): ${criteria.avoid.join(', ')}` : '',
+      _rescoreNiches.length
+        ? `EXCLUDED INDUSTRY NICHES — candidate has background in these but actively does NOT want roles here. If the company's PRIMARY business is in one of these verticals, set companyQuality to max 8. If the job TITLE contains any of these niche terms, set roleFit to max 5. Excluded: ${_rescoreNiches.join(', ')}`
+        : '',
     ].filter(Boolean).join('\n');
     const preApprovedSection = companyNames.length > 0
       ? `PRE-APPROVED COMPANIES:\nThe user has manually vetted and approved these employers as targets.\nPre-approved companies: ${companyNames.join(', ')}`
@@ -5251,6 +5372,152 @@ async function checkUrlHealthInBackground(jobIds?: number[]): Promise<void> {
   }
 }
 
+// ── Scout Company List: Claude-generated per-run company list ──────────────
+interface ScoutCompanyEntry {
+  name: string;
+  ats_type: 'greenhouse' | 'workday' | 'lever' | 'plain';
+  identifier: string;
+  reason: string;
+}
+
+function computeSettingsHash(c: Record<string, unknown>): string {
+  const parts = [
+    ((c.target_roles as string[]) ?? []).join(','),
+    ((c.industries as string[]) ?? []).join(','),
+    ((c.locations as string[]) ?? []).join(','),
+    ((c.allowed_work_modes as string[]) ?? []).join(','),
+    String(c.min_salary ?? ''),
+    String(c.min_ote ?? ''),
+    String(c.company_public ?? ''),
+    String(c.company_private ?? ''),
+    ((c.company_revenue_bands as string[]) ?? []).join(','),
+    ((c.company_employee_bands as string[]) ?? []).join(','),
+    ((c.company_funding_stages as string[]) ?? []).join(','),
+    ((c.vertical_niches as string[]) ?? []).join(','),
+    ((c.must_have as string[]) ?? []).join(','),
+    ((c.avoid as string[]) ?? []).join(','),
+    ((c.experience_levels as string[]) ?? []).join(','),
+  ].join('|');
+  return createHash('md5').update(parts).digest('hex');
+}
+
+async function generateScoutCompanyList(criteria: Record<string, unknown>): Promise<ScoutCompanyEntry[] | null> {
+  const hash = computeSettingsHash(criteria);
+
+  // Check DB cache (24 h TTL)
+  try {
+    const { rows } = await pool.query(
+      `SELECT companies_json FROM scout_company_list WHERE settings_hash = $1 AND created_at > NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 1`,
+      [hash]
+    );
+    if (rows.length > 0) {
+      const cached = rows[0].companies_json as ScoutCompanyEntry[];
+      console.log(`[CompanyList] Cache hit — reusing ${cached.length} companies (hash: ${hash.slice(0, 8)}…)`);
+      return cached;
+    }
+  } catch (e) {
+    console.error('[CompanyList] Cache lookup error:', e);
+  }
+
+  console.log(`[CompanyList] No cache — calling Claude to generate company list (hash: ${hash.slice(0, 8)}…)`);
+
+  const roles       = ((criteria.target_roles as string[]) ?? []).join(', ') || '(any)';
+  const levels      = ((criteria.experience_levels as string[]) ?? []).join(', ') || '(any)';
+  const industries  = ((criteria.industries as string[]) ?? []).join(', ') || '(any)';
+  const locations   = ((criteria.locations as string[]) ?? []).join(', ') || '(any)';
+  const workModes   = ((criteria.allowed_work_modes as string[]) ?? []).join(', ') || '(any)';
+  const minSalary   = criteria.min_salary ? `$${(criteria.min_salary as number).toLocaleString()}` : '(none)';
+  const minOte      = criteria.min_ote    ? `$${(criteria.min_ote as number).toLocaleString()}`    : '(none)';
+  const compType    = [
+    (criteria.company_public  ?? true) ? 'public'  : '',
+    (criteria.company_private ?? true) ? 'private' : '',
+  ].filter(Boolean).join(', ') || 'any';
+  const empBands    = ((criteria.company_employee_bands as string[])  ?? []).join(', ') || '(any)';
+  const revBands    = ((criteria.company_revenue_bands as string[])   ?? []).join(', ') || '(any)';
+  const funding     = ((criteria.company_funding_stages as string[])  ?? []).join(', ') || '(any)';
+  const niches      = ((criteria.vertical_niches as string[])         ?? []).join(', ') || '(any)';
+  const mustHave    = ((criteria.must_have as string[])               ?? []).join(', ') || '(none)';
+  const avoid       = ((criteria.avoid as string[])                   ?? []).join(', ') || '(none)';
+
+  const prompt = `You are a job search intelligence engine. Based on the user's saved job search settings below, identify the top 50-75 companies that best match these criteria. For each company, determine the best way to scrape their job listings (Greenhouse, Workday, Lever, or plain career page URL).
+
+USER SETTINGS:
+- Target roles: ${roles}
+- Experience levels: ${levels}
+- TARGET INDUSTRIES (company MUST be in one of these — this is the primary filter): ${industries}
+- Locations: ${locations}
+- Work modes: ${workModes}
+- Min base salary: ${minSalary}
+- Min OTE: ${minOte}
+- Company type: ${compType}
+- Employee count: ${empBands}
+- Revenue bands: ${revBands}
+- Funding stages: ${funding}
+- EXCLUDED VERTICALS — DO NOT suggest companies whose primary business is in these industries (the candidate has background here but does NOT want to work in them): ${niches}
+- Must-have keywords: ${mustHave}
+- Avoid keywords: ${avoid}
+
+Return ONLY a valid JSON array. No explanation. No markdown.
+Each object must have exactly these fields:
+{
+  "name": "Company Name",
+  "ats_type": "greenhouse" | "workday" | "lever" | "plain",
+  "identifier": "the slug, career site ID, or full URL",
+  "reason": "one sentence why this company matches the TARGET INDUSTRIES above"
+}
+
+For greenhouse: identifier is the board token slug (e.g. "purestorage", "databricks", "coreweave")
+For workday: identifier is "subdomain|careerSite" (e.g. "nvidia.wd5|NVIDIAExternalCareerSite")
+For lever: identifier is the company slug (e.g. "extremenetworks")
+For plain: identifier is the full careers page URL (e.g. "https://careers.cisco.com")
+
+Only specify ats_type greenhouse if you are highly confident in the exact Greenhouse board slug. These slugs are verified correct: purestorage, databricks, coreweave, scaleai, cloudflare, mongodb, rubrik, verkada, axonius, elastic, anthropic, cognite, energyhub, ironmountainsolutions, impinj, commvault. For extremenetworks use ats_type lever. If you are not certain of a company's exact slug, use ats_type plain with the company's careers URL.
+
+Only include companies you are highly confident about.
+Do not guess ATS details. If unsure of the ATS type or identifier for a company, use plain with their known careers URL.
+
+CRITICAL TARGETING RULES:
+- ONLY include companies whose primary product/business is in the TARGET INDUSTRIES above (AI infrastructure, semiconductors, photonics, optics, electronic components, servers, data centers, networking, databases, infrastructure security)
+- HARD EXCLUDE: Do NOT include healthcare, pharma, medical devices, biotech, government/defense/SLED contractors, banking, financial services, insurance, building materials, retail, or consumer companies — even if they have sales roles
+- A company like Thermo Fisher, Hologic, Nuvation Bio, Azalea Health, BlueLinx, or similar does NOT belong — they are in excluded verticals
+- Focus on: semiconductor fabs/fabless, network hardware OEMs, data center operators/builders, AI chip companies, optical networking, server/storage vendors, database software, cloud infrastructure providers, cybersecurity hardware
+- Hardware, infrastructure, AI, semiconductor, or data platform companies (not pure SaaS at risk of AI disruption unless they are category leaders)`;
+
+  try {
+    const { default: Anthropic } = await import('@anthropic-ai/sdk');
+    const client = new Anthropic();
+    const message = await client.messages.create({
+      model: 'claude-opus-4-6',
+      max_tokens: 8192,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const block = message.content[0];
+    const rawText = block.type === 'text' ? block.text.trim() : '';
+    const cleaned = rawText.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(cleaned) as ScoutCompanyEntry[];
+
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      throw new Error('Claude returned empty or non-array company list');
+    }
+
+    // Persist to cache
+    try {
+      await pool.query(
+        `INSERT INTO scout_company_list (settings_hash, companies_json) VALUES ($1, $2)`,
+        [hash, JSON.stringify(parsed)]
+      );
+    } catch (cacheErr) {
+      console.error('[CompanyList] Cache write error (non-fatal):', cacheErr);
+    }
+
+    return parsed;
+  } catch (e) {
+    console.error('[CompanyList] Claude call failed — will fall back to companies table:', e);
+    return null;
+  }
+}
+
 async function runScoutInBackground(runId: number): Promise<void> {
   try {
     const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
@@ -5279,9 +5546,10 @@ async function runScoutInBackground(runId: number): Promise<void> {
       await pool.query(`UPDATE scout_runs SET current_stage=$1 WHERE id=$2`, [stage, runId]).catch(() => {});
     };
 
-    const { rows: companies } = await pool.query('SELECT * FROM companies');
+    // Load companies table for fallback only (Watchlist — no longer drives scout)
+    const { rows: companiesFallback } = await pool.query('SELECT * FROM companies');
     console.log(`\n════════════════════════════════════════════════════════════`);
-    console.log(`SCOUT RUN #${runId} — ${companies.length} companies loaded from database`);
+    console.log(`SCOUT RUN #${runId} — generating Claude company list…`);
     console.log(`════════════════════════════════════════════════════════════`);
     console.log(`\n──── CRITERIA READ FROM DB ─────────────────────────────────`);
     console.log(`  Target roles     : ${(criteria.target_roles ?? []).join(', ') || '(none)'}`);
@@ -5301,18 +5569,86 @@ async function runScoutInBackground(runId: number): Promise<void> {
     console.log(`  Funding stages   : ${((criteria as any).company_funding_stages ?? []).join(', ') || '(none)'}`);
     console.log(`  Tier thresholds  : Top Target≥${criteria.top_target_score ?? 65}  Fast Win≥${criteria.fast_win_score ?? 55}  Stretch≥${criteria.stretch_score ?? 55}`);
     console.log(`───────────────────────────────────────────────────────────`);
+
+    // ── Generate company list via Claude (or use cache) ──────────────────────
+    await setStage('Asking Claude to select target companies…');
+    let scoutList: ScoutCompanyEntry[] | null = await generateScoutCompanyList(criteria as unknown as Record<string, unknown>);
+    let usingClaudeList = true;
+    if (!scoutList) {
+      console.log(`[CompanyList] Falling back to companies table (${companiesFallback.length} entries)`);
+      usingClaudeList = false;
+      scoutList = companiesFallback.map((c: any) => {
+        let identifier = '';
+        if (c.ats_type === 'workday') {
+          // Reconstruct identifier from careers_url (subdomain) + ats_slug (boardSlug)
+          const sub = (c.careers_url ?? '').replace('.myworkdayjobs.com', '');
+          identifier = `${sub}|${c.ats_slug ?? ''}`;
+        } else {
+          identifier = c.ats_slug ?? c.careers_url ?? '';
+        }
+        return { name: c.name as string, ats_type: c.ats_type as ScoutCompanyEntry['ats_type'], identifier, reason: 'From companies watchlist' };
+      });
+    }
+
+    // ── FIX 3: Deduplicate by company name (case-insensitive, keep first occurrence) ──
+    {
+      const seen = new Set<string>();
+      const deduped: ScoutCompanyEntry[] = [];
+      for (const co of scoutList) {
+        const key = co.name.toLowerCase().trim();
+        if (!seen.has(key)) { seen.add(key); deduped.push(co); }
+      }
+      const removed = scoutList.length - deduped.length;
+      if (removed > 0) console.log(`[CompanyList] Removed ${removed} duplicate companies from Claude list`);
+      scoutList = deduped;
+    }
+
+    // ── FIX 4: Validate Greenhouse slugs (parallel HEAD requests, 5s timeout) ──
+    const ghEntries = scoutList.filter(c => c.ats_type === 'greenhouse' && c.identifier);
+    if (ghEntries.length > 0) {
+      console.log(`[CompanyList] Validating ${ghEntries.length} Greenhouse slugs…`);
+      await Promise.all(ghEntries.map(async (entry) => {
+        const slug = entry.identifier;
+        const url = `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs`;
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 5000);
+          const res = await fetch(url, { method: 'HEAD', signal: ctrl.signal });
+          clearTimeout(timer);
+          if (res.status === 200 || res.status === 405) {
+            console.log(`  ✓ ${slug} valid`);
+          } else {
+            const safeName = entry.name.toLowerCase().replace(/\s+/g, '');
+            console.log(`  ✗ ${slug} invalid (${res.status}) → converting to plain`);
+            entry.ats_type = 'plain';
+            entry.identifier = `https://www.${safeName}.com/careers`;
+          }
+        } catch {
+          const safeName = entry.name.toLowerCase().replace(/\s+/g, '');
+          console.log(`  ✗ ${slug} invalid (timeout) → converting to plain`);
+          entry.ats_type = 'plain';
+          entry.identifier = `https://www.${safeName}.com/careers`;
+        }
+      }));
+    }
+
+    const listSource = usingClaudeList ? 'Claude' : 'Watchlist (fallback)';
+    console.log(`\n──── COMPANY LIST SOURCE: ${listSource} (${scoutList.length} companies) ──`);
+    console.log(`Claude selected ${scoutList.length} companies for this run:`);
+    for (const co of scoutList) {
+      console.log(`  • ${co.name} (${co.ats_type}): ${co.reason}`);
+    }
     const byType: Record<string, number> = {};
-    for (const c of companies) { byType[(c as any).ats_type] = (byType[(c as any).ats_type] || 0) + 1; }
+    for (const co of scoutList) { byType[co.ats_type] = (byType[co.ats_type] ?? 0) + 1; }
     console.log(`  Companies by ATS type:`, byType);
+    console.log(`───────────────────────────────────────────────────────────`);
 
     type Job = { title: string; company: string; location: string; salary?: string; applyUrl: string; description?: string; datePosted?: string; source: string; _fromJobSpy?: boolean; _fromGemini?: boolean };
     const allJobs: Job[] = [];
-    // Side-map: applyUrl → per-job metadata for Gemini-sourced jobs
-    const geminiMetaByUrl = new Map<string, { groundingMetadata?: object; confidence?: number }>();
     let companiesScanned = 0;
     const perCompanyStats: { name: string; type: string; jobs: number; error?: string }[] = [];
 
-    await setStage(`Scraping ${companies.length} ATS job boards…`);
+    await setStage(`Scraping ${scoutList.length} ATS job boards…`);
 
     // Build ATS title filter from target_roles × experience_levels (same filter used in
     // the main post-collection pipeline).  Applied at the source level so Greenhouse/Lever
@@ -5326,57 +5662,46 @@ async function runScoutInBackground(runId: number): Promise<void> {
     }
 
     // ── Stage 2a: Scrape Greenhouse, Lever, and Workday companies ──
-    for (const c of companies) {
-      const co = c as { id: number; name: string; ats_type: string; ats_slug: string | null; careers_url: string | null; scan_failures: number; ats_types_tried: string[] };
+    // Uses the Claude-generated company list (or watchlist fallback)
+    for (const entry of scoutList) {
       try {
         let jobCount = 0;
         let scraped = false;
-        if (co.ats_type === 'greenhouse' && co.ats_slug) {
-          const jobs = await scrapeGreenhouseJobs(co.ats_slug, co.name, atsTitleFilter ?? undefined);
+        if (entry.ats_type === 'greenhouse' && entry.identifier) {
+          const jobs = await scrapeGreenhouseJobs(entry.identifier, entry.name, atsTitleFilter ?? undefined);
           jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Greenhouse' })));
-          perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
+          perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: jobCount });
           scraped = true;
-        } else if (co.ats_type === 'lever' && co.ats_slug) {
-          const jobs = await scrapeLeverJobs(co.ats_slug, co.name, atsTitleFilter ?? undefined);
+        } else if (entry.ats_type === 'lever' && entry.identifier) {
+          const jobs = await scrapeLeverJobs(entry.identifier, entry.name, atsTitleFilter ?? undefined);
           jobCount = jobs.length;
           allJobs.push(...jobs.map(j => ({ ...j, source: 'Lever' })));
-          perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
+          perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: jobCount });
           scraped = true;
-        } else if (co.ats_type === 'workday' && co.ats_slug && co.careers_url) {
-          const jobs = await scrapeWorkdayJobs(co.name, co.careers_url, co.ats_slug);
+        } else if (entry.ats_type === 'workday' && entry.identifier) {
+          // Identifier format: "subdomain|careerSiteName" e.g. "nvidia.wd5|NVIDIAExternalCareerSite"
+          const pipeIdx = entry.identifier.indexOf('|');
+          const rawSub  = pipeIdx >= 0 ? entry.identifier.slice(0, pipeIdx) : entry.identifier;
+          const boardSlug = pipeIdx >= 0 ? entry.identifier.slice(pipeIdx + 1) : '';
+          const subdomain = rawSub.includes('.myworkdayjobs.com') ? rawSub : `${rawSub}.myworkdayjobs.com`;
+          const jobs = await scrapeWorkdayJobs(entry.name, subdomain, boardSlug);
           // Workday already uses keyword search terms, but apply title filter as a safety pass
           const filteredWorkday = atsTitleFilter ? jobs.filter(j => atsTitleFilter.test(j.title)) : jobs;
           jobCount = filteredWorkday.length;
           allJobs.push(...filteredWorkday.map(j => ({ ...j, source: 'Workday' })));
-          perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: jobCount });
+          perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: jobCount });
           scraped = true;
         }
         // "plain" companies: covered by JobSpy broad search below
-        if (scraped) {
-          // Clear failure streak on success
-          if ((co.scan_failures ?? 0) > 0) {
-            await pool.query(
-              `UPDATE companies SET scan_failures=0, last_scan_error=NULL WHERE id=$1`,
-              [co.id]
-            ).catch(() => {});
-          }
+        if (!scraped && entry.ats_type !== 'plain') {
+          perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: 0, error: 'Missing or unrecognised identifier' });
         }
         companiesScanned++;
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e);
-        perCompanyStats.push({ name: co.name, type: co.ats_type, jobs: 0, error: errMsg });
-        console.error(`Error scraping ${co.name}:`, e);
-        // Record failure for retry logic
-        await pool.query(
-          `UPDATE companies SET
-             scan_failures = scan_failures + 1,
-             last_scan_error = $1,
-             ats_types_tried = array_append(ats_types_tried, $2),
-             detect_status = CASE WHEN detect_status = 'detected' THEN 'failed' ELSE detect_status END
-           WHERE id = $3`,
-          [errMsg, co.ats_type, co.id]
-        ).catch(() => {});
+        perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: 0, error: errMsg });
+        console.error(`Error scraping ${entry.name}:`, e);
         companiesScanned++;
       }
     }
@@ -5407,89 +5732,12 @@ async function runScoutInBackground(runId: number): Promise<void> {
       console.error(`JobSpy scraper error:`, e);
     }
 
-    // ── Stage 2c: Filter out unsafe companies from all JobSpy-sourced results ──
-    const companyNames = companies.map((c: any) => c.name as string);
-    const jobSpyJobs = allJobs.filter(j => (j as any)._fromJobSpy);
-    const nonJobSpyJobs = allJobs.filter(j => !(j as any)._fromJobSpy);
-    if (jobSpyJobs.length > 0) {
-      const safeJobSpyJobs = await filterUnsafeCompanies(
-        jobSpyJobs.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
-        companyNames
-      );
-      const filteredOut = jobSpyJobs.length - safeJobSpyJobs.length;
-      // Count per source for logging
-      const srcCounts = jobSpyJobs.reduce((acc: Record<string, number>, j) => { acc[j.source] = (acc[j.source] ?? 0) + 1; return acc; }, {});
-      console.log(`Company safety filter: ${jobSpyJobs.length} jobs (${JSON.stringify(srcCounts)}) → ${safeJobSpyJobs.length} passed (${filteredOut} filtered out)`);
-      // Rebuild allJobs — preserve the per-source tag from above
-      allJobs.length = 0;
-      allJobs.push(...nonJobSpyJobs);
-      // Re-attach the correct source to each safe job using its applyUrl as key
-      const sourceByUrl = new Map(jobSpyJobs.map(j => [j.applyUrl, j.source]));
-      allJobs.push(...safeJobSpyJobs.map(j => ({ ...j, source: sourceByUrl.get(j.applyUrl) ?? 'JobSpy' })));
-    }
+    // Pre-approved company names from the Claude-generated list (for Claude scoring context)
+    const companyNames = scoutList.map(c => c.name);
 
-    await setStage(`JobSpy done (${allJobs.length} total) — running Gemini discovery…`);
+    // [Removed] Gemini Discovery block (Stage 2c)
+    await setStage(`JobSpy done (${allJobs.length} total) — preparing to score…`);
     await pool.query(`UPDATE scout_runs SET jobs_in_pipeline=$1 WHERE id=$2`, [allJobs.length, runId]).catch(() => {});
-    // ── Stage 2c: Gemini + Google Search grounding — supplemental discovery ──
-    let geminiJobsFound = 0;
-    let geminiDeduped = 0;
-    try {
-      const geminiResult = await runGeminiJobDiscovery({
-        target_roles:  criteria.target_roles ?? [],
-        locations:     criteria.locations ?? [],
-        work_type:     criteria.work_type ?? 'any',
-        must_have:     criteria.must_have ?? [],
-        nice_to_have:  criteria.nice_to_have ?? [],
-        avoid:         criteria.avoid ?? [],
-        industries:    criteria.industries ?? [],
-        min_salary:    criteria.min_salary ?? null,
-      });
-
-      if (!geminiResult.skipped && geminiResult.jobs.length > 0) {
-        // Merge Gemini results with existing allJobs — dedup by URL + company+title
-        const { merged, deduplicatedCount } = deduplicateJobLists(
-          allJobs as Array<ScrapedJob & { source: string; _fromJobSpy?: boolean }>,
-          geminiResult.jobs
-        );
-
-        geminiJobsFound = geminiResult.jobs.length;
-        geminiDeduped   = deduplicatedCount;
-        const netNew    = geminiJobsFound - deduplicatedCount;
-
-        // Store gemini metadata for net-new jobs so we can persist it to DB later
-        for (const gJob of geminiResult.jobs) {
-          if (!allJobs.some(j => j.applyUrl === gJob.applyUrl)) {
-            geminiMetaByUrl.set(gJob.applyUrl, {
-              groundingMetadata: gJob.geminiGroundingMetadata as object | undefined,
-              confidence:        gJob.ingestionConfidence,
-            });
-          }
-        }
-
-        // Rebuild allJobs from merged (preserves all existing + net-new Gemini jobs)
-        allJobs.length = 0;
-        for (const j of merged) {
-          allJobs.push({
-            title:       j.title,
-            company:     j.company,
-            location:    j.location,
-            salary:      j.salary,
-            applyUrl:    j.applyUrl,
-            description: j.description,
-            source:      j.source,
-            _fromJobSpy: (j as any)._fromJobSpy,
-            _fromGemini: (j as any)._fromGemini,
-          });
-        }
-
-        console.log(`[Gemini] ${geminiJobsFound} discovered → ${deduplicatedCount} dupes merged → ${netNew} net-new added`);
-        console.log(`[Gemini] Grounding sources: ${geminiResult.totalGroundingSources} | Queries: ${geminiResult.queriesUsed.join(', ')}`);
-      } else if (geminiResult.skipped) {
-        console.log(`[Gemini] Skipped: ${geminiResult.skipReason}`);
-      }
-    } catch (e) {
-      console.error(`[Gemini] Unexpected error (non-fatal):`, e);
-    }
 
     console.log(`\n──── SCRAPE RESULTS ────────────────────────────────────────`);
     console.log(`Total scraped: ${allJobs.length} raw listings from ${companiesScanned} companies`);
@@ -5542,6 +5790,8 @@ async function runScoutInBackground(runId: number): Promise<void> {
       // Empty / unknown location — treat as potentially remote; pass through
       const locTrim = jobLocation.trim();
       if (!locTrim || /^(unknown|n\/a|none)$/i.test(locTrim)) return { pass: true, reason: 'no location listed' };
+      // FIX 2: Workday "X Locations" — no city data available, let Claude decide
+      if (/^\d+\s+Locations?$/i.test(locTrim)) return { pass: true, reason: 'multi-location Workday — sending to Claude' };
       // "Remote" anywhere in location — always pass
       if (/remote/i.test(locTrim)) return { pass: true, reason: 'remote location' };
       // Location field matches a user-saved location
@@ -5567,8 +5817,13 @@ async function runScoutInBackground(runId: number): Promise<void> {
     // 3. Salary hard filter — Category 1 gate: exclude jobs where explicitly listed salary is below minimum
     function jobBelowMinSalary(job: Job): boolean {
       if (!criteria.min_salary || !job.salary) return false;
+      // Safety: coerce salary to string regardless of what the scraper returned
+      const salaryStr = typeof job.salary === 'string'
+        ? job.salary
+        : job.salary != null ? String(job.salary) : '';
+      if (!salaryStr) return false;
       // Try to extract a number from the salary string
-      const nums = job.salary.match(/[\d,]+/g);
+      const nums = salaryStr.match(/[\d,]+/g);
       if (!nums) return false;
       // Use the highest number found (could be a range like "$100,000 - $150,000")
       const highest = Math.max(...nums.map(n => parseInt(n.replace(/,/g, ''), 10)));
@@ -5584,11 +5839,16 @@ async function runScoutInBackground(runId: number): Promise<void> {
     const minOte: number | null = (criteria as any).min_ote ?? null;
     function jobBelowMinOte(job: Job): boolean {
       if (!minOte || !job.salary) return false;
-      const salaryLower = job.salary.toLowerCase();
+      // Safety: coerce salary to string regardless of what the scraper returned
+      const salaryStr = typeof job.salary === 'string'
+        ? job.salary
+        : job.salary != null ? String(job.salary) : '';
+      if (!salaryStr) return false;
+      const salaryLower = salaryStr.toLowerCase();
       // Only check if salary string explicitly references OTE or total comp
       const hasOteSignal = /\b(ote|on[\s-]target|total\s+comp(?:ensation)?|variable|commission)\b/.test(salaryLower);
       if (!hasOteSignal) return false;
-      const nums = job.salary.match(/[\d,]+/g);
+      const nums = salaryStr.match(/[\d,]+/g);
       if (!nums) return false;
       const highest = Math.max(...nums.map(n => parseInt(n.replace(/,/g, ''), 10)));
       if (isNaN(highest) || highest === 0 || highest < 1000) return false;
@@ -5746,71 +6006,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     const { rows: resumeSettingRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
     const candidateResume: string = resumeSettingRows[0]?.value ?? '';
 
-    // ── Company Momentum Pre-Check ──────────────────────────────────────────
-    // Run Gemini momentum check for all unique companies (in parallel, up to 10 at a time).
-    // Results feed directly into Claude's companyQuality scoring component.
-    const uniqueCompaniesForMomentum = Array.from(new Set(
-      newJobs.map(j => j.company.toLowerCase().trim())
-    ));
-
-    const momentumMap = new Map<string, MomentumScore>();
-    if (uniqueCompaniesForMomentum.length > 0) {
-      console.log(`\n──── MOMENTUM PRE-CHECK (${uniqueCompaniesForMomentum.length} companies) ──────────────────────────`);
-      await setStage(`Checking company momentum for ${uniqueCompaniesForMomentum.length} companies…`);
-
-      // Check DB cache first (48 h)
-      for (const rawName of uniqueCompaniesForMomentum) {
-        const realName = newJobs.find(j => j.company.toLowerCase().trim() === rawName)?.company ?? rawName;
-        try {
-          const { rows: cached } = await pool.query(
-            `SELECT momentum_score, signals, warning FROM company_momentum WHERE LOWER(company_name) = LOWER($1) AND created_at > NOW() - INTERVAL '48 hours' ORDER BY created_at DESC LIMIT 1`,
-            [realName]
-          );
-          if (cached.length > 0) {
-            const c = cached[0] as Record<string, unknown>;
-            const ms: MomentumScore = {
-              companyName: realName,
-              score: c.momentum_score as number,
-              signals: (c.signals ?? []) as string[],
-              warning: (c.warning ?? null) as string | null,
-              cached: true,
-            };
-            momentumMap.set(rawName, ms);
-            console.log(`  [Momentum] ${realName}: ${ms.score}/25 (DB cache)`);
-          }
-        } catch { /* DB not ready, skip cache */ }
-      }
-
-      // Run Gemini for companies not in cache (10 at a time)
-      const toFetch = uniqueCompaniesForMomentum.filter(k => !momentumMap.has(k));
-      const MOMENTUM_CONCURRENCY = 10;
-      for (let i = 0; i < toFetch.length; i += MOMENTUM_CONCURRENCY) {
-        const batch = toFetch.slice(i, i + MOMENTUM_CONCURRENCY);
-        const results = await Promise.allSettled(batch.map(async (rawName) => {
-          const realName = newJobs.find(j => j.company.toLowerCase().trim() === rawName)?.company ?? rawName;
-          const isPreApproved = companyNames.some(n => n.toLowerCase() === rawName);
-          const ms = await getCompanyMomentum(realName, isPreApproved);
-          momentumMap.set(rawName, ms);
-          // Persist to DB cache
-          try {
-            await pool.query(
-              `INSERT INTO company_momentum (company_name, momentum_score, signals, warning) VALUES ($1, $2, $3, $4)`,
-              [realName, ms.score, JSON.stringify(ms.signals), ms.warning]
-            );
-          } catch { /* ignore — non-critical */ }
-        }));
-        for (const r of results) {
-          if (r.status === 'rejected') console.log(`  [Momentum] Error: ${r.reason}`);
-        }
-      }
-
-      const warnings = Array.from(momentumMap.values()).filter(m => m.warning);
-      console.log(`  Momentum complete: ${momentumMap.size} companies checked, ${warnings.length} warnings`);
-      if (warnings.length) warnings.forEach(m => console.log(`    ⚠ ${m.companyName}: ${m.warning}`));
-      console.log(`───────────────────────────────────────────────────────────`);
-    }
-
-    // Pass pre-approved company names from the database to Claude scoring
+    // Pass Claude-vetted company names to Claude scoring as pre-approved list
     // Only send genuinely new jobs (URLs not already in DB) to Claude
     const matches = await scoreJobsWithClaude(
       newJobs.map(j => ({ title: j.title, company: j.company, location: j.location, salary: j.salary, applyUrl: j.applyUrl, description: j.description })),
@@ -5829,7 +6025,6 @@ async function runScoutInBackground(runId: number): Promise<void> {
         candidateResume: candidateResume || undefined,
         acceptedExperienceLevels: criteria.experience_levels ?? ['senior'],
       },
-      momentumMap,
     );
 
     console.log(`\n──── CLAUDE SCORING RESULTS ────────────────────────────────`);
@@ -5849,8 +6044,13 @@ async function runScoutInBackground(runId: number): Promise<void> {
       const loc = (m.location ?? '').trim();
       let finalTier: string;
 
+      // FIX 2: Workday "X Locations" — pass through to Claude scoring (no city/state data)
+      const isWorkdayMultiLoc = /^\d+\s+Locations?$/i.test(loc);
+      if (isWorkdayMultiLoc) {
+        console.log(`  PASS (multi-location Workday — sending to Claude): "${loc}" for ${m.company} "${m.title}"`);
+      }
       // Apply location check + deterministic tier logic using our computeTier
-      const locationOk = checkJobLocation(loc, criteria.locations, false, allowedWorkModes);
+      const locationOk = isWorkdayMultiLoc || checkJobLocation(loc, criteria.locations, false, allowedWorkModes);
       if (!locationOk) {
         finalTier = 'Probably Skip';
       } else if (m.subScores && m.matchScore) {
@@ -5859,15 +6059,12 @@ async function runScoutInBackground(runId: number): Promise<void> {
         finalTier = m.opportunityTier ?? 'unscored';
       }
 
-      // Look up Gemini-specific metadata for this job (if it came from Gemini)
-      const geminiMeta = geminiMetaByUrl.get(m.applyUrl);
-      // Look up momentum warning for this company (if checked)
-      const momWarning = momentumMap.get(m.company.toLowerCase().trim())?.warning ?? null;
+      const momWarning: string | null = null;
       await pool.query(
         `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, original_url, original_title, original_description, description, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_score, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
          ON CONFLICT (apply_url) DO NOTHING`,
-        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.applyUrl, m.title, m.description ?? null, m.description ?? null, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskScore ?? null, m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), geminiMeta?.groundingMetadata ? JSON.stringify(geminiMeta.groundingMetadata) : null, geminiMeta?.confidence ?? null, momWarning, datePosted]
+        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.applyUrl, m.title, m.description ?? null, m.description ?? null, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskScore ?? null, m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), null, null, momWarning, datePosted]
       );
     }
 
@@ -5942,9 +6139,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     console.log(`  ─── Raw pipeline ──────────────────────────────────────`);
     console.log(`  Raw jobs scraped:  ${allJobs.length}`);
     console.log(`  Source breakdown:  ${Object.entries(srcBreakdown).map(([k,v]) => `${k}: ${v}`).join(' | ')}`);
-    if (geminiJobsFound > 0) {
-      console.log(`  Gemini discovery:  ${geminiJobsFound} found → ${geminiDeduped} dupes → ${geminiJobsFound - geminiDeduped} net-new`);
-    }
+    // [Removed] Gemini discovery stats log
     console.log(`  ─── Filters ────────────────────────────────────────────`);
     console.log(`  After title filter:    ${toScore.length} (${droppedByTitle} dropped as non-sales)`);
     console.log(`  After location filter: ${toScore.length - droppedByLocation} (${droppedByLocation} dropped)`);
@@ -5965,8 +6160,8 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
     // Weekly email is handled by checkWeeklyEmail() scheduler — no per-run email
 
-    // Background auto-tailoring: pre-tailor top 3 Top Targets (fire-and-forget)
-    autotailorTopMatches(runId);
+    // Note: auto-tailoring disabled to prevent unintended background API spend.
+    // Users can tailor resumes manually from the job cards.
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     await pool.query(
@@ -6131,8 +6326,11 @@ async function checkAutoRun(): Promise<void> {
   try {
     const { rows: cRows } = await pool.query('SELECT id FROM criteria LIMIT 1');
     if (cRows.length === 0) return;
+    // Check both completed AND recently-started runs to avoid re-triggering
+    // after crashes/restarts (previously only checked 'completed' which caused
+    // repeated Opus+Haiku charges after any failed run)
     const { rows: runRows } = await pool.query(
-      "SELECT started_at FROM scout_runs WHERE status='completed' ORDER BY started_at DESC LIMIT 1"
+      "SELECT started_at FROM scout_runs WHERE started_at > NOW() - INTERVAL '24 hours' ORDER BY started_at DESC LIMIT 1"
     );
     if (runRows.length > 0) {
       const hoursSince = (Date.now() - new Date(runRows[0].started_at).getTime()) / 3_600_000;
@@ -6159,21 +6357,9 @@ initDb()
       if (n > 0) console.log(`Startup reclassify: updated ${n} job tiers to match current logic`);
     } catch (e) { console.warn('Startup reclassify skipped:', e); }
 
-    // Background URL health check + canonical resolution for any unchecked jobs (non-blocking)
-    checkUrlHealthInBackground()
-      .then(() => runCanonicalResolutionInBackground(pool))
-      .catch(() => {});
-
-    // Start auto-scheduler: check immediately after 2 min, then every 15 min
-    setTimeout(checkAutoRun, 2 * 60 * 1000);
-    setInterval(checkAutoRun, AUTO_RUN_CHECK_MS);
-
-    // Weekly email: check every 15 min (Monday at send-time is the actual gate)
-    setInterval(checkWeeklyEmail, 15 * 60 * 1000);
-
-    // Watchlist daily scan: check after 5 min startup delay, then every hour
-    setTimeout(checkWatchlistScan, 5 * 60 * 1000);
-    setInterval(checkWatchlistScan, 60 * 60 * 1000);
+    // All scheduled/automatic API calls are disabled.
+    // Every external API call (scout, watchlist scan, weekly email, URL resolution)
+    // is user-triggered only to prevent unintended charges.
 
     const server = app.listen(PORT, () => {
       console.log(`Job Scout Agent listening on port ${PORT}`);
@@ -6345,6 +6531,8 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 .inner-tab.tier-win.active{color:#00c86e;border-bottom-color:#00c86e}
 .inner-tab.tier-stretch.active{color:#7c8dff;border-bottom-color:#7c8dff}
 .inner-tab.tier-skip.active{color:#888;border-bottom-color:#888}
+.inner-tab.tier-new.active{color:#7ec8f7;border-bottom-color:#7ec8f7}
+.inner-tab.tier-new{color:#7ec8f7}
 .tier-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
 .tier-top-target{background:rgba(245,200,66,.15);color:#f5c842;border:1px solid rgba(245,200,66,.35)}
 .tier-fast-win{background:rgba(0,200,110,.13);color:#00c86e;border:1px solid rgba(0,200,110,.3)}
@@ -6417,6 +6605,8 @@ header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;alig
 
 /* ── Redesigned card components ─── */
 .card-tier-row{display:flex;align-items:center;justify-content:space-between;padding:13px 16px 0}
+.job-delete-x{background:none;border:none;color:#555;cursor:pointer;font-size:16px;line-height:1;padding:0 2px;border-radius:3px;transition:color .15s}
+.job-delete-x:hover{color:#e55353}
 .score-chip{font-size:19px;font-weight:800;color:var(--gold);line-height:1;min-width:36px;text-align:right}
 .score-chip.score-green{color:var(--green)}
 .score-chip.score-yellow{color:#f5c842}
@@ -7018,6 +7208,21 @@ textarea:focus,input:focus{border-color:var(--gold)}
 .pipeline-empty{color:var(--muted);font-size:12px;text-align:center;padding:20px 0;font-style:italic}
 .prep-badge{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700;background:rgba(129,140,248,.15);color:#818cf8;border:1px solid rgba(129,140,248,.3)}
 /* ── Interview Prep Modal ─────────────────────────────────────────────── */
+.add-job-btn{margin-left:auto;width:22px;height:22px;border-radius:50%;border:1px solid rgba(245,200,66,.4);background:rgba(245,200,66,.1);color:var(--gold);font-size:16px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s,border-color .15s;padding:0;flex-shrink:0}
+.add-job-btn:hover{background:rgba(245,200,66,.22);border-color:var(--gold)}
+.add-job-overlay{position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:1200;display:none;align-items:center;justify-content:center;padding:20px}
+.add-job-overlay.open{display:flex}
+.add-job-modal{background:#111;border:1px solid #2a2a2a;border-radius:14px;width:100%;max-width:560px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden}
+.add-job-modal-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:20px 20px 14px;border-bottom:1px solid #1e1e1e}
+.add-job-modal-title{font-size:16px;font-weight:700;color:var(--text)}
+.add-job-modal-body{padding:18px 20px;overflow-y:auto;display:flex;flex-direction:column;gap:14px}
+.add-job-modal-footer{display:flex;justify-content:flex-end;gap:8px;padding:14px 20px;border-top:1px solid #1e1e1e}
+.add-job-field{display:flex;flex-direction:column;gap:5px}
+.add-job-label{font-size:12px;font-weight:600;color:var(--text);letter-spacing:.02em}
+.add-job-input{background:#0a0a0a;border:1px solid #2a2a2a;border-radius:6px;color:var(--text);font-size:13px;padding:8px 10px;outline:none;transition:border-color .15s;width:100%;box-sizing:border-box}
+.add-job-input:focus{border-color:var(--gold)}
+.add-job-textarea{background:#0a0a0a;border:1px solid #2a2a2a;border-radius:6px;color:var(--text);font-size:13px;padding:8px 10px;outline:none;transition:border-color .15s;width:100%;box-sizing:border-box;min-height:200px;resize:vertical;font-family:inherit;line-height:1.5}
+.add-job-textarea:focus{border-color:var(--gold)}
 .prep-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1100;display:none;align-items:center;justify-content:center;padding:20px}
 .prep-modal-overlay.open{display:flex}
 .prep-modal{background:#111;border:1px solid #333;border-radius:14px;width:100%;max-width:680px;max-height:90vh;overflow:hidden;display:flex;flex-direction:column}
@@ -7182,12 +7387,13 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="nav-group">
     <div class="nav-group-label">Search</div>
     <div class="tab active" id="tab-jobs" onclick="showTab('jobs')" data-tooltip="Your scored job board. Claude rates every listing Top Target / Fast Win / Stretch / Probably Skip against your resume and settings.">Scout</div>
-    <div class="tab" id="tab-intel" onclick="showTab('intel')" data-tooltip="Gemini scans the web daily for companies actively hiring in your space. Market trends, emerging themes, hot companies to target now.">Career Intel</div>
-    <div class="tab" id="tab-pulse" onclick="showTab('pulse')" data-tooltip="Job Market Pulse — which companies are hiring most aggressively, what roles are trending, salary patterns from your scout data, and Gemini's verdict: true growth or hype?">Job Market Pulse</div>
+    <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Your Watchlist — tracks open roles at each company daily using Claude AI search. Also tells the scraper which ATS pages to hit and boosts their score.">Watchlist</div>
+    <div class="tab" id="tab-intel" onclick="showTab('intel')" data-tooltip="Claude scans the web daily for companies actively hiring in your space. Market trends, emerging themes, hot companies to target now.">Career Intel</div>
+    <div class="tab" id="tab-pulse" onclick="showTab('pulse')" data-tooltip="Job Market Pulse — which companies are hiring most aggressively, what roles are trending, salary patterns from your scout data, and Claude's verdict: true growth or hype?">Job Market Pulse</div>
     <div class="tab" id="tab-leaders" onclick="showTab('leaders')" data-tooltip="Claude-ranked top 5-10 sales-led companies per sector — SaaS, Cybersecurity, AI Infrastructure, Networking and more. The gold standard companies to target for your next move.">Industry Leaders</div>
-    <div class="tab" id="tab-deepvalue" onclick="showTab('deepvalue')" data-tooltip="Gemini finds the cutting-edge infrastructure companies with the clearest 'why you need this' value prop — AI Infra, HPC, Semiconductors, Photonics, Networking, Data Center and more.">Deep Value</div>
+    <div class="tab" id="tab-deepvalue" onclick="showTab('deepvalue')" data-tooltip="Claude finds the cutting-edge infrastructure companies with the clearest 'why you need this' value prop — AI Infra, HPC, Semiconductors, Photonics, Networking, Data Center and more.">Deep Value</div>
     <div class="tab" id="tab-preipo" onclick="showTab('preipo')" data-tooltip="Explosive pre-IPO companies worth joining NOW. Series B is the sweet spot — proven PMF, scaling sales motion, meaningful equity. Ranked by momentum score using real funding data.">Pre-IPO</div>
-    <div class="tab" id="tab-news" onclick="showTab('news')" data-tooltip="Live B2B tech news feed — fresh articles from top sources analyzed by Gemini. See which companies are funding, hiring, or expanding sales teams right now.">Industry News</div>
+    <div class="tab" id="tab-news" onclick="showTab('news')" data-tooltip="Live B2B tech news feed — fresh articles from top sources analyzed by Claude. See which companies are funding, hiring, or expanding sales teams right now.">Industry News</div>
     <div class="tab" id="tab-clawd" onclick="showTab('clawd')" data-tooltip="Embedded interview and career coaching tool.">DeathByClawd</div>
     <div class="tab" id="tab-email" onclick="showTab('email')" data-tooltip="Weekly Scout Report — sent every Monday morning. Top 10 ranked matches from the past week with a Claude-written briefing. Preview, test send, and manage your Gmail connection here.">Weekly Report</div>
   </div>
@@ -7202,7 +7408,6 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="nav-group-label">Settings</div>
     <div class="tab" id="tab-settings" onclick="showTab('settings')" data-tooltip="Controls what the scout actually searches for: target roles, industries, locations, must-have skills, things to avoid, and salary floor. The scout won't run without this configured.">User Search Settings</div>
     <div class="tab" id="tab-positioning" onclick="showTab('positioning')" data-tooltip="Content studio — separate from the job search. Generates your LinkedIn headline, pitches, bios, and objection prep from your intake form. Never affects scoring or discovery.">Positioning Intake</div>
-    <div class="tab" id="tab-companies" onclick="showTab('companies')" data-tooltip="Your Company Watchlist — tracks open roles at each company daily using Gemini search. Also tells the scraper which ATS pages to hit and boosts their score.">Company Watchlist</div>
     <div class="tab" id="tab-runs" onclick="showTab('runs')" data-tooltip="Full log of every scout run — jobs found, matches scored, errors, and timing. Use this to debug why a run found too many or too few results.">Run History</div>
   </div>
 </nav>
@@ -7235,8 +7440,12 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="inner-tab tier-stretch" id="jtab-stretch" onclick="showJobsTab('stretch')">&#x1F680; Stretch <span id="jtab-count-stretch" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
     <div class="inner-tab tier-skip" id="jtab-skip" onclick="showJobsTab('skip')">&#x1F6AB; Probably Skip <span id="jtab-count-skip" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
     <div class="inner-tab" id="jtab-all" onclick="showJobsTab('all')">All <span id="jtab-count-all" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
+    <div class="inner-tab tier-new" id="jtab-new" onclick="showJobsTab('new')">&#x2728; New <span id="jtab-count-new" style="opacity:.6;font-size:10px;margin-left:4px"></span></div>
   </div>
-  <div class="sec-title" id="jobs-count">Loading jobs&hellip;</div>
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:4px">
+    <div class="sec-title" id="jobs-count" style="margin:0">Loading jobs&hellip;</div>
+    <button id="clear-tab-btn" class="btn btn-sm" style="display:none;background:rgba(229,83,83,.12);color:#e55353;border:1px solid rgba(229,83,83,.35);font-size:11px;white-space:nowrap;padding:4px 10px" onclick="clearTierJobs()">&#x1F5D1; Delete all in tab</button>
+  </div>
   <div class="jobs-grid" id="jobs-grid"></div>
 </div>
 
@@ -7271,7 +7480,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <!-- Kanban columns -->
   <div class="pipeline-columns" id="pipeline-columns">
     <div class="pipeline-col">
-      <div class="pipeline-col-header col-interested">&#x2795; Apply <span class="pipeline-col-count" id="pipe-count-interested">0</span></div>
+      <div class="pipeline-col-header col-interested">&#x2795; Apply <span class="pipeline-col-count" id="pipe-count-interested">0</span><button class="add-job-btn" onclick="openAddJobModal()" title="Add job manually">+</button></div>
       <div id="pipe-col-interested"></div>
     </div>
     <div class="pipeline-col">
@@ -7290,8 +7499,47 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="pipeline-empty" style="display:none;text-align:center;padding:48px 24px;color:var(--muted)">
     <div style="font-size:32px;margin-bottom:12px">&#x1F4CB;</div>
     <div style="font-size:15px;font-weight:600;margin-bottom:6px">Your pipeline is empty</div>
-    <div style="font-size:13px">Use the Track Status dropdown on any job card to add jobs here.</div>
-    <button class="btn btn-gold btn-sm" style="margin-top:16px" onclick="showTab('jobs')">Browse Jobs &rarr;</button>
+    <div style="font-size:13px">Track a job from Scout, or add one manually below.</div>
+    <div style="display:flex;gap:10px;justify-content:center;margin-top:16px;flex-wrap:wrap">
+      <button class="btn btn-gold btn-sm" onclick="showTab('jobs')">Browse Scout Jobs &rarr;</button>
+      <button class="btn btn-ghost btn-sm" onclick="openAddJobModal()">&#x2795; Add Job Manually</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Job Manually Modal -->
+<div class="add-job-overlay" id="add-job-overlay" onclick="if(event.target===this)closeAddJobModal()">
+  <div class="add-job-modal">
+    <div class="add-job-modal-header">
+      <div>
+        <div class="add-job-modal-title">&#x2795; Add Job Manually</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px">Paste a job description — Claude will score it and add it to your Apply column</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="closeAddJobModal()" style="flex-shrink:0">&#x2715;</button>
+    </div>
+    <div class="add-job-modal-body">
+      <div class="add-job-field">
+        <label class="add-job-label">Company Name <span style="color:#e55353">*</span></label>
+        <input id="add-job-company" class="add-job-input" type="text" placeholder="e.g. Nvidia" autocomplete="off" />
+      </div>
+      <div class="add-job-field">
+        <label class="add-job-label">Job Title <span style="color:var(--muted);font-weight:400">(optional — Claude will extract from description if blank)</span></label>
+        <input id="add-job-title" class="add-job-input" type="text" placeholder="e.g. Enterprise Account Executive" autocomplete="off" />
+      </div>
+      <div class="add-job-field">
+        <label class="add-job-label">Job Description <span style="color:#e55353">*</span></label>
+        <textarea id="add-job-desc" class="add-job-textarea" placeholder="Paste the full job description here&#x2026;"></textarea>
+      </div>
+      <div class="add-job-field">
+        <label class="add-job-label">Apply URL <span style="color:var(--muted);font-weight:400">(optional)</span></label>
+        <input id="add-job-url" class="add-job-input" type="url" placeholder="https://…" autocomplete="off" />
+      </div>
+      <div id="add-job-error" style="display:none;color:#e55353;font-size:12px;margin-top:4px"></div>
+    </div>
+    <div class="add-job-modal-footer">
+      <button class="btn btn-ghost btn-sm" onclick="closeAddJobModal()">Cancel</button>
+      <button class="btn btn-gold" id="add-job-save-btn" onclick="submitManualJob()">Save &amp; Score</button>
+    </div>
   </div>
 </div>
 
@@ -7464,7 +7712,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="intel-header">
     <div>
       <div class="sec-title" style="margin-bottom:4px">Career Intel</div>
-      <div class="intel-meta" id="intel-meta">Powered by Gemini + Google Search grounding &mdash; refreshes daily</div>
+      <div class="intel-meta" id="intel-meta">Powered by Claude + Web Search &mdash; refreshes daily</div>
     </div>
     <button class="btn btn-gold btn-sm" id="intel-refresh-btn" onclick="refreshCareerIntel()">Refresh Intel</button>
   </div>
@@ -7485,7 +7733,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="intel-loading" style="display:none">
     <div class="intel-loading-wrap">
       <div class="intel-spinner"></div>
-      <div class="intel-loading-msg">Gemini is searching and synthesising company signals&hellip;<br><span style="font-size:11px;color:var(--muted)">This typically takes 30&ndash;60 seconds</span></div>
+      <div class="intel-loading-msg">Claude is searching and synthesising company signals&hellip;<br><span style="font-size:11px;color:var(--muted)">This typically takes 30&ndash;60 seconds</span></div>
     </div>
   </div>
 
@@ -7527,7 +7775,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </div>
       <div id="intel-scan-spinner" style="display:none;text-align:center;padding:20px 0">
         <div class="intel-spinner" style="margin:0 auto 10px"></div>
-        <div style="font-size:12px;color:var(--muted)">Asking Gemini to search for open roles at each company&hellip; (30-90s)</div>
+        <div style="font-size:12px;color:var(--muted)">Searching ATS boards &amp; job sites for matching roles&hellip; (30&ndash;90s)</div>
       </div>
       <div id="intel-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
       <div id="intel-scan-results" style="display:none;margin-top:14px">
@@ -7545,7 +7793,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="pulse-header">
     <div>
       <div class="sec-title" style="margin-bottom:4px">Job Market Pulse</div>
-      <div class="intel-meta" id="pulse-meta">Scout data + Gemini search &mdash; hiring trends and signal analysis for your target companies</div>
+      <div class="intel-meta" id="pulse-meta">Scout data + Claude web search &mdash; hiring trends and signal analysis for your target companies</div>
     </div>
     <button class="btn btn-gold btn-sm" id="pulse-refresh-btn" onclick="refreshJobMarketPulse()">&#x26A1; Refresh Pulse</button>
   </div>
@@ -7553,7 +7801,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="pulse-loading" style="display:none">
     <div class="intel-loading-wrap">
       <div class="intel-spinner"></div>
-      <div class="intel-loading-msg">Gemini is analyzing hiring signals across your target companies&hellip;<br><span style="font-size:11px;color:var(--muted)">Assessing growth vs hype for each company &mdash; 30&ndash;90 seconds</span></div>
+      <div class="intel-loading-msg">Claude is analyzing hiring signals across your target companies&hellip;<br><span style="font-size:11px;color:var(--muted)">Assessing growth vs hype for each company &mdash; 30&ndash;90 seconds</span></div>
     </div>
   </div>
 
@@ -7593,6 +7841,28 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div id="pulse-cards" class="pulse-cards-grid"></div>
 
     <div id="pulse-footer" style="margin-top:16px;font-size:11px;color:var(--muted);text-align:right"></div>
+
+    <div id="pulse-scan-section" style="margin-top:24px;border-top:1px solid var(--border);padding-top:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:8px">
+        <div>
+          <div style="font-size:14px;font-weight:700;color:var(--text)">Open Roles at These Companies</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px">Search for matching jobs at every company in this pulse report</div>
+        </div>
+        <button class="btn btn-gold" id="pulse-scan-btn" onclick="scanForRoles('pulse')">&#x1F50D; Find Open Roles</button>
+      </div>
+      <div id="pulse-scan-spinner" style="display:none;text-align:center;padding:20px 0">
+        <div class="intel-spinner" style="margin:0 auto 10px"></div>
+        <div style="font-size:12px;color:var(--muted)">Searching ATS boards &amp; job sites for matching roles&hellip; (30&ndash;90s)</div>
+      </div>
+      <div id="pulse-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
+      <div id="pulse-scan-results" style="display:none;margin-top:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none" onclick="togglePulseScanResults()">
+          <div id="pulse-scan-count" style="font-size:13px;font-weight:700;color:var(--gold)"></div>
+          <span id="pulse-scan-toggle" style="font-size:12px;color:var(--muted)">&#x25B2; Collapse</span>
+        </div>
+        <div id="pulse-scan-jobs" style="margin-top:12px"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -7600,7 +7870,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="dv-header">
     <div>
       <div class="sec-title" style="margin-bottom:4px">Deep Value</div>
-      <div class="dv-meta" id="dv-meta">Gemini finds cutting-edge infrastructure companies with the clearest customer value prop &mdash; plus open roles</div>
+      <div class="dv-meta" id="dv-meta">Claude searches for cutting-edge infrastructure companies with the clearest customer value prop &mdash; plus open roles</div>
     </div>
     <button class="btn btn-gold btn-sm" id="dv-refresh-btn" onclick="refreshDeepValue()">Refresh Intel</button>
   </div>
@@ -7608,12 +7878,12 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="dv-loading" style="display:none">
     <div class="dv-loading-wrap">
       <div class="dv-spinner"></div>
-      <div class="dv-loading-msg">Gemini is searching for the most compelling infrastructure companies with undeniable value props&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;60 seconds</span></div>
+      <div class="dv-loading-msg">Claude is searching for the most compelling infrastructure companies with undeniable value props&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;60 seconds</span></div>
     </div>
   </div>
 
   <div id="dv-empty" style="display:none">
-    <div class="dv-empty">No Deep Value data yet.<br>Click &ldquo;Refresh Intel&rdquo; to have Gemini search for cutting-edge infrastructure companies with the clearest &ldquo;why you need this&rdquo; value props &mdash; plus any open roles at each.</div>
+    <div class="dv-empty">No Deep Value data yet.<br>Click &ldquo;Refresh Intel&rdquo; to have Claude search for cutting-edge infrastructure companies with the clearest &ldquo;why you need this&rdquo; value props &mdash; plus any open roles at each.</div>
   </div>
 
   <div id="dv-error" style="display:none" class="dv-error-box"></div>
@@ -7622,6 +7892,28 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="dv-summary" id="dv-summary"></div>
     <div class="dv-grid" id="dv-grid"></div>
     <div class="dv-footer" id="dv-footer"></div>
+
+    <div id="dv-scan-section" style="margin-top:24px;border-top:1px solid var(--border);padding-top:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:8px">
+        <div>
+          <div style="font-size:14px;font-weight:700;color:var(--text)">Open Roles at These Companies</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px">Search for matching jobs at every company on this page</div>
+        </div>
+        <button class="btn btn-gold" id="dv-scan-btn" onclick="scanForRoles('deepvalue')">&#x1F50D; Find Open Roles</button>
+      </div>
+      <div id="dv-scan-spinner" style="display:none;text-align:center;padding:20px 0">
+        <div class="intel-spinner" style="margin:0 auto 10px"></div>
+        <div style="font-size:12px;color:var(--muted)">Searching ATS boards &amp; job sites for matching roles&hellip; (30&ndash;90s)</div>
+      </div>
+      <div id="dv-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
+      <div id="dv-scan-results" style="display:none;margin-top:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none" onclick="toggleDvScanResults()">
+          <div id="dv-scan-count" style="font-size:13px;font-weight:700;color:var(--gold)"></div>
+          <span id="dv-scan-toggle" style="font-size:12px;color:var(--muted)">&#x25B2; Collapse</span>
+        </div>
+        <div id="dv-scan-jobs" style="margin-top:12px"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -7629,7 +7921,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="preipo-header">
     <div>
       <div class="sec-title" style="margin-bottom:4px">Pre-IPO Opportunity Radar</div>
-      <div class="preipo-meta" id="preipo-meta">Powered by Gemini + Google Search &mdash; identifies hypergrowth companies by funding stage</div>
+      <div class="preipo-meta" id="preipo-meta">Powered by Claude + Web Search &mdash; identifies hypergrowth companies by funding stage</div>
     </div>
     <button class="btn btn-gold btn-sm" id="preipo-refresh-btn" onclick="refreshPreIpo()">Refresh Radar</button>
   </div>
@@ -7637,7 +7929,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="preipo-loading" style="display:none">
     <div class="preipo-loading-wrap">
       <div class="preipo-spinner"></div>
-      <div class="preipo-loading-msg">Gemini is scanning funding data, growth signals, and hiring intelligence&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;90 seconds</span></div>
+      <div class="preipo-loading-msg">Claude is scanning funding data, growth signals, and hiring intelligence&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;90 seconds</span></div>
     </div>
   </div>
 
@@ -7680,7 +7972,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </div>
       <div id="preipo-scan-spinner" style="display:none;text-align:center;padding:20px 0">
         <div class="intel-spinner" style="margin:0 auto 10px"></div>
-        <div style="font-size:12px;color:var(--muted)">Asking Gemini to search for open roles at each company&hellip; (30-90s)</div>
+        <div style="font-size:12px;color:var(--muted)">Searching ATS boards &amp; job sites for matching roles&hellip; (30&ndash;90s)</div>
       </div>
       <div id="preipo-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
       <div id="preipo-scan-results" style="display:none;margin-top:14px">
@@ -7731,7 +8023,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
       </div>
       <div id="leaders-scan-spinner" style="display:none;text-align:center;padding:20px 0">
         <div class="intel-spinner" style="margin:0 auto 10px"></div>
-        <div style="font-size:12px;color:var(--muted)">Asking Gemini to search for open roles at each company&hellip; (30-90s)</div>
+        <div style="font-size:12px;color:var(--muted)">Searching ATS boards &amp; job sites for matching roles&hellip; (30&ndash;90s)</div>
       </div>
       <div id="leaders-scan-error" style="display:none;color:#ff6b6b;font-size:13px;margin-top:10px"></div>
       <div id="leaders-scan-results" style="display:none;margin-top:14px">
@@ -7747,15 +8039,15 @@ textarea:focus,input:focus{border-color:var(--gold)}
 
 <div class="panel" id="panel-companies">
   <div style="margin-bottom:20px">
-    <div class="sec-title" style="margin-bottom:4px">Company Watchlist</div>
-    <div style="font-size:12px;color:var(--muted)">Gemini searches for open sales roles at each company daily. Green = matching roles found. Also boosts each company&rsquo;s score in your job board.</div>
+    <div class="sec-title" style="margin-bottom:4px">Watchlist</div>
+    <div style="font-size:12px;color:var(--muted)">Claude searches for open sales roles at each company daily. Green = matching roles found. Also boosts each company&rsquo;s score in your job board.</div>
   </div>
 
   <!-- Watchlist scan controls -->
   <div class="cw-scan-header">
     <div>
       <div style="font-size:13px;font-weight:700;color:var(--text)">Daily Job Scan</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:2px" id="cw-scan-status">Gemini checks for open roles at each company daily &mdash; automatically</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:2px" id="cw-scan-status">Claude checks for open roles at each company daily &mdash; automatically</div>
     </div>
     <button class="btn btn-ghost btn-sm" id="cw-scan-btn" onclick="runWatchlistScan()">&#x1F50D; Scan Now</button>
   </div>
@@ -8221,7 +8513,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div class="news-topbar">
       <div>
         <div class="news-title">&#x1F4F0; Industry News</div>
-        <div class="news-subtitle">Live B2B tech news &mdash; analyzed by Gemini for hiring signals, funding, and sales opportunity</div>
+        <div class="news-subtitle">Live B2B tech news &mdash; analyzed by Claude for hiring signals, funding, and sales opportunity</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
         <div id="news-meta" class="news-status"></div>
@@ -8513,6 +8805,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <div style="padding:20px;display:flex;flex-direction:column;gap:14px">
       <div id="li-msg-loading" style="text-align:center;padding:20px;color:var(--muted);font-size:13px">Drafting your message&hellip;</div>
       <div id="li-msg-content" style="display:none">
+        <div id="li-msg-status" style="display:none;font-size:11px;padding:5px 8px;border-radius:4px;margin-bottom:10px;background:rgba(0,200,110,.08);border:1px solid rgba(0,200,110,.2);color:#00c86e"></div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Version 1 &mdash; <span id="li-v1-count" style="font-weight:600;color:var(--text)">0</span>&thinsp;/&thinsp;300 chars</div>
         <textarea id="li-v1-text" rows="4" class="input-text" style="width:100%;box-sizing:border-box;resize:vertical;font-size:13px;line-height:1.5" oninput="updateLICount(this,'li-v1-count')"></textarea>
         <div style="display:flex;gap:6px;margin-top:4px">
@@ -8992,11 +9285,78 @@ function sortJobs(jobs) {
 
 function showJobsTab(tab) {
   _currentJobsTab = tab;
-  ['target','win','stretch','skip','all'].forEach(function(t) {
+  ['target','win','stretch','skip','all','new'].forEach(function(t) {
     var el = document.getElementById('jtab-' + t);
     if (el) el.classList.toggle('active', t === tab);
   });
+  var clearBtn = document.getElementById('clear-tab-btn');
+  if (clearBtn) {
+    var tabLabels = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs', new:'New Jobs' };
+    clearBtn.textContent = '\uD83D\uDDD1 Delete all ' + (tabLabels[tab] || tab);
+    clearBtn.style.display = '';
+  }
   renderJobs();
+}
+
+async function deleteJob(id) {
+  _allJobs = _allJobs.filter(function(j) { return j.id !== id; });
+  renderJobs();
+  try {
+    var res = await fetch('/api/jobs/' + id, { method: 'DELETE' });
+    if (!res.ok) {
+      var err = await res.json().catch(function() { return {}; });
+      console.error('[deleteJob] Server error:', err);
+    }
+  } catch (e) { console.error('[deleteJob]', e); }
+}
+
+async function clearTierJobs() {
+  var tabLabels = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs', new:'New Jobs' };
+  var label = tabLabels[_currentJobsTab] || _currentJobsTab;
+  var count;
+  if (_currentJobsTab === 'new') {
+    count = _allJobs.filter(function(j) { return !j.saved_at && j.is_from_latest_run; }).length;
+  } else {
+    count = _allJobs.filter(function(j) {
+      if (j.saved_at) return false;
+      return _currentJobsTab === 'all' || tierKey(j) === _currentJobsTab;
+    }).length;
+  }
+  if (count === 0) { alert('No jobs in this tab to delete.'); return; }
+  if (!confirm('Permanently delete all ' + count + ' ' + label + '? This cannot be undone.')) return;
+  try {
+    var res = await fetch('/api/jobs/tier/' + _currentJobsTab, { method: 'DELETE' });
+    if (!res.ok) {
+      var body = await res.json().catch(function() { return { error: 'Unknown error' }; });
+      alert('Delete failed: ' + (body.error || res.status));
+      return;
+    }
+    var data = await res.json();
+    console.log('[clearTierJobs] Deleted', data.deleted, 'jobs from tier', _currentJobsTab);
+    await loadJobs();
+  } catch (e) {
+    alert('Delete failed: ' + e);
+  }
+}
+
+async function moveJobToTier(id, newTier) {
+  if (!newTier) return;
+  try {
+    var res = await fetch('/api/jobs/' + id + '/tier', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tier: newTier })
+    });
+    if (!res.ok) {
+      var err = await res.json().catch(function() { return {}; });
+      alert('Move failed: ' + (err.error || res.status));
+      return;
+    }
+    var j = _allJobs.find(function(x) { return x.id == id; });
+    if (j) { j.opportunity_tier = newTier; }
+    renderJobs();
+    updateTabCounts();
+  } catch (e) { alert('Move failed: ' + e); }
 }
 
 function isNew(j) {
@@ -9200,7 +9560,7 @@ function renderJobCard(j, opts) {
       var hmPhoneHtml = j.hm_phone ? '<div style="font-size:11px;color:var(--muted);margin-top:1px">' + esc(j.hm_phone) + '</div>' : '';
       // Enrichment source tag
       var hmSrcRaw = j.hm_enrichment_source || '';
-      var hmSrcLabel = hmSrcRaw === 'gemini+apollo' ? 'via Gemini+Apollo' : hmSrcRaw === 'apollo' ? 'via Apollo' : hmSrcRaw === 'gemini' ? 'via Gemini' : hmSrcRaw === 'cache' ? 'From cache' : (hmSrcRaw ? 'via ' + hmSrcRaw : '');
+      var hmSrcLabel = hmSrcRaw === 'gemini+apollo' ? 'via AI+Apollo' : hmSrcRaw === 'apollo' ? 'via Apollo' : hmSrcRaw === 'gemini' ? 'via AI search' : hmSrcRaw === 'cache' ? 'From cache' : (hmSrcRaw ? 'via ' + hmSrcRaw : '');
       var hmSrcHtml = hmSrcLabel ? '<span style="display:inline-block;padding:0 5px;border-radius:3px;font-size:9px;color:var(--muted);border:1px solid #333">' + esc(hmSrcLabel) + '</span>' : '';
       // LI message status badge
       var liStatusBadge = '';
@@ -9248,11 +9608,17 @@ function renderJobCard(j, opts) {
     }
   }
 
+  var deleteBtn = opts.showSavedDate ? '' :
+    '<button class="job-delete-x" data-jid="' + j.id + '" onclick="deleteJob(Number(this.dataset.jid))" title="Remove this job permanently">\u00D7</button>';
+
   return '<div class="card ' + tierClass + '">' +
-    // ── Tier row: badge + score chip
+    // ── Tier row: badge + score chip + delete button
     '<div class="card-tier-row">' +
       '<span>' + tBadge + '</span>' +
-      '<span class="' + scoreChipClass + '">' + esc(j.match_score) + '</span>' +
+      '<div style="display:flex;align-items:center;gap:6px">' +
+        '<span class="' + scoreChipClass + '">' + esc(j.match_score) + '</span>' +
+        deleteBtn +
+      '</div>' +
     '</div>' +
     // ── Title block
     '<div class="card-title-block">' +
@@ -9300,6 +9666,13 @@ function renderJobCard(j, opts) {
             '<option value="rejected"' + (userAction === 'rejected' ? ' selected' : '') + '>\u2715 Rejected</option>' +
             '<option value="skipped"' + (userAction === 'skipped' ? ' selected' : '') + '>\u2014 Skipped</option>' +
           '</select>' +
+          '<select class="btn btn-ghost btn-sm" data-jid="' + j.id + '" onchange="moveJobToTier(this.dataset.jid,this.value);this.selectedIndex=0" style="cursor:pointer;color:#a0aec0" title="Move this job to a different tab">' +
+            '<option value="">\u21C6 Move to\u2026</option>' +
+            '<option value="Top Target">\uD83C\uDFAF Top Target</option>' +
+            '<option value="Fast Win">\u26A1 Fast Win</option>' +
+            '<option value="Stretch Role">\uD83D\uDE80 Stretch</option>' +
+            '<option value="Probably Skip">\uD83D\uDEAB Probably Skip</option>' +
+          '</select>' +
           '<button class="' + saveClass + '" onclick="toggleSave(' + j.id + ')" id="save-btn-' + j.id + '">' + saveLabel + '</button>'
       ) +
     '</div>' +
@@ -9315,12 +9688,15 @@ function updateTabCounts() {
     else counts.unscored++;
   });
   var allCount = _allJobs.filter(function(j) { return !j.saved_at; }).length;
+  var newCount = _allJobs.filter(function(j) { return j.is_from_latest_run; }).length;
   ['target','win','stretch','skip'].forEach(function(t) {
     var el = document.getElementById('jtab-count-' + t);
     if (el) el.textContent = counts[t] > 0 ? '(' + counts[t] + ')' : '';
   });
   var allEl = document.getElementById('jtab-count-all');
   if (allEl) allEl.textContent = allCount > 0 ? '(' + allCount + ')' : '';
+  var newEl = document.getElementById('jtab-count-new');
+  if (newEl) newEl.textContent = newCount > 0 ? '(' + newCount + ')' : '';
 }
 
 function renderJobs() {
@@ -9328,11 +9704,28 @@ function renderJobs() {
   var cnt  = document.getElementById('jobs-count');
   var jobs;
 
+  // Sync the "Delete all in tab" button label with current tab
+  var clearBtn = document.getElementById('clear-tab-btn');
+  if (clearBtn) {
+    var _tabLbls = { target:'Top Targets', win:'Fast Wins', stretch:'Stretch', skip:'Probably Skip', all:'All Jobs', new:'New Jobs' };
+    clearBtn.textContent = '\uD83D\uDDD1 Delete all ' + (_tabLbls[_currentJobsTab] || _currentJobsTab);
+    clearBtn.style.display = '';
+  }
+
   updateTabCounts();
 
   var unsavedJobs = _allJobs.filter(function(j) { return !j.saved_at; });
 
-  if (_currentJobsTab === 'all') {
+  if (_currentJobsTab === 'new') {
+    // Show ALL jobs from the latest scout run (including saved), sorted by tier then score
+    jobs = sortJobs(_allJobs.filter(function(j) { return j.is_from_latest_run; }));
+    if (!jobs.length) {
+      cnt.textContent = 'No jobs from the latest run yet';
+      grid.innerHTML = '<div style="padding:48px 24px;text-align:center;color:var(--muted);font-size:13px">No jobs from the latest scout run yet \u2014 run the scout to populate this tab</div>';
+      return;
+    }
+    cnt.textContent = jobs.length + ' job' + (jobs.length !== 1 ? 's' : '') + ' from the latest run';
+  } else if (_currentJobsTab === 'all') {
     jobs = sortJobs(unsavedJobs);
     cnt.textContent = jobs.length + ' job' + (jobs.length !== 1 ? 's' : '') + ' total';
   } else {
@@ -9563,6 +9956,79 @@ function renderPipelineCard(j, stage) {
       progressBtn + removeBtn +
     '</div>' +
   '</div>';
+}
+
+// ── Add Job Manually ───────────────────────────────────────────────────────
+function openAddJobModal() {
+  var overlay = document.getElementById('add-job-overlay');
+  if (!overlay) return;
+  document.getElementById('add-job-company').value = '';
+  document.getElementById('add-job-title').value = '';
+  document.getElementById('add-job-desc').value = '';
+  document.getElementById('add-job-url').value = '';
+  var errEl = document.getElementById('add-job-error');
+  if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+  var btn = document.getElementById('add-job-save-btn');
+  if (btn) { btn.disabled = false; btn.textContent = 'Save \u0026 Score'; }
+  overlay.classList.add('open');
+  setTimeout(function() {
+    var co = document.getElementById('add-job-company');
+    if (co) co.focus();
+  }, 60);
+}
+
+function closeAddJobModal() {
+  var overlay = document.getElementById('add-job-overlay');
+  if (overlay) overlay.classList.remove('open');
+}
+
+async function submitManualJob() {
+  var company = (document.getElementById('add-job-company').value || '').trim();
+  var title   = (document.getElementById('add-job-title').value || '').trim();
+  var desc    = (document.getElementById('add-job-desc').value || '').trim();
+  var url     = (document.getElementById('add-job-url').value || '').trim();
+  var errEl   = document.getElementById('add-job-error');
+  var btn     = document.getElementById('add-job-save-btn');
+
+  if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+
+  if (!company) {
+    if (errEl) { errEl.textContent = 'Company name is required.'; errEl.style.display = 'block'; }
+    document.getElementById('add-job-company').focus();
+    return;
+  }
+  if (!desc) {
+    if (errEl) { errEl.textContent = 'Job description is required.'; errEl.style.display = 'block'; }
+    document.getElementById('add-job-desc').focus();
+    return;
+  }
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Scoring with Claude\u2026'; }
+
+  try {
+    var body = { company: company, description: desc };
+    if (title) body.title = title;
+    if (url)   body.applyUrl = url;
+
+    var res = await fetch('/api/jobs/custom', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    var data = await res.json();
+    if (!res.ok) {
+      if (errEl) { errEl.textContent = data.error || 'Failed to save job. Please try again.'; errEl.style.display = 'block'; }
+      if (btn) { btn.disabled = false; btn.textContent = 'Save \u0026 Score'; }
+      return;
+    }
+
+    closeAddJobModal();
+    showTab('pipeline');
+    await loadPipeline();
+  } catch(e) {
+    if (errEl) { errEl.textContent = 'Network error — please try again.'; errEl.style.display = 'block'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Save \u0026 Score'; }
+  }
 }
 
 // ── Daily Actions ──────────────────────────────────────────────────────────
@@ -10274,10 +10740,44 @@ async function openLIModal(hmId, jobId, btn) {
   _liMsgId = null;
   document.getElementById('li-msg-modal').style.display = 'flex';
   document.getElementById('li-msg-loading').style.display = '';
+  document.getElementById('li-msg-loading').textContent = 'Loading\u2026';
   document.getElementById('li-msg-content').style.display = 'none';
   document.getElementById('li-msg-error').style.display = 'none';
   document.getElementById('li-regen-btn').style.display = 'none';
   document.getElementById('li-sent-btn').style.display = 'none';
+  var statusEl = document.getElementById('li-msg-status');
+  if (statusEl) statusEl.style.display = 'none';
+
+  try {
+    var draftRes = await fetch('/api/linkedin-message/draft?hiring_manager_id=' + Number(hmId) + '&job_id=' + Number(jobId));
+    var draft = await draftRes.json();
+    if (draft.exists) {
+      _populateLIModal(draft.message || '', draft.alternative || '');
+      var statusEl = document.getElementById('li-msg-status');
+      if (statusEl) {
+        if (draft.status === 'sent') {
+          statusEl.textContent = '\u2713 Previously marked as sent';
+          statusEl.style.background = 'rgba(0,200,110,.08)';
+          statusEl.style.borderColor = 'rgba(0,200,110,.2)';
+          statusEl.style.color = '#00c86e';
+        } else {
+          statusEl.textContent = 'Saved draft \u2014 click Regenerate to create a new version';
+          statusEl.style.background = 'rgba(245,200,66,.06)';
+          statusEl.style.borderColor = 'rgba(245,200,66,.2)';
+          statusEl.style.color = '#f5c842';
+        }
+        statusEl.style.display = '';
+      }
+      document.getElementById('li-msg-loading').style.display = 'none';
+      document.getElementById('li-msg-content').style.display = '';
+      document.getElementById('li-regen-btn').style.display = '';
+      if (draft.status !== 'sent') document.getElementById('li-sent-btn').style.display = '';
+      return;
+    }
+  } catch(_) {}
+
+  // No saved draft — generate a new one
+  document.getElementById('li-msg-loading').textContent = 'Drafting your message\u2026';
   await generateLinkedInMessage();
 }
 
@@ -10285,10 +10785,22 @@ function closeLIModal() {
   document.getElementById('li-msg-modal').style.display = 'none';
 }
 
+function _populateLIModal(v1, v2) {
+  var v1El = document.getElementById('li-v1-text');
+  var v2El = document.getElementById('li-v2-text');
+  if (v1El) { v1El.value = v1; updateLICount(v1El, 'li-v1-count'); }
+  if (v2El) { v2El.value = v2; updateLICount(v2El, 'li-v2-count'); }
+}
+
 async function generateLinkedInMessage() {
   document.getElementById('li-msg-loading').style.display = '';
+  document.getElementById('li-msg-loading').textContent = 'Drafting your message\u2026';
   document.getElementById('li-msg-content').style.display = 'none';
   document.getElementById('li-msg-error').style.display = 'none';
+  document.getElementById('li-regen-btn').style.display = 'none';
+  document.getElementById('li-sent-btn').style.display = 'none';
+  var statusEl = document.getElementById('li-msg-status');
+  if (statusEl) statusEl.style.display = 'none';
   try {
     var res = await fetch('/api/linkedin-message/generate', {
       method: 'POST',
@@ -10297,12 +10809,7 @@ async function generateLinkedInMessage() {
     });
     var data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Generation failed');
-    var v1 = data.message || '';
-    var v2 = data.alternative || '';
-    var v1El = document.getElementById('li-v1-text');
-    var v2El = document.getElementById('li-v2-text');
-    if (v1El) { v1El.value = v1; updateLICount(v1El, 'li-v1-count'); }
-    if (v2El) { v2El.value = v2; updateLICount(v2El, 'li-v2-count'); }
+    _populateLIModal(data.message || '', data.alternative || '');
     _liMsgId = data.message_id || null;
     document.getElementById('li-msg-loading').style.display = 'none';
     document.getElementById('li-msg-content').style.display = '';
@@ -11229,13 +11736,7 @@ async function loadAutoRunBadge() {
     var d = await r.json();
     var el = document.getElementById('auto-run-badge');
     if (!el) return;
-    if (d.next_run_in_hours <= 0) {
-      el.textContent = '\u23F0 Auto-run: due soon';
-    } else {
-      var h = d.next_run_in_hours;
-      var label = h < 1 ? 'in ' + Math.round(h * 60) + 'm' : 'in ' + Math.round(h) + 'h';
-      el.textContent = '\u23F0 Next auto-run ' + label;
-    }
+    el.textContent = '\u23F9 Auto-run: off';
     el.style.display = 'inline';
   } catch(e) { /* ignore */ }
 }
@@ -11293,7 +11794,7 @@ function copyEmailDraft() {
   var subj = document.getElementById('outreach-email-subject');
   var body = document.getElementById('outreach-email-body');
   if (!subj || !body) return;
-  var txt = 'Subject: ' + (subj.value || '') + '\\n\\n' + (body.value || '');
+  var txt = 'Subject: ' + (subj.value || '') + '\n\n' + (body.value || '');
   navigator.clipboard.writeText(txt).then(function() {
     var status = document.getElementById('outreach-email-status');
     if (status) { status.textContent = '\u2713 Draft copied'; status.style.color = '#4ade80'; }
@@ -12331,7 +12832,7 @@ function renderCareerIntel(data, generatedAt, stale) {
       (citations ? '<div class="intel-card-section"><div class="intel-card-label">Sources</div><div class="intel-citations">' + citations + '</div></div>' : '') +
 
       '<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:2px">' +
-        '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(c.company_name) + ',' + JSON.stringify(c.company_url || '') + ',this)">\u2605 Save Company Profile</button>' +
+        '<button class="save-watchlist-btn" data-name="' + esc(c.company_name) + '" data-url="' + esc(c.company_url || '') + '" onclick="saveToWatchlist(this.dataset.name,this.dataset.url,this)">\u2605 Save to Watchlist</button>' +
       '</div>' +
     '</div>';
   }).join('');
@@ -12343,7 +12844,7 @@ function renderCareerIntel(data, generatedAt, stale) {
   intelEl('intel-footer').innerHTML = 'Last refreshed: ' + ts + modelNote + ' &nbsp;&middot;&nbsp; ' + (data.grounding_sources_count || 0) + ' grounding sources' + staleNotice;
 
   // Update meta line
-  intelEl('intel-meta').innerHTML = 'Powered by Gemini + Google Search grounding &mdash; refreshes daily';
+  intelEl('intel-meta').innerHTML = 'Powered by Claude + Web Search &mdash; refreshes daily';
 
   setIntelState('content');
 }
@@ -12476,7 +12977,7 @@ function renderPreIpo(data, generatedAt, stale) {
   });
 
   // Footer
-  pEl('preipo-footer').textContent = 'Data sourced via Gemini + Google Search grounding. Verify funding details independently before acting.';
+  pEl('preipo-footer').textContent = 'Data sourced via Claude + Web Search. Verify funding details independently before acting.';
 }
 
 function filterPreIpo(stage) {
@@ -12592,7 +13093,7 @@ function buildPreIpoCard(c) {
     (cites ? '<div class="preipo-card-section"><div class="preipo-lbl">Sources</div><div class="preipo-cites">' + cites + '</div></div>' : '') +
 
     '<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:4px">' +
-      '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(c.company_name) + ',' + JSON.stringify(c.company_url || '') + ',this)">\u2605 Save Company Profile</button>' +
+      '<button class="save-watchlist-btn" data-name="' + esc(c.company_name) + '" data-url="' + esc(c.company_url || '') + '" onclick="saveToWatchlist(this.dataset.name,this.dataset.url,this)">\u2605 Save to Watchlist</button>' +
     '</div>' +
   '</div>';
 }
@@ -12634,14 +13135,21 @@ function renderTargetedJobCard(j) {
 async function scanForRoles(source) {
   var isIntel = source === 'intel';
   var isLeaders = source === 'leaders';
-  var prefix = isIntel ? 'intel' : (isLeaders ? 'leaders' : 'preipo');
+  var isPreipo = source === 'preipo';
+  var isDv = source === 'deepvalue';
+  var isPulse = source === 'pulse';
+  var prefix = isIntel ? 'intel' : isLeaders ? 'leaders' : isPreipo ? 'preipo' : isDv ? 'dv' : 'pulse';
   var companies;
   if (isIntel) {
     companies = _intelCompanies;
   } else if (isLeaders) {
     companies = _leadersAllCompanies;
-  } else {
+  } else if (isPreipo) {
     companies = preIpoAllCompanies.map(function(c) { return c.company_name; }).filter(Boolean);
+  } else if (isDv) {
+    companies = _dvAllCompanies;
+  } else {
+    companies = _pulseAllCompanies;
   }
 
   if (!companies || companies.length === 0) {
@@ -12670,16 +13178,8 @@ async function scanForRoles(source) {
     if (!res.ok) throw new Error(json.error || 'Scan failed');
 
     if (json.skipped) {
-      var reason = json.skip_reason || '';
-      var isCapacity = reason.includes('unavailable') || reason.includes('503') || reason.includes('timeout') || reason.includes('candidates') || reason.includes('demand') || reason.includes('429');
-      if (isCapacity) {
-        if (errBox) {
-          errBox.innerHTML = '<strong>Gemini is temporarily at capacity</strong> \u2014 this is a Google-side issue that usually clears in 1\u20132 minutes.<br><button style="margin-top:8px;padding:4px 14px;background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(99,102,241,.3);border-radius:6px;cursor:pointer;font-size:12px" onclick="runTargetedScan(this.dataset.src)" data-src="' + source + '">Retry</button>';
-          errBox.style.display = '';
-        }
-        return;
-      }
-      throw new Error('Gemini not available: ' + (reason || 'check GEMINI_API_KEY in Settings'));
+      if (errBox) { errBox.textContent = 'No results \u2014 try refreshing the page data first.'; errBox.style.display = ''; }
+      return;
     }
 
     var jobs = json.jobs || [];
@@ -12720,6 +13220,24 @@ function togglePreIpoScanResults() {
   if (toggleEl) toggleEl.textContent = _preipoScanCollapsed ? '\u25BC Expand' : '\u25B2 Collapse';
 }
 
+var _dvScanCollapsed = false;
+function toggleDvScanResults() {
+  _dvScanCollapsed = !_dvScanCollapsed;
+  var jobsEl = document.getElementById('dv-scan-jobs');
+  var toggleEl = document.getElementById('dv-scan-toggle');
+  if (jobsEl) jobsEl.style.display = _dvScanCollapsed ? 'none' : '';
+  if (toggleEl) toggleEl.textContent = _dvScanCollapsed ? '\u25BC Expand' : '\u25B2 Collapse';
+}
+
+var _pulseScanCollapsed = false;
+function togglePulseScanResults() {
+  _pulseScanCollapsed = !_pulseScanCollapsed;
+  var jobsEl = document.getElementById('pulse-scan-jobs');
+  var toggleEl = document.getElementById('pulse-scan-toggle');
+  if (jobsEl) jobsEl.style.display = _pulseScanCollapsed ? 'none' : '';
+  if (toggleEl) toggleEl.textContent = _pulseScanCollapsed ? '\u25BC Expand' : '\u25B2 Collapse';
+}
+
 // ── Industry Leaders ──────────────────────────────────────────────────────
 var _leadersAllCompanies = [];
 
@@ -12750,7 +13268,7 @@ function renderLeaderCard(c) {
     (c.ote_range ? '<div><div class="leaders-lbl">Rep OTE Range</div><div class="leaders-ote">' + esc(c.ote_range) + '</div></div>' : '') +
     '<div><div class="leaders-lbl">Rep Profile</div><div class="leaders-val">' + esc(c.rep_quality) + '</div></div>' +
     '<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:8px">' +
-      '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(c.name) + ',' + JSON.stringify(websiteUrl || '') + ',this)">\u2605 Save Company Profile</button>' +
+      '<button class="save-watchlist-btn" data-name="' + esc(c.name) + '" data-url="' + esc(websiteUrl || '') + '" onclick="saveToWatchlist(this.dataset.name,this.dataset.url,this)">\u2605 Save to Watchlist</button>' +
     '</div>' +
   '</div>';
 }
@@ -12826,7 +13344,7 @@ function renderJobMarketPulse(data, generatedAt, stale) {
   el('pulse-content').style.display = '';
 
   var genDate = generatedAt ? new Date(generatedAt).toLocaleString() : '';
-  el('pulse-meta').textContent = 'Generated ' + genDate + (stale ? ' \u2014 \u26A0\uFE0F Stale (>24h old), refresh for latest' : ' \u2014 Powered by Gemini + Google Search');
+  el('pulse-meta').textContent = 'Generated ' + genDate + (stale ? ' \u2014 \u26A0\uFE0F Stale (>24h old), refresh for latest' : ' \u2014 Powered by Claude + Web Search');
 
   // Mood banner
   var moodMap = {
@@ -12860,6 +13378,7 @@ function renderJobMarketPulse(data, generatedAt, stale) {
 
   // Company cards
   var cards = data.companies || [];
+  _pulseAllCompanies = cards.map(function(c) { return c.company_name || c.name; }).filter(Boolean);
   if (cards.length === 0) {
     el('pulse-cards').innerHTML = '<div class="empty">No company cards generated.</div>';
   } else {
@@ -12935,7 +13454,7 @@ function renderPulseCard(c) {
     (c.hiring_driver ? '<div><div class="pulse-section-label">Hiring Driver</div><div class="pulse-section-value" style="color:var(--muted)">' + esc(c.hiring_driver) + '</div></div>' : '') +
     (citationsHtml ? citationsHtml : '') +
     '<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:6px">' +
-      '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(c.company_name) + ',' + JSON.stringify(c.company_url || '') + ',this)">\u2605 Save Company Profile</button>' +
+      '<button class="save-watchlist-btn" data-name="' + esc(c.company_name) + '" data-url="' + esc(c.company_url || '') + '" onclick="saveToWatchlist(this.dataset.name,this.dataset.url,this)">\u2605 Save to Watchlist</button>' +
     '</div>' +
   '</div>';
 }
@@ -13050,7 +13569,7 @@ async function loadNews(force) {
       if (!_newsData.length) {
         footerEl.textContent = 'No articles yet \u2014 click Refresh Feed to pull fresh B2B news';
       } else {
-        footerEl.textContent = _newsData.length + ' articles \u00B7 powered by Gemini + Google Search grounding';
+        footerEl.textContent = _newsData.length + ' articles \u00B7 powered by Claude + Web Search';
       }
     }
   } catch(e) {
@@ -13130,7 +13649,7 @@ function renderNewsCard(a) {
       ? '<div style="font-size:10px;color:var(--muted)">\uD83D\uDC65 ' + esc(a.employee_count_est) + ' employees</div>' : '') +
 
     '<div class="news-card-actions">' +
-      '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(a.company_name || '') + ',null,this)">\u2605 Save Company</button>' +
+      '<button class="save-watchlist-btn" data-name="' + esc(a.company_name || '') + '" data-url="" onclick="saveToWatchlist(this.dataset.name,this.dataset.url,this)">\u2605 Save to Watchlist</button>' +
       '<a href="' + esc(a.article_url) + '" target="_blank" rel="noopener" class="btn btn-ghost btn-sm" style="font-size:11px">Read \u2192</a>' +
     '</div>' +
   '</div>';
@@ -13153,9 +13672,9 @@ async function refreshNews() {
   var btn = newsEl('news-refresh-btn');
   var metaEl = newsEl('news-meta');
   if (btn) { btn.disabled = true; btn.textContent = 'Fetching\u2026'; }
-  if (metaEl) metaEl.textContent = 'Pulling RSS feeds and analyzing with Gemini\u2026';
+  if (metaEl) metaEl.textContent = 'Pulling RSS feeds and analyzing with Claude\u2026';
   var grid = newsEl('news-grid');
-  if (grid) grid.innerHTML = '<div class="news-loading">\uD83E\uDD16 Gemini is reading the news\u2026 (30-60 seconds)</div>';
+  if (grid) grid.innerHTML = '<div class="news-loading">\uD83E\uDD16 Claude is reading the news\u2026 (30-60 seconds)</div>';
   try {
     var startRes = await fetch('/api/industry-news/refresh', { method: 'POST' });
     var startData = await startRes.json();
@@ -13188,7 +13707,7 @@ async function refreshNews() {
             metaEl.textContent = ts ? 'Updated ' + ts : '';
           }
           var footerEl = newsEl('news-footer');
-          if (footerEl) footerEl.textContent = _newsData.length + ' articles \u00B7 powered by Gemini + Google Search grounding';
+          if (footerEl) footerEl.textContent = _newsData.length + ' articles \u00B7 powered by Claude + Web Search';
           if (btn) { btn.disabled = false; btn.textContent = '\u21BB Refresh Feed'; }
         }
       } catch { /* keep polling */ }
@@ -13201,6 +13720,8 @@ async function refreshNews() {
 
 // ── Deep Value ──────────────────────────────────────────────────────────────
 var _dvWatchlistAdded = {};
+var _dvAllCompanies = [];
+var _pulseAllCompanies = [];
 
 function dvEl(id) { return document.getElementById(id); }
 
@@ -13255,25 +13776,26 @@ function renderDvCard(c) {
         return '<a class="dv-cite" href="' + esc(s.url) + '" target="_blank" rel="noopener">\uD83D\uDD17 ' + esc(s.title) + '</a>';
       }).join('') + '</div>' : '') +
     '<div style="border-top:1px solid var(--border);padding-top:10px;margin-top:8px">' +
-      '<button class="save-watchlist-btn" onclick="saveToWatchlist(' + JSON.stringify(c.name) + ',' + JSON.stringify(websiteUrl || '') + ',this)">\u2605 Save Company Profile</button>' +
+      '<button class="save-watchlist-btn" data-name="' + esc(c.name) + '" data-url="' + esc(websiteUrl || '') + '" onclick="saveToWatchlist(this.dataset.name,this.dataset.url,this)">\u2605 Save to Watchlist</button>' +
     '</div>' +
   '</div>';
 }
 
 function renderDvData(data, stale) {
+  var cos = data.companies || [];
+  _dvAllCompanies = cos.map(function(c) { return c.name; }).filter(Boolean);
   dvEl('dv-summary').textContent = data.market_summary || '';
-  dvEl('dv-grid').innerHTML = (data.companies || []).map(renderDvCard).join('');
+  dvEl('dv-grid').innerHTML = cos.map(renderDvCard).join('');
 
   var genAt = data.generated_at ? new Date(data.generated_at) : null;
   var metaParts = [];
   if (genAt) metaParts.push('Last updated ' + genAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }));
   if (stale) metaParts.push('\u26A0\uFE0F Stale \u2014 click Refresh Intel');
-  metaParts.push('Powered by Gemini + Google Search');
+  metaParts.push('Powered by Claude + Web Search');
   dvEl('dv-meta').textContent = metaParts.join(' \u2014 ');
 
-  var cos = data.companies || [];
   dvEl('dv-footer').textContent =
-    cos.length + ' companies \u2014 ' + cos.filter(function(c) { return c.has_open_roles; }).length + ' with open roles \u2014 ' + (data.model_used || 'Gemini');
+    cos.length + ' companies \u2014 ' + cos.filter(function(c) { return c.has_open_roles; }).length + ' with open roles \u2014 ' + (data.model_used || 'Claude');
 
   dvEl('dv-loading').style.display = 'none';
   dvEl('dv-empty').style.display = 'none';
@@ -13366,7 +13888,7 @@ async function runWatchlistScan() {
   var btn = document.getElementById('cw-scan-btn');
   var statusEl = document.getElementById('cw-scan-status');
   if (btn) { btn.disabled = true; btn.textContent = 'Scanning\u2026'; }
-  if (statusEl) statusEl.textContent = 'Gemini is searching for open roles at each company\u2026 (30-90s per company)';
+  if (statusEl) statusEl.textContent = 'Claude is searching for open roles at each company\u2026 (30-90s per company)';
   try {
     var res = await fetch('/api/companies/scan-jobs', { method: 'POST' });
     var data = await res.json();

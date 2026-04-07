@@ -338,7 +338,7 @@ async function claudeJobSearchFallback(
       const response = await claude.messages.create({
         model: claudeModel,
         max_tokens: 4096,
-        tools: [{ type: 'web_search_20250305' as any, name: 'web_search', max_uses: 5 }],
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }] as any[],
         messages: [{ role: 'user', content: prompt }],
       });
 

@@ -1,0 +1,93 @@
+Read all relevant files completely before making any changes.
+
+FIX 1 — Remove Gemini entirely from the entire codebase
+
+Search for every Gemini API call, import, and reference 
+across all files including:
+- Job Recovery Engine
+- Gemini Discovery block in the scout run
+- Watchlist scan
+- Any other location
+
+Remove all of it completely. Do not replace with anything 
+for now — just remove. If a feature only exists because 
+of Gemini (like the Gemini Discovery block that finds 
+additional jobs), remove that entire feature block too.
+Log a simple note where each block was removed:
+"[Removed] Gemini Discovery block"
+"[Removed] Gemini Job Recovery"
+
+FIX 2 — Fix location filter for Workday "X Locations" format
+
+Workday returns locations like "2 Locations", "6 Locations",
+"3 Locations" instead of actual city/state names.
+
+Update the location filter so that any job where the 
+location field matches the pattern "[number] Locations" 
+(e.g. "2 Locations", "6 Locations") automatically PASSES 
+the location filter and is sent to Claude scoring.
+
+Claude will handle the final location assessment for 
+these jobs since we don't have the actual location data.
+
+Log these as: "PASS (multi-location Workday — sending to Claude)"
+
+FIX 3 — Fix Glassdoor and ZipRecruiter wasted attempts
+
+In jobspy_scraper.py, before running Glassdoor or 
+ZipRecruiter searches, make one single test request to 
+each. If the test fails with any connection or TLS error,
+skip that source entirely for this run and log:
+"Glassdoor: connection test failed — skipping"
+"ZipRecruiter: connection test failed — skipping"
+
+Do not attempt any of the 15 search queries if the 
+test fails. This saves the time wasted on 30 guaranteed 
+failing requests every run.
+
+FIX 4 — Fix salary runtime crash
+
+Find every place where .match(), .replace(), .includes(),
+.toLowerCase() or any string method is called directly 
+on job.salary or any salary-related field.
+
+Add this safety check before every such call:
+const salaryStr = typeof job.salary === 'string'
+  ? job.salary
+  : job.salary != null
+    ? String(job.salary)
+    : ''
+
+Then use salaryStr instead of job.salary for all 
+string operations.
+
+FIX 5 — Fix Greenhouse slug validation
+
+After Claude generates the company list, for every 
+company with ats_type "greenhouse", make a parallel 
+HEAD request to:
+https://boards-api.greenhouse.io/v1/boards/{slug}/jobs
+
+5 second timeout. Run all in parallel.
+
+200 → keep as greenhouse, log "✓ {slug}"
+404 or timeout → convert to plain with URL
+https://www.{companyname}.com/careers
+Log "✗ {slug} → plain fallback"
+
+Also update the Claude company list prompt to add:
+"Only use ats_type greenhouse if you are certain of 
+the exact slug. Verified slugs: purestorage, databricks,
+coreweave, scaleai, cloudflare, mongodb, rubrik, 
+verkada, axonius, elastic, anthropic, cognite, 
+energyhub, ironmountainsolutions, impinj, commvault.
+For extremenetworks use lever. If unsure of any 
+company's slug use plain with their careers URL."
+
+FIX 6 — Deduplicate Claude company list
+
+After receiving Claude's list, deduplicate by company 
+name case-insensitive. Keep first occurrence. Log:
+"Removed X duplicate companies from Claude list"
+
+Push directly to main when done.

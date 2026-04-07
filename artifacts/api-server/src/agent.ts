@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { GoogleGenAI } from '@google/genai';
+// [Removed] Gemini import (GoogleGenAI)
 import type { ScrapedJob } from './scraper.js';
 
 const anthropic = new Anthropic({
@@ -60,6 +60,7 @@ export interface JobMatch {
   location: string;
   salary?: string;
   applyUrl: string;
+  description?: string | null;
   whyGoodFit: string;
   matchScore: number;
   isHardware: boolean;
@@ -87,105 +88,23 @@ interface CriteriaForAgent {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// getCompanyMomentum — Gemini-powered company health pre-check (48 h in-memory cache)
-// Returns 0-25 score feeding directly into companyQuality component.
-// ─────────────────────────────────────────────────────────────────────────────
+// [Removed] Gemini company momentum check — returns neutral default scores
+// getCompanyMomentum still exported for interface compatibility but Gemini removed.
 export async function getCompanyMomentum(
   companyName: string,
   isPreApproved: boolean,
 ): Promise<MomentumScore> {
   const cacheKey = companyName.toLowerCase().trim();
-
-  // Return in-process cached result if fresh (48 h)
   const mem = _momentumCache.get(cacheKey);
-  if (mem && Date.now() < mem.expiresAt) {
-    return { ...mem.data, cached: true };
-  }
+  if (mem && Date.now() < mem.expiresAt) return { ...mem.data, cached: true };
 
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!apiKey) {
-    // No Gemini key — use a sensible default so scoring still works
-    const fallback: MomentumScore = {
-      companyName,
-      score: isPreApproved ? 18 : 10,
-      signals: [],
-      warning: null,
-      cached: false,
-    };
-    _momentumCache.set(cacheKey, { data: fallback, expiresAt: Date.now() + 48 * 3600 * 1000 });
-    return fallback;
-  }
-
-  const prompt = `You are a company intelligence analyst. Evaluate the current momentum and health of "${companyName}" as of today.
-
-Search the web for the most recent news (last 6 months preferred). Look for:
-- Recent funding rounds, IPO news, or financial results
-- Headcount growth or layoffs in the last 12 months
-- Product launches or major contract wins
-- Leadership stability (CEO/CRO changes are a flag)
-- Any legal issues, regulatory action, or public controversy
-
-Return ONLY a valid JSON object (no markdown, no other text):
-{
-  "score": <integer 0-25>,
-  "signals": [<up to 3 short positive signal strings, e.g. "Raised $120M Series C (Jan 2025)">],
-  "warning": <null or one-sentence red flag, e.g. "Laid off 20% of workforce in Q1 2025">,
-  "reasoning": "<one sentence summary>"
-}
-
-SCORING GUIDE:
-23-25: Elite momentum — major funding/IPO, strong growth, no red flags
-18-22: Healthy — stable growth, some positive signals, no major concerns
-13-17: Neutral — no clear signals either way, or pre-approved company without recent news
-8-12: Cautious — some negative signals (slowing growth, leadership turnover)
-0-7:  Red flag — layoffs, legal/regulatory problems, financial distress`;
-
-  const CANDIDATE_MODELS = ['gemini-3-flash-preview', 'gemini-flash-latest', 'gemini-pro-latest'];
-
-  let result: MomentumScore | null = null;
-
-  for (const modelName of CANDIDATE_MODELS) {
-    try {
-      const ai = new GoogleGenAI({ apiKey });
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: prompt,
-        config: { tools: [{ googleSearch: {} }] },
-      });
-
-      const text = (response.text ?? '').trim().replace(/```json|```/g, '').trim();
-      if (!text) continue;
-
-      const parsed = JSON.parse(text) as {
-        score?: number;
-        signals?: string[];
-        warning?: string | null;
-      };
-
-      result = {
-        companyName,
-        score:   Math.min(25, Math.max(0, Math.round(parsed.score ?? (isPreApproved ? 16 : 10)))),
-        signals: Array.isArray(parsed.signals) ? parsed.signals.slice(0, 3) : [],
-        warning: parsed.warning ?? null,
-        cached:  false,
-      };
-      console.log(`  [Momentum] ${companyName}: ${result.score}/25 via ${modelName}${result.warning ? ' ⚠ ' + result.warning : ''}`);
-      break;
-    } catch {
-      // Try next model
-    }
-  }
-
-  if (!result) {
-    result = {
-      companyName,
-      score: isPreApproved ? 16 : 10,
-      signals: [],
-      warning: null,
-      cached: false,
-    };
-  }
-
+  const result: MomentumScore = {
+    companyName,
+    score: isPreApproved ? 18 : 10,
+    signals: [],
+    warning: null,
+    cached: false,
+  };
   _momentumCache.set(cacheKey, { data: result, expiresAt: Date.now() + 48 * 3600 * 1000 });
   return result;
 }
@@ -296,10 +215,12 @@ COMPONENT 1 — roleFit (0-30 points):
 
 COMPONENT 2 — companyQuality (0-25 points):
   Use momentum context above if provided.
-  25: Pre-approved AND elite momentum (funding/growth/IPO)
-  20: Pre-approved, solid established company
-  16: Not pre-approved, but safe and respectable
-  10: Small unknown company, no signals
+  CRITICAL RULE FIRST: If this company's primary business is in an EXCLUDED INDUSTRY NICHE listed in the criteria above (healthcare, pharma, banking, government/defense/SLED, insurance, medical devices, building materials, paving, electrical distribution, etc.), the companyQuality MUST be capped at 8 regardless of company size, reputation, or momentum. The user explicitly does not want to work in those industries.
+  25: Pre-approved AND elite momentum (funding/growth/IPO) AND in target industry
+  20: Pre-approved, solid established company in target industry
+  16: Not pre-approved, but safe and respectable — only if company is in or adjacent to target industries (AI, hardware, semiconductors, data infrastructure, networking, etc.)
+  10: Small unknown company, no signals, or company is in a neutral/unrelated industry
+  8 or below: Company primarily serves an EXCLUDED NICHE VERTICAL (healthcare, pharma, government/SLED/federal/defense, banking/FSI, insurance, building materials, etc.) — hard cap, do not score above 8
   0:  AI disruption risk, layoff signals, or company in decline
 
 COMPONENT 3 — compensationFit (0-20 points):
@@ -504,9 +425,11 @@ export function computeTier(
     if (matchScore < stretchScore) return 'Probably Skip';
 
     // Vertical niche / above-level detection (same as v1)
-    const nicheList = (settings?.verticalNiches && settings.verticalNiches.length > 0)
-      ? settings.verticalNiches.map((n) => n.toLowerCase().trim())
-      : DEFAULT_VERTICAL_NICHES;
+    // Always merge DEFAULT list with user's custom list so "gsi", "hyperscaler", etc. are always caught
+    const nicheList = [
+      ...DEFAULT_VERTICAL_NICHES,
+      ...(settings?.verticalNiches ?? []).map((n: string) => n.toLowerCase().trim()),
+    ];
     const hasVerticalNiche = nicheList.some((niche) => {
       const escaped = niche.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       return new RegExp(`\\b${escaped}\\b`, 'i').test(title.toLowerCase());
@@ -531,9 +454,10 @@ export function computeTier(
     const directorAbove     = maxRank < 3 ? isDirector      : false;
     const principalAbove    = isPrincipal;
 
-    // Niche keywords alone do NOT push a role above level — only seniority signals do.
-    // hasVerticalNiche is kept as a computed value for future use but excluded from isAboveLevel.
-    void hasVerticalNiche;
+    // Niche vertical keyword in job title → hard Probably Skip
+    // (user has background in these industries but actively wants to avoid them)
+    if (hasVerticalNiche) return 'Probably Skip';
+
     const isAboveLevel = namedAbove || enterpriseAbove || srEnterpriseAbove ||
       strategicAbove || directorAbove || principalAbove;
 
@@ -567,9 +491,11 @@ export function computeTier(
   if (s.realVsFake < 5) return 'Probably Skip';
   if (matchScore < 50) return 'Probably Skip';
 
-  const nicheList = (settings?.verticalNiches && settings.verticalNiches.length > 0)
-    ? settings.verticalNiches.map((n) => n.toLowerCase().trim())
-    : DEFAULT_VERTICAL_NICHES;
+  // Always merge DEFAULT list with user's custom list so "gsi", "hyperscaler", etc. are always caught
+  const nicheList = [
+    ...DEFAULT_VERTICAL_NICHES,
+    ...(settings?.verticalNiches ?? []).map((n: string) => n.toLowerCase().trim()),
+  ];
   const hasVerticalNiche = nicheList.some((niche) => {
     const escaped = niche.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     return new RegExp(`\\b${escaped}\\b`, 'i').test(title.toLowerCase());
@@ -594,8 +520,10 @@ export function computeTier(
   const directorAbove     = maxRank < 3 ? isDirector      : false;
   const principalAbove    = isPrincipal;
 
-  // Niche keywords alone do NOT push a role above level — only seniority signals do.
-  void hasVerticalNiche;
+  // Niche vertical keyword in job title → hard Probably Skip
+  // (user has background in these industries but actively wants to avoid them)
+  if (hasVerticalNiche) return 'Probably Skip';
+
   const isAboveLevel = namedAbove || enterpriseAbove || srEnterpriseAbove ||
     strategicAbove || directorAbove || principalAbove;
   const isAccessibleRole = !isAboveLevel;
@@ -764,10 +692,14 @@ export async function scoreJobsWithClaude(
     ? `Accepted sales segments (seniority levels): ${segmentLines.join('; ')}`
     : '';
 
+  const nicheVerticals: string[] = (criteria.tierSettings?.verticalNiches && criteria.tierSettings.verticalNiches.length > 0)
+    ? criteria.tierSettings.verticalNiches
+    : [];
+
   const criteriaText = [
     criteria.targetRoles.length ? `Target roles: ${criteria.targetRoles.join(', ')}` : '',
     segmentText,
-    criteria.industries.length ? `Target industries: ${criteria.industries.join(', ')}` : '',
+    criteria.industries.length ? `Target industries (company MUST primarily operate in one of these): ${criteria.industries.join(', ')}` : '',
     criteria.locations.length ? `Preferred locations: ${criteria.locations.join(', ')}` : '',
     (() => {
       const modes: string[] = criteria.allowedWorkModes ?? [];
@@ -780,6 +712,9 @@ export async function scoreJobsWithClaude(
     criteria.mustHave.length ? `Must have: ${criteria.mustHave.join(', ')}` : '',
     criteria.niceToHave.length ? `Nice to have: ${criteria.niceToHave.join(', ')}` : '',
     criteria.avoid.length ? `Avoid (strong negative signal — reduce score significantly, but do not automatically eliminate): ${criteria.avoid.join(', ')}` : '',
+    nicheVerticals.length
+      ? `EXCLUDED INDUSTRY NICHES — candidate has background in these but actively does NOT want roles here. If the company's PRIMARY business is in one of these verticals, set companyQuality to max 8 (treat it like a company in decline regardless of size). If the job TITLE contains any of these niche terms (e.g. "SLED Account Executive", "Federal AE", "Healthcare AM", "GSI", "Public Sector"), set roleFit to max 5. These verticals are excluded: ${nicheVerticals.join(', ')}`
+      : '',
   ].filter(Boolean).join('\n');
 
   let preApprovedSection = '';

@@ -30,7 +30,6 @@
  *   link_confidence, was_resolved_by_gemini, validation_notes
  */
 
-import { GoogleGenAI } from '@google/genai';
 import type { Pool } from 'pg';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -668,11 +667,11 @@ export async function enrichJobsPreScoring(
   return { enriched, skipped: jobs.length - targets.length };
 }
 
-// ── Gemini URL resolver ───────────────────────────────────────────────────────
+// ── Claude URL resolver (replaces Gemini) ─────────────────────────────────────
 
 /**
- * Uses Gemini grounded search to find the canonical live posting URL for a job.
- * Expanded from v1 to also handle aggregator-to-ATS upgrades, not just broken links.
+ * Uses Claude Haiku with web_search to find the canonical live posting URL for a job.
+ * Replaces the previous Gemini-based resolver; uses claude-haiku-4-5 + web_search_20250305.
  */
 export async function resolveJobUrlWithGemini(
   title: string,
@@ -680,82 +679,71 @@ export async function resolveJobUrlWithGemini(
   location: string,
   currentUrl?: string,
 ): Promise<{ url: string; source: string } | null> {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
   if (!apiKey) return null;
 
-  const ai = new GoogleGenAI({ apiKey });
-  const model = process.env.GEMINI_MODEL?.trim() || 'gemini-3-flash-preview';
+  const { default: Anthropic } = await import('@anthropic-ai/sdk');
+  const client = new Anthropic({ apiKey });
 
   const currentTrust = currentUrl ? classifySourceTrust(currentUrl) : 'unknown';
-  const isUpgrade = currentTrust === 'aggregator'; // upgrade, not just repair
-
-  const queries = isUpgrade
-    ? [
-        `site:boards.greenhouse.io "${company}" "${title}"`,
-        `site:jobs.lever.co "${company}" "${title}"`,
-        `site:jobs.ashbyhq.com "${company}" "${title}"`,
-        `"${company}" "${title}" careers apply direct`,
-      ]
-    : [
-        `"${company}" "${title}" site:boards.greenhouse.io OR site:jobs.lever.co OR site:jobs.ashbyhq.com`,
-        `"${company}" "${title}" job opening current hiring careers page`,
-        `${company} "${title}" ${location} apply now`,
-      ];
+  const isUpgrade = currentTrust === 'aggregator';
 
   const prompt = `Find the current, live direct job posting URL for this role:
 Job Title: "${title}"
 Company: "${company}"
 Location: "${location || 'US'}"
-${isUpgrade ? `Current link is an aggregator — find the company's direct ATS or careers page posting instead.` : ''}
+${isUpgrade ? `The current link is an aggregator — find the company's direct ATS or careers page posting instead.` : ''}
 
 Prioritize in this order:
 1. boards.greenhouse.io / jobs.lever.co / jobs.ashbyhq.com / myworkdayjobs.com
 2. The company's own careers page (direct job posting, not careers home)
 3. Any reliable direct source
 
-Return ONLY the single best URL you find, nothing else. If not found, return: NOT_FOUND`;
+Use web search to find the URL. Return ONLY the single best URL on its own line, nothing else. If not found, return: NOT_FOUND`;
 
-  for (const q of queries) {
-    try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: [{ role: 'user', parts: [{ text: `${prompt}\n\nSearch: ${q}` }] }],
-        config: { tools: [{ googleSearch: {} }], temperature: 0 },
-      });
+  try {
+    const response = await client.messages.create({
+      model: 'claude-haiku-4-5',
+      max_tokens: 512,
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }] as any[],
+      messages: [{ role: 'user', content: prompt }],
+    });
 
-      const text = (response.text ?? '').trim();
-      if (!text || text.includes('NOT_FOUND')) continue;
-
-      const urlMatch = text.match(/https?:\/\/[^\s\n"'<>()\],;]+/);
-      if (!urlMatch) continue;
-      const candidateUrl = urlMatch[0].replace(/[.,;!?)]+$/, '');
-
-      // Must be an improvement over the current URL (not just another aggregator)
-      const candidateTrust = classifySourceTrust(candidateUrl);
-      if (candidateTrust === 'aggregator') continue;
-
-      // Liveness check
-      try {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 7000);
-        const headRes = await fetch(candidateUrl, {
-          method: 'HEAD',
-          redirect: 'follow',
-          signal: ctrl.signal,
-          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobScout/1.0)' },
-        });
-        clearTimeout(timer);
-        if (headRes.status < 400) {
-          const sourceLabel = candidateTrust === 'ats_direct'    ? 'gemini_resolved_ats'
-            : candidateTrust === 'company_career'                ? 'gemini_resolved_company'
-            :                                                       'gemini_resolved';
-          return { url: candidateUrl, source: sourceLabel };
-        }
-      } catch { /* try next */ }
-    } catch (e) {
-      console.warn(`[Recovery] Gemini search failed: ${e instanceof Error ? e.message : e}`);
-      break;
+    let text = '';
+    for (const block of response.content) {
+      if (block.type === 'text') text += block.text;
     }
+    text = text.trim();
+
+    if (!text || text.includes('NOT_FOUND')) return null;
+
+    const urlMatch = text.match(/https?:\/\/[^\s\n"'<>()\],;]+/);
+    if (!urlMatch) return null;
+    const candidateUrl = urlMatch[0].replace(/[.,;!?)]+$/, '');
+
+    const candidateTrust = classifySourceTrust(candidateUrl);
+    if (candidateTrust === 'aggregator') return null;
+
+    // Liveness check
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 7000);
+      const headRes = await fetch(candidateUrl, {
+        method: 'HEAD',
+        redirect: 'follow',
+        signal: ctrl.signal,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobScout/1.0)' },
+      });
+      clearTimeout(timer);
+      if (headRes.status < 400) {
+        const sourceLabel = candidateTrust === 'ats_direct'    ? 'claude_resolved_ats'
+          : candidateTrust === 'company_career'                ? 'claude_resolved_company'
+          :                                                      'claude_resolved';
+        return { url: candidateUrl, source: sourceLabel };
+      }
+    } catch { /* not live */ }
+  } catch (e) {
+    console.warn(`[Recovery] Claude web search failed: ${e instanceof Error ? e.message : e}`);
   }
   return null;
 }
@@ -1037,8 +1025,8 @@ export async function runCanonicalResolutionInBackground(
       console.log(`[Recovery Phase A] Done: ${aOk} validated, ${aFail} failed`);
     }
 
-    // ── PHASE B: Gemini URL resolver for aggregator + broken links (sequential) ─
-    const hasGemini = !!process.env.GEMINI_API_KEY?.trim();
+    // ── PHASE B: Claude URL resolver for aggregator + broken links (sequential) ─
+    const hasClaude = !!process.env.ANTHROPIC_API_KEY?.trim();
     const { rows: geminiJobs } = await pool.query(`
       SELECT j.id, j.title, j.company, j.location, j.apply_url, j.description,
              j.match_score, j.url_ok, j.canonical_url, j.canonical_source,
@@ -1066,7 +1054,7 @@ export async function runCanonicalResolutionInBackground(
       return;
     }
 
-    console.log(`[Recovery Phase B] ${geminiJobs.length} aggregator/broken jobs | Gemini: ${hasGemini ? 'enabled' : 'disabled'}`);
+    console.log(`[Recovery Phase B] ${geminiJobs.length} aggregator/broken jobs | Claude: ${hasClaude ? 'enabled' : 'disabled'}`);
     let bUpgraded = 0, bDescFetched = 0, bFailed = 0;
 
     for (const job of geminiJobs) {
@@ -1075,7 +1063,7 @@ export async function runCanonicalResolutionInBackground(
         let canonicalSource: string = job.canonical_source ?? 'original';
         let usedGemini = false;
 
-        if (hasGemini) {
+        if (hasClaude) {
           const resolved = await resolveJobUrlWithGemini(
             job.title, job.company, job.location ?? '', canonicalUrl,
           );
@@ -1086,8 +1074,8 @@ export async function runCanonicalResolutionInBackground(
             bUpgraded++;
             console.log(`[Recovery Phase B] ↗ ${job.company} "${(job.title as string).slice(0, 40)}" → ${resolved.source}`);
           }
-          // Rate-limit Gemini calls
-          await new Promise(r => setTimeout(r, 1500));
+          // Pace Claude calls to avoid rate limits
+          await new Promise(r => setTimeout(r, 1000));
         }
 
         // Even if Gemini didn't improve the URL, try fetching the current URL
