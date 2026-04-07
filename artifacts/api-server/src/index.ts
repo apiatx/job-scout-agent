@@ -3383,6 +3383,140 @@ Do not use generic phrases like "I hope this message finds you well". Be specifi
   }
 });
 
+// ── Email outreach draft + send (Apollo/HM + Claude + Gmail) ──────────────
+app.post('/api/jobs/:id/outreach-email-draft', async (req: Request, res: Response) => {
+  try {
+    const jobId = Number(req.params.id);
+    const { rows } = await pool.query(
+      `SELECT
+         j.id, j.title, j.company, j.why_good_fit,
+         hm.id AS hm_id, hm.full_name AS hm_name, hm.title AS hm_title, hm.email AS hm_email, hm.linkedin_url AS hm_linkedin_url
+       FROM jobs j
+       LEFT JOIN hiring_managers hm ON hm.job_id = j.id
+       WHERE j.id = $1
+       ORDER BY hm.updated_at DESC NULLS LAST
+       LIMIT 1`,
+      [jobId]
+    );
+    if (!rows.length) { res.status(404).json({ error: 'Job not found' }); return; }
+    const row = rows[0] as any;
+    if (!row.hm_email) {
+      res.status(400).json({ error: 'No hiring manager email found yet. Open "View Hiring Manager Details" and run Apollo/Hunter enrichment first.' });
+      return;
+    }
+
+    const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
+    const criteria = cRows[0] as any ?? {};
+    const { rows: resumeRows } = await pool.query('SELECT content FROM saved_resumes ORDER BY saved_at DESC LIMIT 1');
+    const resume = (resumeRows[0]?.content ?? '').slice(0, 2500);
+    const firstName = String(row.hm_name || '').trim().split(' ')[0] || 'there';
+    const anthropicApiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
+
+    let subject = `Interest in ${row.title} at ${row.company}`;
+    let bodyText =
+`Hi ${firstName},
+
+I came across the ${row.title} role at ${row.company} and wanted to reach out directly.
+
+${row.why_good_fit || 'My background aligns well with the role, especially in enterprise sales execution and customer-facing problem solving.'}
+
+If helpful, I'd love to briefly introduce myself and learn what success looks like for this role.
+
+Best,
+[Your Name]`;
+
+    if (anthropicApiKey) {
+      const prompt = `Draft a concise outreach email for a job seeker.
+
+Role: ${row.title}
+Company: ${row.company}
+Hiring manager: ${row.hm_name || 'Hiring Manager'} (${row.hm_title || 'N/A'})
+Why fit: ${row.why_good_fit || 'Strong match'}
+Candidate profile:
+${resume || `Sales professional with experience in ${(criteria.industries ?? []).join(', ') || 'enterprise software'}`}
+
+Requirements:
+- Professional but human tone.
+- 120-170 words.
+- Mention the specific role and one clear, low-friction ask (15-minute intro call).
+- No hype, no generic fluff.
+- End with a short signature line placeholder: [Your Name]
+
+Return ONLY valid JSON:
+{
+  "subject": "...",
+  "body_text": "plain text email body"
+}`;
+      try {
+        const AnthropicSdk = (await import('@anthropic-ai/sdk')).default;
+        const ac = new AnthropicSdk({
+          apiKey: anthropicApiKey,
+          ...(process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL ? { baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL } : {}),
+        });
+        const msg = await ac.messages.create({
+          model: 'claude-haiku-4-5',
+          max_tokens: 500,
+          messages: [{ role: 'user', content: prompt }],
+        });
+        const raw = msg.content[0]?.type === 'text' ? msg.content[0].text.trim() : '{}';
+        const clean = raw.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
+        const parsed = JSON.parse(clean);
+        if (parsed?.subject && parsed?.body_text) {
+          subject = String(parsed.subject).trim().slice(0, 180);
+          bodyText = String(parsed.body_text).trim();
+        }
+      } catch (e) {
+        console.warn('[Outreach Email] Claude draft failed, using fallback template:', e instanceof Error ? e.message : e);
+      }
+    }
+
+    res.json({
+      to_email: row.hm_email,
+      to_name: row.hm_name || '',
+      linkedin_url: row.hm_linkedin_url || '',
+      subject,
+      body_text: bodyText,
+      generated_with: anthropicApiKey ? 'claude+fallback' : 'template',
+    });
+  } catch (e) {
+    console.error('Outreach email draft error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+app.post('/api/jobs/:id/outreach-email-send', async (req: Request, res: Response) => {
+  try {
+    const jobId = Number(req.params.id);
+    const to = String(req.body?.to || '').trim();
+    const subject = String(req.body?.subject || '').trim();
+    const bodyText = String(req.body?.body_text || '').trim();
+    if (!jobId || !to || !subject || !bodyText) {
+      res.status(400).json({ error: 'Missing required fields: to, subject, body_text' });
+      return;
+    }
+    const html = '<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6;color:#1f1f1f;white-space:pre-wrap">'
+      + bodyText
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+      + '</div>';
+    const send = await sendGmailEmail(to, subject, html);
+    if (send.ok) {
+      await pool.query(`UPDATE jobs SET reached_out_at = COALESCE(reached_out_at, NOW()) WHERE id = $1`, [jobId]).catch(() => {});
+      res.json({ success: true });
+    } else if (send.status === 403) {
+      res.status(403).json({ error: 'Gmail permissions are outdated. Disconnect and reconnect Gmail to grant send scope.' });
+    } else if (send.status === 401) {
+      res.status(401).json({ error: 'Gmail token is invalid. Disconnect and reconnect Gmail.' });
+    } else {
+      res.status(500).json({ error: 'Failed to send email via Gmail.' });
+    }
+  } catch (e) {
+    console.error('Outreach email send error:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 // ── Cover Letter Generator ─────────────────────────────────────────────────
 // POST /api/jobs/:id/cover-letter
 // Two-step Claude: (1) web-search research → specific company facts,
@@ -11113,33 +11247,95 @@ async function openOutreach(jobId, title, company) {
   var titleEl = document.getElementById('outreach-title');
   var body = document.getElementById('outreach-body');
   titleEl.textContent = '\u2709 Reach out about ' + title + ' @ ' + company;
-  body.innerHTML = '<div class="modal-spinner">Drafting with Claude\u2026</div>';
+  body.innerHTML = '<div class="modal-spinner">Drafting email with Claude\u2026</div>';
   modal.style.display = 'flex';
   try {
-    var res = await fetch('/api/jobs/' + jobId + '/outreach', { method: 'POST' });
-    if (!res.ok) { throw new Error('Failed'); }
+    var res = await fetch('/api/jobs/' + jobId + '/outreach-email-draft', { method: 'POST' });
     var d = await res.json();
-    var connLen = (d.connection_request || '').length;
+    if (!res.ok) { throw new Error(d.error || 'Failed to generate outreach draft'); }
+    var toEmail = d.to_email || '';
+    var subject = d.subject || '';
+    var bodyText = d.body_text || '';
+    var toName = d.to_name || '';
+    var li = d.linkedin_url || '';
     body.innerHTML =
-      '<div class="modal-section">' +
-        '<div class="modal-label">\uD83D\uDD17 LinkedIn Connection Request (' + connLen + '/300 chars)</div>' +
-        '<div class="modal-text" id="outreach-conn">' + esc(d.connection_request || '') + '</div>' +
-        '<div class="modal-char-count">' + connLen + ' characters</div>' +
-        '<button class="btn btn-ghost btn-sm modal-copy-btn" onclick="copyConn(this)">\uD83D\uDCCB Copy</button>' +
-      '</div>' +
-      '<div class="modal-section">' +
-        '<div class="modal-label">\uD83D\uDCAC LinkedIn DM (after connecting)</div>' +
-        '<div class="modal-text" id="outreach-dm">' + esc(d.linkedin_dm || '') + '</div>' +
-        '<button class="btn btn-ghost btn-sm modal-copy-btn" onclick="copyDm(this)">\uD83D\uDCCB Copy</button>' +
-      '</div>' +
-      '<div style="font-size:11px;color:var(--muted);margin-top:4px">Tip: search LinkedIn for a recruiter or hiring manager at ' + esc(company) + ' before sending.</div>';
+      '<div style="display:grid;gap:10px">' +
+        '<div>' +
+          '<div class="modal-label">To</div>' +
+          '<input id="outreach-email-to" type="email" value="' + esc(toEmail) + '" style="width:100%;box-sizing:border-box;background:#111;border:1px solid var(--border);border-radius:8px;padding:9px 10px;color:var(--text);font-size:13px">' +
+          (toName ? '<div style="font-size:11px;color:var(--muted);margin-top:4px">Hiring manager: ' + esc(toName) + '</div>' : '') +
+        '</div>' +
+        '<div>' +
+          '<div class="modal-label">Subject</div>' +
+          '<input id="outreach-email-subject" type="text" value="' + esc(subject) + '" style="width:100%;box-sizing:border-box;background:#111;border:1px solid var(--border);border-radius:8px;padding:9px 10px;color:var(--text);font-size:13px">' +
+        '</div>' +
+        '<div>' +
+          '<div class="modal-label">Email draft (editable)</div>' +
+          '<textarea id="outreach-email-body" rows="10" style="width:100%;box-sizing:border-box;background:#111;border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--text);font-size:13px;line-height:1.5;resize:vertical;font-family:inherit">' + esc(bodyText) + '</textarea>' +
+        '</div>' +
+        '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+          '<button class="btn btn-reach btn-sm" onclick="sendOutreachEmail(' + Number(jobId) + ', this)">\u2709 Send from Gmail</button>' +
+          '<button class="btn btn-ghost btn-sm" onclick="copyEmailDraft()">\uD83D\uDCCB Copy Draft</button>' +
+          (li ? '<a class="btn btn-ghost btn-sm" href="' + esc(li) + '" target="_blank" rel="noopener">\uD83D\uDD17 LinkedIn</a>' : '') +
+          '<span id="outreach-email-status" style="font-size:12px;color:var(--muted)"></span>' +
+        '</div>' +
+      '</div>';
   } catch(e) {
-    body.innerHTML = '<div style="color:var(--red);padding:16px">Failed to generate outreach. Please try again.</div>';
+    body.innerHTML = '<div style="color:var(--red);padding:16px">' + esc(e.message || 'Failed to generate outreach. Please try again.') + '</div>';
   }
 }
 
 function closeOutreach() {
   document.getElementById('outreach-modal').style.display = 'none';
+}
+
+function copyEmailDraft() {
+  var subj = document.getElementById('outreach-email-subject');
+  var body = document.getElementById('outreach-email-body');
+  if (!subj || !body) return;
+  var txt = 'Subject: ' + (subj.value || '') + '\\n\\n' + (body.value || '');
+  navigator.clipboard.writeText(txt).then(function() {
+    var status = document.getElementById('outreach-email-status');
+    if (status) { status.textContent = '\u2713 Draft copied'; status.style.color = '#4ade80'; }
+  });
+}
+
+async function sendOutreachEmail(jobId, btn) {
+  var toEl = document.getElementById('outreach-email-to');
+  var subjEl = document.getElementById('outreach-email-subject');
+  var bodyEl = document.getElementById('outreach-email-body');
+  var status = document.getElementById('outreach-email-status');
+  if (!toEl || !subjEl || !bodyEl || !status) return;
+  var to = (toEl.value || '').trim();
+  var subject = (subjEl.value || '').trim();
+  var bodyText = (bodyEl.value || '').trim();
+  if (!to || !subject || !bodyText) {
+    status.textContent = 'To, subject, and body are required.';
+    status.style.color = 'var(--red)';
+    return;
+  }
+  var original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Sending\u2026';
+  status.textContent = '';
+  try {
+    var res = await fetch('/api/jobs/' + jobId + '/outreach-email-send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: to, subject: subject, body_text: bodyText }),
+    });
+    var d = await res.json();
+    if (!res.ok) throw new Error(d.error || 'Send failed');
+    status.textContent = '\u2713 Sent from Gmail';
+    status.style.color = '#4ade80';
+    btn.textContent = 'Sent';
+    setTimeout(function(){ closeOutreach(); }, 900);
+  } catch(e) {
+    status.textContent = e.message || 'Send failed';
+    status.style.color = 'var(--red)';
+    btn.disabled = false;
+    btn.textContent = original;
+  }
 }
 
 // ── Custom Job Modal ──────────────────────────────────────────────────────────
