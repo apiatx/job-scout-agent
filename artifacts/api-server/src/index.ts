@@ -2430,6 +2430,19 @@ async function apolloEnrichPerson(firstName: string, lastName: string, companyDo
   } catch (e) { console.error('[Apollo] enrich-person error:', e); return null; }
 }
 
+async function hunterDomainSearch(domain: string, department?: string): Promise<Array<{value: string; first_name: string; last_name: string; position: string; confidence: number; seniority: string; department: string}>> {
+  const KEY = process.env.HUNTER_API_KEY || '';
+  if (!KEY) { console.warn('[Hunter] No HUNTER_API_KEY for domain-search'); return []; }
+  try {
+    let url = `https://api.hunter.io/v2/domain-search?domain=${encodeURIComponent(domain)}&api_key=${KEY}&limit=10`;
+    if (department) url += `&department=${encodeURIComponent(department)}`;
+    const r = await fetch(url);
+    if (!r.ok) { console.warn('[Hunter] domain-search HTTP', r.status); return []; }
+    const data = await r.json() as any;
+    return (data.data?.emails || []).filter((e: any) => e.first_name && e.last_name && e.position);
+  } catch (e) { console.error('[Hunter] domain-search error:', e); return []; }
+}
+
 // ── Derive company domain from company name ────────────────────────────────
 function inferCompanyDomain(companyName: string): string {
   return companyName.toLowerCase()
@@ -2570,6 +2583,7 @@ Rules: AE reports to Director/VP; Director reports to VP/SVP; Manager reports to
 
     // ── Step 2.5: Apollo fallback if CSE results thin (Enhancement 1) ────
     let apolloResults: any[] = [];
+    let hunterDomainResults: any[] = [];
     let enrichmentSource = usedCache ? 'cache' : 'gemini';
     if (!usedCache) {
       const linkedinCount = allResults.filter(r => r.link && r.link.includes('linkedin.com/in')).length;
@@ -2588,6 +2602,27 @@ Rules: AE reports to Director/VP; Director reports to VP/SVP; Manager reports to
       }
     }
 
+    // ── Step 2.6: Hunter domain search fallback (when CSE and Apollo both return nothing) ─
+    if (!usedCache && allResults.length === 0 && apolloResults.length === 0 && companyDomain) {
+      try {
+        const hunterMonthly = await getMonthlyUsage('hunter');
+        if (hunterMonthly < 20) {
+          const dept = (analysis.department || '').toLowerCase();
+          const hunterDept = dept.includes('sale') ? 'sales' : dept.includes('market') ? 'marketing' : dept.includes('engineer') ? 'engineering' : dept.includes('product') ? 'product' : undefined;
+          hunterDomainResults = await hunterDomainSearch(companyDomain, hunterDept);
+          if (hunterDomainResults.length > 0) {
+            await trackUsage('hunter', 'domain_search', 1);
+            if (enrichmentSource === 'gemini') enrichmentSource = 'hunter';
+            console.log(`[HiringManager] Hunter domain-search fallback: ${hunterDomainResults.length} contacts for ${companyDomain}`);
+          } else {
+            console.log(`[HiringManager] Hunter domain-search returned 0 contacts for ${companyDomain}`);
+          }
+        } else {
+          console.log('[HiringManager] Hunter monthly limit approaching, skipping domain-search');
+        }
+      } catch (hunterDomErr) { console.warn('[HiringManager] Hunter domain-search failed:', hunterDomErr); }
+    }
+
     // [Removed] Gemini web search (Step 2.7)
 
     // Build flattened results text for Claude
@@ -2603,7 +2638,12 @@ Rules: AE reports to Director/VP; Director reports to VP/SVP; Manager reports to
           `Apollo Result: ${p.first_name || ''} ${p.last_name || ''} - ${p.title || ''} at ${p.organization?.name || companyName}. Location: ${p.city || ''} ${p.state || ''}. LinkedIn: ${p.linkedin_url || 'N/A'}`
         ).join('\n')
         : '';
-      const parts = [cseText, apolloText].filter(Boolean);
+      const hunterText = hunterDomainResults.length > 0
+        ? 'HUNTER DOMAIN SEARCH RESULTS (verified contacts with email):\n' + hunterDomainResults.map((p: any) =>
+          `Hunter Result: ${p.first_name} ${p.last_name} - ${p.position} at ${companyName}. Email: ${p.value}. Confidence: ${p.confidence}%.`
+        ).join('\n')
+        : '';
+      const parts = [cseText, apolloText, hunterText].filter(Boolean);
       flattenedResults = parts.length > 0 ? parts.join('\n\n---\n\n') : 'No search results available.';
     }
 
@@ -2695,6 +2735,35 @@ ${flattenedResults}`;
           }
         }
       } catch (enrichErr) { console.warn('[HiringManager] Apollo enrichment failed:', enrichErr); }
+    }
+
+    // ── Step 3.6: Hunter email-finder fallback (if no email from Apollo enrich) ─
+    if (!apolloEmail && hmData.full_name && companyDomain) {
+      try {
+        const hunterMonthlyE = await getMonthlyUsage('hunter');
+        if (hunterMonthlyE < 22) {
+          const KEY = process.env.HUNTER_API_KEY || '';
+          if (KEY) {
+            const nameParts2 = hmData.full_name.trim().split(/\s+/);
+            const fn2 = nameParts2[0] || '';
+            const ln2 = nameParts2.slice(1).join(' ') || '';
+            if (fn2 && ln2) {
+              const fr = await fetch(`https://api.hunter.io/v2/email-finder?domain=${encodeURIComponent(companyDomain)}&first_name=${encodeURIComponent(fn2)}&last_name=${encodeURIComponent(ln2)}&api_key=${KEY}`);
+              const fd = await fr.json() as any;
+              await trackUsage('hunter', 'email_finder', 1);
+              if (fd.data?.email) {
+                apolloEmail = fd.data.email;
+                enrichmentSource = enrichmentSource.includes('hunter') ? enrichmentSource : enrichmentSource + '+hunter';
+                console.log(`[HiringManager] Hunter email-finder: found ${apolloEmail} for ${hmData.full_name}`);
+              } else {
+                console.log(`[HiringManager] Hunter email-finder: no email found for ${hmData.full_name} @ ${companyDomain}`);
+              }
+            }
+          }
+        } else {
+          console.log('[HiringManager] Hunter monthly limit approaching, skipping email-finder');
+        }
+      } catch (hunterEmailErr) { console.warn('[HiringManager] Hunter email-finder fallback failed:', hunterEmailErr); }
     }
 
     // ── Step 4: Save to DB ───────────────────────────────────────────────
@@ -3379,7 +3448,7 @@ app.post('/api/jobs/:id/outreach', async (req: Request, res: Response) => {
 
     const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
     const criteria = cRows[0] as any ?? {};
-    const { rows: resumeRows } = await pool.query('SELECT content FROM saved_resumes ORDER BY saved_at DESC LIMIT 1');
+    const { rows: resumeRows } = await pool.query('SELECT content FROM saved_resumes ORDER BY created_at DESC LIMIT 1');
     const resume = (resumeRows[0]?.content ?? '').slice(0, 2000);
 
     const prompt = `You are helping a job seeker reach out to someone at ${job.company} about this role: "${job.title}".
@@ -3444,16 +3513,62 @@ app.post('/api/jobs/:id/outreach-email-draft', async (req: Request, res: Respons
     );
     if (!rows.length) { res.status(404).json({ error: 'Job not found' }); return; }
     const row = rows[0] as any;
-    if (!row.hm_email) {
-      res.status(400).json({ error: 'No hiring manager email found yet. Open "View Hiring Manager Details" and run Apollo/Hunter enrichment first.' });
-      return;
+
+    // ── Auto-find HM email via Hunter if not already in DB ───────────────
+    let hmEmailToUse: string | null = row.hm_email || null;
+    let hmNameToUse: string = row.hm_name || '';
+    let hmTitleToUse: string = row.hm_title || '';
+    let hmLinkedinToUse: string = row.hm_linkedin_url || '';
+
+    if (!hmEmailToUse) {
+      const hunterKey = process.env.HUNTER_API_KEY || '';
+      if (hunterKey) {
+        // Case 1: HM name is known — use Hunter email-finder
+        if (row.hm_name && row.hm_id) {
+          try {
+            const { rows: hmDomainRow } = await pool.query('SELECT company_domain FROM hiring_managers WHERE id=$1', [row.hm_id]);
+            const domain = hmDomainRow[0]?.company_domain || inferCompanyDomain(row.company || '');
+            if (domain) {
+              const parts = (row.hm_name || '').trim().split(/\s+/);
+              const fn = parts[0] || ''; const ln = parts.slice(1).join(' ') || '';
+              if (fn && ln) {
+                const fr = await fetch(`https://api.hunter.io/v2/email-finder?domain=${encodeURIComponent(domain)}&first_name=${encodeURIComponent(fn)}&last_name=${encodeURIComponent(ln)}&api_key=${hunterKey}`);
+                const fd = await fr.json() as any;
+                if (fd.data?.email) {
+                  hmEmailToUse = fd.data.email;
+                  await pool.query(`UPDATE hiring_managers SET email=$1, email_source='hunter', updated_at=NOW() WHERE id=$2`, [hmEmailToUse, row.hm_id]).catch(() => {});
+                  console.log(`[OutreachDraft] Hunter email-finder found: ${hmEmailToUse} for ${row.hm_name}`);
+                }
+              }
+            }
+          } catch (e) { console.warn('[OutreachDraft] Hunter email-finder failed:', e); }
+        }
+        // Case 2: No HM name (no record, or record with null name) — try Hunter domain search
+        if (!hmEmailToUse && !row.hm_name) {
+          try {
+            const domainForSearch = (row.hm_id
+              ? await pool.query('SELECT company_domain FROM hiring_managers WHERE id=$1', [row.hm_id]).then(r => r.rows[0]?.company_domain)
+              : null) || inferCompanyDomain(row.company || '');
+            if (domainForSearch) {
+              const hunterPeople = await hunterDomainSearch(domainForSearch, 'sales');
+              if (hunterPeople.length > 0) {
+                const best = hunterPeople[0];
+                hmEmailToUse = best.value;
+                hmNameToUse = `${best.first_name} ${best.last_name}`;
+                hmTitleToUse = best.position || '';
+                console.log(`[OutreachDraft] Hunter domain-search found HM candidate: ${hmNameToUse} <${hmEmailToUse}>`);
+              }
+            }
+          } catch (e) { console.warn('[OutreachDraft] Hunter domain-search failed:', e); }
+        }
+      }
     }
 
     const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
     const criteria = cRows[0] as any ?? {};
-    const { rows: resumeRows } = await pool.query('SELECT content FROM saved_resumes ORDER BY saved_at DESC LIMIT 1');
+    const { rows: resumeRows } = await pool.query('SELECT content FROM saved_resumes ORDER BY created_at DESC LIMIT 1');
     const resume = (resumeRows[0]?.content ?? '').slice(0, 2500);
-    const firstName = String(row.hm_name || '').trim().split(' ')[0] || 'there';
+    const firstName = hmNameToUse.trim().split(' ')[0] || 'there';
     const anthropicApiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
 
     let subject = `Interest in ${row.title} at ${row.company}`;
@@ -3474,7 +3589,7 @@ Best,
 
 Role: ${row.title}
 Company: ${row.company}
-Hiring manager: ${row.hm_name || 'Hiring Manager'} (${row.hm_title || 'N/A'})
+Hiring manager: ${hmNameToUse || 'Hiring Manager'} (${hmTitleToUse || 'N/A'})
 Why fit: ${row.why_good_fit || 'Strong match'}
 Candidate profile:
 ${resume || `Sales professional with experience in ${(criteria.industries ?? []).join(', ') || 'enterprise software'}`}
@@ -3515,12 +3630,13 @@ Return ONLY valid JSON:
     }
 
     res.json({
-      to_email: row.hm_email,
-      to_name: row.hm_name || '',
-      linkedin_url: row.hm_linkedin_url || '',
+      to_email: hmEmailToUse || '',
+      to_name: hmNameToUse,
+      linkedin_url: hmLinkedinToUse,
       subject,
       body_text: bodyText,
       generated_with: anthropicApiKey ? 'claude+fallback' : 'template',
+      email_found_via: hmEmailToUse ? (row.hm_email ? 'db' : 'hunter') : 'not_found',
     });
   } catch (e) {
     console.error('Outreach email draft error:', e);
