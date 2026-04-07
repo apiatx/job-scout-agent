@@ -3585,27 +3585,30 @@ Best,
 [Your Name]`;
 
     if (anthropicApiKey) {
-      const prompt = `Draft a concise outreach email for a job seeker.
+      const prompt = `You are writing a short, human outreach email from a job seeker to a hiring manager about an open role.
 
 Role: ${row.title}
 Company: ${row.company}
 Hiring manager: ${hmNameToUse || 'Hiring Manager'} (${hmTitleToUse || 'N/A'})
-Why fit: ${row.why_good_fit || 'Strong match'}
-Candidate profile:
-${resume || `Sales professional with experience in ${(criteria.industries ?? []).join(', ') || 'enterprise software'}`}
+Why the candidate is a fit: ${row.why_good_fit || 'Strong match for the role'}
+Candidate background (use for flavor, not bullet points):
+${resume || `Enterprise sales professional with infrastructure software experience`}
 
-Requirements:
-- Professional but human tone.
-- 120-170 words.
-- Mention the specific role and one clear, low-friction ask (15-minute intro call).
-- No hype, no generic fluff.
-- End with a short signature line placeholder: [Your Name]
+STRICT RULES — violating any of these makes the email unusable:
+- ZERO dollar amounts, deal sizes, quota numbers, percentages, or time metrics of any kind. No "$X", no "X%", no "X days", no "X+ years".
+- ZERO brag language: no "sourced", "closed", "generated", "drove", "delivered", "achieved", "landed", "built pipeline".
+- ZERO lists or bullet points.
+- Do NOT open with "I hope this finds you well" or similar filler.
+- Do NOT name-drop companies from the resume unless it sounds completely natural in one word.
+- Tone: conversational, curious, respectful of their time — like a warm introduction from someone who did their homework, not a pitch.
+- Length: 3 short paragraphs, under 130 words total.
+- First paragraph: genuine, specific reason you're reaching out about THIS role at THIS company (not generic).
+- Second paragraph: one sentence about why you'd be a natural fit — based on the type of work, not stats.
+- Third paragraph: one low-friction ask — a 15-minute intro call.
+- Sign off: "Best," followed by a line break then "[Your Name]"
 
-Return ONLY valid JSON:
-{
-  "subject": "...",
-  "body_text": "plain text email body"
-}`;
+Return ONLY valid JSON — no markdown, no code block:
+{"subject":"...","body_text":"plain text body, use actual newlines between paragraphs"}`;
       try {
         const AnthropicSdk = (await import('@anthropic-ai/sdk')).default;
         const ac = new AnthropicSdk({
@@ -3633,6 +3636,7 @@ Return ONLY valid JSON:
       to_email: hmEmailToUse || '',
       to_name: hmNameToUse,
       linkedin_url: hmLinkedinToUse,
+      hm_id: row.hm_id || null,
       subject,
       body_text: bodyText,
       generated_with: anthropicApiKey ? 'claude+fallback' : 'template',
@@ -7438,11 +7442,11 @@ textarea:focus,input:focus{border-color:var(--gold)}
 
 <!-- Outreach modal -->
 <div class="modal-overlay" id="outreach-modal" style="display:none" onclick="if(event.target===this)closeOutreach()">
-  <div class="modal-box">
+  <div class="modal-box" style="max-width:680px;max-height:90vh;overflow-y:auto">
     <button class="modal-close" onclick="closeOutreach()">&times;</button>
     <div class="modal-title" id="outreach-title">Reach Out</div>
     <div id="outreach-body">
-      <div class="modal-spinner">Drafting your message with Claude&#8230;</div>
+      <div class="modal-spinner">Loading outreach options with Claude&#8230;</div>
     </div>
   </div>
 </div>
@@ -11859,12 +11863,11 @@ async function loadAutoRunBadge() {
 
 // ── Outreach modal ──────────────────────────────────────────────────────────
 async function openOutreach(jobId, title, company) {
-  trackJobAction(jobId, 'reached_out_at');
   var modal = document.getElementById('outreach-modal');
   var titleEl = document.getElementById('outreach-title');
   var body = document.getElementById('outreach-body');
-  titleEl.textContent = '\u2709 Reach out about ' + title + ' @ ' + company;
-  body.innerHTML = '<div class="modal-spinner">Drafting email with Claude\u2026</div>';
+  titleEl.textContent = '\u2709 Reach out: ' + title + ' \u2014 ' + company;
+  body.innerHTML = '<div class="modal-spinner">Drafting with Claude\u2026</div>';
   modal.style.display = 'flex';
   try {
     var res = await fetch('/api/jobs/' + jobId + '/outreach-email-draft', { method: 'POST' });
@@ -11875,31 +11878,87 @@ async function openOutreach(jobId, title, company) {
     var bodyText = d.body_text || '';
     var toName = d.to_name || '';
     var li = d.linkedin_url || '';
+    var hmId = d.hm_id || null;
+
+    // Try to load existing LI draft if we have an HM id
+    var liConnMsg = '';
+    if (hmId) {
+      try {
+        var liDraftRes = await fetch('/api/linkedin-message/draft?hiring_manager_id=' + Number(hmId) + '&job_id=' + Number(jobId));
+        var liDraft = await liDraftRes.json();
+        if (liDraft.exists && liDraft.message) liConnMsg = liDraft.message;
+      } catch(_) {}
+    }
+
+    var sectionLabel = 'font-size:11px;font-weight:600;letter-spacing:.08em;color:var(--gold);text-transform:uppercase;margin-bottom:10px';
+    var divider = '<div style="border-top:1px solid var(--border)"></div>';
+    var inputStyle = 'width:100%;box-sizing:border-box;background:#111;border:1px solid var(--border);border-radius:8px;padding:9px 10px;color:var(--text);font-size:13px;font-family:inherit';
+
+    var liConnHtml = liConnMsg
+      ? '<div style="margin-top:10px">' +
+          '<div class="modal-label" style="margin-bottom:4px">Connection request (editable, 300 char max)</div>' +
+          '<textarea id="outreach-li-conn" maxlength="300" rows="4" style="' + inputStyle + ';line-height:1.5;resize:vertical">' + esc(liConnMsg) + '</textarea>' +
+          '<div style="display:flex;gap:8px;align-items:center;margin-top:6px">' +
+            '<button class="btn btn-ghost btn-sm" onclick="copyLIConnRequest()">\uD83D\uDCCB Copy LI Request</button>' +
+            '<span id="outreach-li-status" style="font-size:12px;color:var(--muted)"></span>' +
+          '</div>' +
+        '</div>'
+      : '<div style="font-size:12px;color:var(--muted);margin-top:6px">' +
+          (hmId ? 'No LI draft saved — click \u201cOpen LI Tools\u201d below to generate one' : 'Run \u201cIdentify HM\u201d first to enable LinkedIn messaging') +
+        '</div>';
+
+    var liSection =
+      '<div>' +
+        '<div style="' + sectionLabel + '">\uD83D\uDD17 LinkedIn</div>' +
+        '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+          (toName ? '<span style="font-size:13px;color:var(--text);font-weight:500">' + esc(toName) + '</span>' : '<span style="font-size:12px;color:var(--muted)">Hiring manager unknown</span>') +
+          (li ? '<a class="btn btn-ghost btn-sm" href="' + esc(li) + '" target="_blank" rel="noopener">\uD83D\uDD17 Open Profile</a>' : '<span style="font-size:12px;color:var(--muted);margin-left:4px">No LinkedIn URL</span>') +
+          (hmId ? '<button class="btn btn-ghost btn-sm" onclick="closeOutreach();setTimeout(function(){openLIModal(' + Number(hmId) + ',' + Number(jobId) + ',null)},120)">\uD83D\uDCAC LI Tools</button>' : '') +
+        '</div>' +
+        liConnHtml +
+      '</div>';
+
+    var emailSection =
+      '<div>' +
+        '<div style="' + sectionLabel + '">\u2709 Email</div>' +
+        '<div style="display:grid;gap:10px">' +
+          '<div>' +
+            '<div class="modal-label">To</div>' +
+            '<input id="outreach-email-to" type="email" value="' + esc(toEmail) + '" placeholder="Hiring manager email\u2026" style="' + inputStyle + '">' +
+            (toName ? '<div style="font-size:11px;color:var(--muted);margin-top:4px">' + esc(toName) + (d.email_found_via === 'hunter' ? ' \u00b7 found via Hunter' : '') + '</div>' : '') +
+          '</div>' +
+          '<div>' +
+            '<div class="modal-label">Subject</div>' +
+            '<input id="outreach-email-subject" type="text" value="' + esc(subject) + '" style="' + inputStyle + '">' +
+          '</div>' +
+          '<div>' +
+            '<div class="modal-label">Email draft (editable)</div>' +
+            '<textarea id="outreach-email-body" rows="12" style="' + inputStyle + ';line-height:1.6;resize:vertical">' + esc(bodyText) + '</textarea>' +
+          '</div>' +
+          '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+            '<button class="btn btn-reach btn-sm" onclick="sendOutreachEmail(' + Number(jobId) + ', this)">\u2709 Send from Gmail</button>' +
+            '<button class="btn btn-ghost btn-sm" onclick="copyEmailDraft()">\uD83D\uDCCB Copy Draft</button>' +
+            '<span id="outreach-email-status" style="font-size:12px;color:var(--muted)"></span>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+
     body.innerHTML =
-      '<div style="display:grid;gap:10px">' +
-        '<div>' +
-          '<div class="modal-label">To</div>' +
-          '<input id="outreach-email-to" type="email" value="' + esc(toEmail) + '" style="width:100%;box-sizing:border-box;background:#111;border:1px solid var(--border);border-radius:8px;padding:9px 10px;color:var(--text);font-size:13px">' +
-          (toName ? '<div style="font-size:11px;color:var(--muted);margin-top:4px">Hiring manager: ' + esc(toName) + '</div>' : '') +
-        '</div>' +
-        '<div>' +
-          '<div class="modal-label">Subject</div>' +
-          '<input id="outreach-email-subject" type="text" value="' + esc(subject) + '" style="width:100%;box-sizing:border-box;background:#111;border:1px solid var(--border);border-radius:8px;padding:9px 10px;color:var(--text);font-size:13px">' +
-        '</div>' +
-        '<div>' +
-          '<div class="modal-label">Email draft (editable)</div>' +
-          '<textarea id="outreach-email-body" rows="10" style="width:100%;box-sizing:border-box;background:#111;border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--text);font-size:13px;line-height:1.5;resize:vertical;font-family:inherit">' + esc(bodyText) + '</textarea>' +
-        '</div>' +
-        '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
-          '<button class="btn btn-reach btn-sm" onclick="sendOutreachEmail(' + Number(jobId) + ', this)">\u2709 Send from Gmail</button>' +
-          '<button class="btn btn-ghost btn-sm" onclick="copyEmailDraft()">\uD83D\uDCCB Copy Draft</button>' +
-          (li ? '<a class="btn btn-ghost btn-sm" href="' + esc(li) + '" target="_blank" rel="noopener">\uD83D\uDD17 LinkedIn</a>' : '') +
-          '<span id="outreach-email-status" style="font-size:12px;color:var(--muted)"></span>' +
-        '</div>' +
+      '<div style="display:grid;gap:20px">' +
+        liSection + divider + emailSection +
       '</div>';
   } catch(e) {
     body.innerHTML = '<div style="color:var(--red);padding:16px">' + esc(e.message || 'Failed to generate outreach. Please try again.') + '</div>';
   }
+}
+
+function copyLIConnRequest() {
+  var el = document.getElementById('outreach-li-conn');
+  if (!el) return;
+  navigator.clipboard.writeText(el.value || '').then(function() {
+    var status = document.getElementById('outreach-li-status');
+    if (status) { status.textContent = '\u2713 Copied to clipboard'; status.style.color = '#4ade80'; setTimeout(function(){ if(status) status.textContent = ''; }, 2500); }
+  });
 }
 
 function closeOutreach() {
@@ -11946,6 +12005,7 @@ async function sendOutreachEmail(jobId, btn) {
     status.textContent = '\u2713 Sent from Gmail';
     status.style.color = '#4ade80';
     btn.textContent = 'Sent';
+    trackJobAction(jobId, 'reached_out_at');
     setTimeout(function(){ closeOutreach(); }, 900);
   } catch(e) {
     status.textContent = e.message || 'Send failed';
