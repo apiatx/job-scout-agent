@@ -2512,9 +2512,9 @@ app.post('/api/hiring-manager/identify', async (req: Request, res: Response) => 
         model: 'claude-haiku-4-5',
         max_tokens: 512,
         system: `Extract hiring manager context from this job description. Return ONLY valid JSON:
-{"department":"e.g. Enterprise Sales","role_seniority":"AE/Manager/Director/VP","manager_likely_title":"who this role reports to","manager_seniority_keywords":["3-5 title keywords"],"region":"territory/region mentioned","vertical":"industry vertical","named_people":["names in JD"]}
-Rules: AE reports to Director/VP; Director reports to VP/SVP; Manager reports to Director/VP. Be specific about sales segment. Return ONLY the JSON.`,
-        messages: [{ role: 'user', content: `Company: ${companyName}\nRole: ${roleTitle}\n\nJD:\n${jobDescription.slice(0, 2000)}` }],
+{"department":"e.g. Enterprise Sales","role_seniority":"AE/Manager/Director/VP","manager_likely_title":"who this role reports to","manager_seniority_keywords":["3-5 title keywords"],"region":"US territory/region mentioned e.g. Northeast, West Coast, Southeast, Texas","country":"country of the role e.g. United States, Canada, UK","vertical":"industry vertical","named_people":["names in JD"]}
+Rules: AE reports to Director/VP; Director reports to VP/SVP; Manager reports to Director/VP. Be specific about sales segment and geographic territory. Return ONLY the JSON.`,
+        messages: [{ role: 'user', content: `Company: ${companyName}\nRole: ${roleTitle}\nJob Location: ${location || 'Not specified'}\n\nJD:\n${jobDescription.slice(0, 2000)}` }],
       });
       const rawText = step1.content.filter(b => b.type === 'text').map(b => (b as any).text).join('').trim();
       const cleaned = rawText.replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
@@ -2557,10 +2557,17 @@ Rules: AE reports to Director/VP; Director reports to VP/SVP; Manager reports to
         console.warn('[HiringManager] Daily Google CSE limit approaching — skipping search');
       } else {
         const kws: string[] = Array.isArray(analysis.manager_seniority_keywords) ? analysis.manager_seniority_keywords : [];
+        // Derive a country/geo qualifier for search filtering
+        const jobLoc = (location || '').toLowerCase();
+        const isUsRole = !jobLoc || jobLoc.includes('united states') || jobLoc.includes(' us') || jobLoc.includes(', us') || jobLoc.includes('remote') || /\b[a-z]{2}\b/.test(jobLoc) && !jobLoc.includes('uk') && !jobLoc.includes('canada');
+        const geoFilter = isUsRole ? '"United States"' : location ? `"${location}"` : '';
+        const regionStr = analysis.region || (isUsRole ? 'US' : '');
         const searchQueries = [
-          `"${analysis.manager_likely_title || 'Director of Sales'}" site:linkedin.com/in ${companyName}`,
-          kws.length >= 2 ? `"${kws[0]}" OR "${kws[1]}" site:linkedin.com/in ${companyName}` : `${companyName} sales leadership site:linkedin.com/in`,
-          `${companyName} ${analysis.region || ''} sales leadership site:linkedin.com/in`.trim(),
+          `"${analysis.manager_likely_title || 'Director of Sales'}" site:linkedin.com/in ${companyName} ${geoFilter}`.trim(),
+          kws.length >= 2
+            ? `("${kws[0]}" OR "${kws[1]}") site:linkedin.com/in ${companyName} ${geoFilter}`.trim()
+            : `${companyName} sales leadership site:linkedin.com/in ${geoFilter}`.trim(),
+          `${companyName} ${regionStr} sales leadership site:linkedin.com/in`.trim(),
         ];
         for (const query of searchQueries) {
           try {
@@ -2650,6 +2657,15 @@ Rules: AE reports to Director/VP; Director reports to VP/SVP; Manager reports to
     // ── Step 3: Claude identifies the hiring manager ─────────────────────
     let hmData: Record<string, any> = { full_name: null, title: null, linkedin_url: null, confidence: 'none', reasoning: 'No search results available', alternative: null };
 
+    // Determine whether this is a US/North America role for the geographic filter
+    const jobLoc2 = (location || '').toLowerCase();
+    const claudeCountry = (analysis.country || '').toLowerCase();
+    const isUsRole2 = claudeCountry.includes('united states') || claudeCountry.includes('usa')
+      || (!claudeCountry && (!jobLoc2 || jobLoc2.includes('united states') || jobLoc2.includes(', us') || jobLoc2.includes('remote') || (/,\s*[a-z]{2}$/i.test((location || '')) && !jobLoc2.includes('uk') && !jobLoc2.includes('canada'))));
+    const geoContext = analysis.country
+      ? analysis.country
+      : isUsRole2 ? 'United States / North America' : (location || 'Not specified');
+
     const step3System = `You are a hiring manager identification engine. ALWAYS return the most likely hiring manager — never return a null name unless the company is completely fictional.
 
 Priority:
@@ -2658,30 +2674,42 @@ Priority:
 3. REASONED INFERENCE (low confidence): Infer from role type, company, region. Give a specific plausible person.
 
 Rules:
-- Hiring manager = person this role REPORTS TO (one level above)
+- Hiring manager = person this role REPORTS TO (one level above, not a peer)
 - Ignore recruiters, HR, talent acquisition
-- Ignore peers (same title as the open role)
-- Look for VP/Director/RVP/Area VP in the same department + region
+- Ignore peers (same title or level as the open role — e.g. do NOT pick an "Account Manager" or "Director of Account Management" for an "Account Manager" opening unless their title is clearly one full level higher)
+- Look for VP/Director/RVP/Area VP in the same department + geographic region
+- Match the sales SEGMENT: enterprise roles need enterprise-segment managers, commercial needs commercial managers, etc.
 - ALWAYS return a real name. null only if company is completely unknown/fictional.
 
-Return ONLY valid JSON:
-{"full_name":"First Last","title":"Their title","linkedin_url":"URL or null","confidence":"high/medium/low","reasoning":"one sentence","alternative":{"full_name":"Second choice or null","title":"title or null","linkedin_url":"URL or null"}}
+CRITICAL — GEOGRAPHIC EXCLUSION RULE:
+- The job location is: {{GEO_CONTEXT}}
+- You MUST only select someone who manages the target geography.
+- REJECT any candidate whose location or profile clearly indicates they are based in a different country or region.
+- Strong rejection signals: India (Mumbai, Bangalore, Hyderabad, Chennai, Delhi, Pune, Kolkata), APAC regions, EMEA, UK, Australia, Canada — unless the job is in those regions.
+- India-specific red flags: Indian city names, ".in" email domains, role titles mentioning India/APAC/South Asia, or Apollo/Hunter results listing Indian cities.
+- If ALL search results are from the wrong geography, return your best US-based inference using training knowledge rather than picking someone from the wrong country.
 
-Confidence: high=confirmed in search results, medium=from training knowledge, low=reasoned inference.
+Return ONLY valid JSON:
+{"full_name":"First Last","title":"Their title","linkedin_url":"URL or null","confidence":"high/medium/low","reasoning":"one sentence explaining why this person AND why they are in the right geography","alternative":{"full_name":"Second choice or null","title":"title or null","linkedin_url":"URL or null"}}
+
+Confidence: high=confirmed in search results (correct geo), medium=from training knowledge, low=reasoned inference.
 Never fabricate a LinkedIn URL — only include one found in search results or certain from training.`;
 
     const step3User = `OPEN ROLE:
 Company: ${companyName}
 Role: ${roleTitle}
+Job Location / Target Geography: ${location || 'United States'}
 Department: ${analysis.department || 'Sales'}
-Seniority: ${analysis.role_seniority || 'AE'}
+Seniority of OPEN ROLE: ${analysis.role_seniority || 'AE'} (the hiring manager is ONE LEVEL ABOVE this)
 Expected Manager Title: ${analysis.manager_likely_title || 'Director of Sales'}
-Region: ${analysis.region || location || 'Not specified'}
+Territory/Region: ${analysis.region || location || 'Not specified'}
 Vertical: ${analysis.vertical || 'Not specified'}
 People named in JD: ${(analysis.named_people || []).join(', ') || 'None'}
 
 SEARCH RESULTS:
-${flattenedResults}`;
+${flattenedResults}`.replace('{{GEO_CONTEXT}}', geoContext);
+
+    const step3SystemFinal = step3System.replace('{{GEO_CONTEXT}}', geoContext);
 
     // Try claude-haiku-4-5 first (faster, less likely to be overloaded)
     let claudeStep3Success = false;
@@ -2690,7 +2718,7 @@ ${flattenedResults}`;
         const step3 = await hmClaude.messages.create({
           model: claudeModel,
           max_tokens: 512,
-          system: step3System,
+          system: step3SystemFinal,
           messages: [{ role: 'user', content: step3User }],
         });
         const rawText3 = step3.content.filter(b => b.type === 'text').map(b => (b as any).text).join('').trim();
