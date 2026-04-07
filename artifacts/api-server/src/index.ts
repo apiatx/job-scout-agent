@@ -11794,7 +11794,7 @@ function copyEmailDraft() {
   var subj = document.getElementById('outreach-email-subject');
   var body = document.getElementById('outreach-email-body');
   if (!subj || !body) return;
-  var txt = 'Subject: ' + (subj.value || '') + '\n\n' + (body.value || '');
+  var txt = 'Subject: ' + (subj.value || '') + '\\n\\n' + (body.value || '');
   navigator.clipboard.writeText(txt).then(function() {
     var status = document.getElementById('outreach-email-status');
     if (status) { status.textContent = '\u2713 Draft copied'; status.style.color = '#4ade80'; }
