@@ -5242,42 +5242,7 @@ async function tailorJobInBackground(jobId: number): Promise<void> {
   );
 }
 
-function autotailorTopMatches(runId: number): void {
-  (async () => {
-    try {
-      const { rows: resumeRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
-      if (!(resumeRows[0]?.value as string)?.trim()) {
-        console.log('[AutoTailor] No resume set — skipping auto-tailoring.');
-        return;
-      }
-      const { rows: topJobs } = await pool.query(
-        `SELECT j.id, j.title, j.company FROM jobs j
-         WHERE j.scout_run_id = $1
-           AND j.opportunity_tier ILIKE 'Top Target'
-           AND NOT EXISTS (SELECT 1 FROM tailored_resumes tr WHERE tr.job_id = j.id)
-         ORDER BY j.match_score DESC LIMIT 3`,
-        [runId]
-      );
-      if (topJobs.length === 0) {
-        console.log('[AutoTailor] All Top Targets already tailored or none found.');
-        return;
-      }
-      console.log(`[AutoTailor] Pre-tailoring ${topJobs.length} Top Target resume(s) in background…`);
-      for (const job of topJobs) {
-        try {
-          console.log(`[AutoTailor]   Tailoring: ${job.title} @ ${job.company} (id: ${job.id})`);
-          await tailorJobInBackground(job.id as number);
-          console.log(`[AutoTailor]   ✓ Done: ${job.title} @ ${job.company}`);
-        } catch (e) {
-          console.error(`[AutoTailor]   ✗ Failed (job ${job.id}):`, e instanceof Error ? e.message : e);
-        }
-      }
-      console.log('[AutoTailor] Background tailoring complete.');
-    } catch (e) {
-      console.error('[AutoTailor] Fatal:', e instanceof Error ? e.message : e);
-    }
-  })();
-}
+// autotailorTopMatches removed — resume tailoring is user-triggered only
 
 function buildDigestHtml(jobs: any[], narrative = ''): string {
   const topTargets = jobs.filter(j => (j.opportunity_tier || '').toLowerCase().includes('top'));
@@ -6306,7 +6271,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
       [companiesScanned, allJobs.length, matches.length, runId]
     );
 
-    // Weekly email is handled by checkWeeklyEmail() scheduler — no per-run email
+    // Weekly email is user-triggered (Weekly Report tab) — no per-run email
 
     // Note: auto-tailoring disabled to prevent unintended background API spend.
     // Users can tailor resumes manually from the job cards.
@@ -6375,127 +6340,11 @@ app.use((_req: Request, res: Response) => {
 
 // ── Start server ──────────────────────────────────────────────────────────
 
-// ── Watchlist daily job scan ───────────────────────────────────────────────
-async function checkWatchlistScan(): Promise<void> {
-  if (watchlistScanRunning) return;
-  try {
-    const { rows: cos } = await pool.query('SELECT name FROM companies LIMIT 1');
-    if (cos.length === 0) return;
-    const { rows: recent } = await pool.query(
-      `SELECT MAX(scanned_at) AS last FROM company_job_scan_results`
-    );
-    const last = recent[0]?.last;
-    if (last) {
-      const hoursSince = (Date.now() - new Date(last).getTime()) / 3_600_000;
-      if (hoursSince < 22) return;
-    }
-    console.log('[WatchlistScan] Daily auto-scan triggered…');
-    const { rows: companies } = await pool.query('SELECT name FROM companies ORDER BY name');
-    const { rows: cRows } = await pool.query('SELECT * FROM criteria LIMIT 1');
-    const c = cRows[0] ?? {};
-    watchlistScanRunning = true;
-    (async () => {
-      try {
-        for (const co of companies) {
-          try {
-            const jobs = await scanWatchlistCompanyJobs(pool, co.name, {
-              target_roles: c.target_roles ?? [],
-              locations:    c.locations    ?? ['Remote'],
-            });
-            await upsertCompanyJobScan(pool, co.name, jobs);
-            console.log(`[WatchlistScan] ${co.name}: ${jobs.length} roles`);
-          } catch (e) { console.error(`[WatchlistScan] Error for ${co.name}:`, e); }
-        }
-        console.log('[WatchlistScan] Daily scan complete');
-      } finally { watchlistScanRunning = false; }
-    })();
-  } catch (e) { console.error('[WatchlistScan] Scheduler error:', e); }
-}
-
-// ── Weekly email scheduler ─────────────────────────────────────────────────
-async function checkWeeklyEmail(): Promise<void> {
-  try {
-    const now = new Date();
-    // Only send on Mondays (getDay() === 1)
-    if (now.getDay() !== 1) return;
-
-    // Check configured send time (default 07:00)
-    const { rows: timeRows } = await pool.query("SELECT value FROM settings WHERE key='digest_time' LIMIT 1");
-    const sendTime: string = timeRows[0]?.value || '07:00';
-    const [sendH, sendM] = sendTime.split(':').map(Number);
-    const nowH = now.getHours();
-    const nowM = now.getMinutes();
-    if (nowH < sendH || (nowH === sendH && nowM < sendM)) return; // too early
-
-    // Check if we already sent this week (within last 6 days)
-    const { rows: sentRows } = await pool.query("SELECT value FROM settings WHERE key='last_weekly_email_sent' LIMIT 1");
-    if (sentRows[0]?.value) {
-      const lastSent = new Date(sentRows[0].value as string);
-      const daysSince = (now.getTime() - lastSent.getTime()) / (1000 * 60 * 60 * 24);
-      if (daysSince < 6) return; // already sent this week
-    }
-
-    // Check Gmail connected and user email set
-    const { rows: cRows } = await pool.query('SELECT your_email FROM criteria LIMIT 1');
-    const email = cRows[0]?.your_email;
-    if (!email) return;
-
-    console.log('[WeeklyEmail] Monday triggered — sending weekly scout report…');
-
-    // Pull top 10 matches from the past 7 days
-    const { rows: jobs } = await pool.query(
-      `SELECT * FROM jobs WHERE match_score >= 50 AND created_at >= NOW() - INTERVAL '7 days' ORDER BY match_score DESC LIMIT 10`
-    );
-
-    const narrative = await generateDigestNarrative(jobs);
-    const html = buildDigestHtml(jobs, narrative);
-    const subject = `JobScout.ai \u2014 Your Weekly Scout Report`;
-    const emailResult = await sendGmailEmail(email, subject, html);
-
-    if (emailResult.ok) {
-      // Record send time so we don't double-send
-      await pool.query(
-        `INSERT INTO settings (key, value) VALUES ('last_weekly_email_sent', $1)
-         ON CONFLICT (key) DO UPDATE SET value=$1`,
-        [now.toISOString()]
-      );
-      console.log('[WeeklyEmail] ✓ Weekly report sent successfully');
-    } else {
-      console.warn('[WeeklyEmail] Failed to send weekly report — will retry next scheduler tick if still Monday');
-    }
-  } catch (e) {
-    console.error('[WeeklyEmail] Error:', e instanceof Error ? e.message : e);
-  }
-}
-
-// ── Auto-run scheduler ─────────────────────────────────────────────────────
-async function checkAutoRun(): Promise<void> {
-  if (scoutRunning) return;
-  try {
-    const { rows: cRows } = await pool.query('SELECT id FROM criteria LIMIT 1');
-    if (cRows.length === 0) return;
-    // Check both completed AND recently-started runs to avoid re-triggering
-    // after crashes/restarts (previously only checked 'completed' which caused
-    // repeated Opus+Haiku charges after any failed run)
-    const { rows: runRows } = await pool.query(
-      "SELECT started_at FROM scout_runs WHERE started_at > NOW() - INTERVAL '24 hours' ORDER BY started_at DESC LIMIT 1"
-    );
-    if (runRows.length > 0) {
-      const hoursSince = (Date.now() - new Date(runRows[0].started_at).getTime()) / 3_600_000;
-      if (hoursSince < AUTO_RUN_THRESHOLD_H) return;
-    }
-    console.log('[AutoRun] Triggering scheduled scout run…');
-    const { rows: newRun } = await pool.query(
-      "INSERT INTO scout_runs (status, jobs_found) VALUES ('running', 0) RETURNING *"
-    );
-    scoutRunning = true;
-    runScoutInBackground(newRun[0].id)
-      .catch(console.error)
-      .finally(() => { scoutRunning = false; });
-  } catch (e) {
-    console.error('[AutoRun] Check error:', e);
-  }
-}
+// NOTE: All scheduled/automatic functions have been removed.
+// checkWatchlistScan, checkWeeklyEmail, and checkAutoRun previously existed here
+// but caused unexpected Anthropic API charges. Every Claude/API call is now
+// 100% user-triggered. Use the "Run Scout Now" button and the Refresh buttons
+// on each intelligence page to generate fresh data manually.
 
 initDb()
   .then(async () => {
@@ -13066,11 +12915,6 @@ async function loadCareerIntel() {
     }
     intelLoaded = true;
     renderCareerIntel(json.data, json.generated_at, json.stale);
-    if (json.stale) {
-      // Auto-refresh if data is stale
-      intelEl('intel-meta').innerHTML += ' &nbsp;<span style="color:#f5c842">(stale &mdash; refreshing&hellip;)</span>';
-      refreshCareerIntel(true);
-    }
   } catch(e) {
     intelEl('intel-error').textContent = 'Error loading Career Intel: ' + e.message;
     setIntelState('error');
@@ -13119,10 +12963,6 @@ async function loadPreIpo() {
     if (!json.data) { setPreIpoState('empty'); return; }
     preIpoLoaded = true;
     renderPreIpo(json.data, json.generated_at, json.stale);
-    if (json.stale) {
-      pEl('preipo-meta').innerHTML += ' &nbsp;<span style="color:#f5c842">(stale &mdash; refreshing&hellip;)</span>';
-      refreshPreIpo(true);
-    }
   } catch(e) {
     pEl('preipo-error').textContent = 'Error loading Pre-IPO data: ' + e.message;
     setPreIpoState('error');
