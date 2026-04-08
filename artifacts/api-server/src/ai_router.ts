@@ -23,7 +23,7 @@ export const AI_CONFIG: Record<AIMode, { label: string; model: string; badge: st
   claude:  { label: 'Claude',  model: 'claude-haiku-4-5',        badge: '🟠' },
   chatgpt: { label: 'ChatGPT', model: 'gpt-5-mini',              badge: '🟢' },
   gemini:  { label: 'Gemini',  model: 'gemini-3-flash-preview',  badge: '🔵' },
-  grok:    { label: 'Grok',    model: 'grok-4-fast',             badge: '🟣' },
+  grok:    { label: 'Grok',    model: 'grok-4.20-reasoning',     badge: '🟣' },
 };
 
 let _pool: Pool | null = null;
@@ -127,16 +127,19 @@ async function routeGrok(params: RouterParams): Promise<RouterResponse> {
   const { default: OpenAI } = await import('openai');
   const apiKey = (process.env.XAI_API_KEY || '').trim();
   if (!apiKey) throw new Error('Grok mode requires XAI_API_KEY to be configured in Settings.');
-  const client = new OpenAI({ apiKey, baseURL: 'https://api.x.ai/v1' });
-  const msgs: any[] = [];
-  if (params.system) msgs.push({ role: 'system', content: params.system });
-  msgs.push(...params.messages.map(m => ({ role: m.role, content: m.content })));
-  const res = await client.chat.completions.create({
-    model:      AI_CONFIG.grok.model,
-    max_tokens: params.max_tokens || 1024,
-    messages:   msgs,
-  });
-  return { content: [{ type: 'text', text: res.choices[0]?.message?.content || '' }] };
+  const client = new OpenAI({ apiKey, baseURL: 'https://api.x.ai/v1' }) as any;
+  const input = params.messages.map(m => ({ role: m.role, content: m.content }));
+  const createParams: any = {
+    model:             AI_CONFIG.grok.model,
+    input,
+    max_output_tokens: params.max_tokens || 1024,
+  };
+  if (params.system) createParams.instructions = params.system;
+  const res = await client.responses.create(createParams);
+  const text: string = res.output_text
+    ?? res.output?.[0]?.content?.find((c: any) => c.type === 'output_text')?.text
+    ?? '';
+  return { content: [{ type: 'text', text }] };
 }
 
 export const aiRouter = {
