@@ -23,7 +23,7 @@ export const AI_CONFIG: Record<AIMode, { label: string; model: string; badge: st
   claude:  { label: 'Claude',  model: 'claude-haiku-4-5',        badge: '🟠' },
   chatgpt: { label: 'ChatGPT', model: 'gpt-5-mini',              badge: '🟢' },
   gemini:  { label: 'Gemini',  model: 'gemini-3-flash-preview',  badge: '🔵' },
-  grok:    { label: 'Grok',    model: 'grok-4.20-reasoning',     badge: '🟣' },
+  grok:    { label: 'Grok',    model: 'grok-4-1-fast-reasoning', badge: '🟣' },
 };
 
 let _pool: Pool | null = null;
