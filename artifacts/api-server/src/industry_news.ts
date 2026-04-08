@@ -76,7 +76,7 @@ export async function fetchRssArticles(maxPerSource = 15): Promise<Array<{
     .sort((a, b) => (b.published?.getTime() ?? 0) - (a.published?.getTime() ?? 0));
 }
 
-const CLAUDE_MODEL = 'claude-sonnet-4-6';
+const CLAUDE_MODEL = 'claude-haiku-4-5';
 
 export async function analyzeArticleBatch(
   articles: Array<{ url: string; title: string; source: string; description: string }>,

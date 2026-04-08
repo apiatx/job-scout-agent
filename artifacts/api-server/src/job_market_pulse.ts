@@ -10,7 +10,7 @@
  *   - Or HYPE / FLUFF / DESPERATION (patching bad product with headcount)?
  *   - Or AI RISK (core offering soon automated away)?
  *
- * Model: claude-sonnet-4-6 with web_search tool
+ * Model: claude-haiku-4-5 with web_search tool
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -267,7 +267,7 @@ function signalDefaultLabel(s: PulseSignal): string {
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-const CLAUDE_MODEL = 'claude-sonnet-4-6';
+const CLAUDE_MODEL = 'claude-haiku-4-5';
 
 export async function generateJobMarketPulse(
   scoutStats: ScoutCompanyStat[],

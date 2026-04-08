@@ -2713,7 +2713,7 @@ ${flattenedResults}`.replace('{{GEO_CONTEXT}}', geoContext);
 
     // Try claude-haiku-4-5 first (faster, less likely to be overloaded)
     let claudeStep3Success = false;
-    for (const claudeModel of ['claude-haiku-4-5', 'claude-opus-4-5']) {
+    for (const claudeModel of ['claude-haiku-4-5', 'claude-haiku-4-5']) {
       try {
         const step3 = await hmClaude.messages.create({
           model: claudeModel,
@@ -2825,7 +2825,7 @@ ${flattenedResults}`.replace('{{GEO_CONTEXT}}', geoContext);
           const HMAnthropic2 = (await import('@anthropic-ai/sdk')).default;
           const hmClaude2 = new HMAnthropic2({ apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '' });
           const extractResp = await hmClaude2.messages.create({
-            model: 'claude-opus-4-6',
+            model: 'claude-haiku-4-5',
             max_tokens: 2048,
             system: `Extract all leadership profiles (Directors, VPs, Heads, C-suite) from the search results. Return ONLY a JSON array:
 [{"person_name":"First Last","person_title":"Their title","linkedin_url":"URL or null","department":"Sales/Marketing/Engineering/Product/Finance/People/Unknown","region":"region if mentioned or null","seniority_level":"C-Suite/SVP/VP/Director"}]
@@ -3089,7 +3089,7 @@ Core principles — the message must feel like a REAL human reaching out, not a 
     const HMAnthropic3 = (await import('@anthropic-ai/sdk')).default;
     const hmClaude3 = new HMAnthropic3({ apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '' });
     const step = await hmClaude3.messages.create({
-      model: 'claude-opus-4-6',
+      model: 'claude-haiku-4-5',
       max_tokens: 512,
       system: systemPrompt,
       messages: [{
@@ -3751,7 +3751,7 @@ app.post('/api/jobs/:id/cover-letter', async (req: Request, res: Response) => {
     const { rows: cRows } = await pool.query('SELECT your_name, your_email FROM criteria LIMIT 1');
     const userName: string = cRows[0]?.your_name ?? '';
     const { rows: dmRows } = await pool.query("SELECT value FROM settings WHERE key='document_model'");
-    const documentModel: string = dmRows[0]?.value || 'claude-opus-4-6';
+    const documentModel: string = dmRows[0]?.value || 'claude-haiku-4-5';
     const { rows: clInstrRows } = await pool.query("SELECT value FROM settings WHERE key='cover_letter_instructions'");
     const coverLetterInstructions: string | null = clInstrRows[0]?.value ?? null;
     // Load cover_letter_writer system prompt from DB (overrides customInstructions if present)
@@ -3885,7 +3885,7 @@ app.post('/api/jobs/:id/tailor-resume', async (req: Request, res: Response) => {
 
     // 5. Load document model preference + resume_tailor system prompt from DB
     const { rows: dmRows2 } = await pool.query("SELECT value FROM settings WHERE key='document_model'");
-    const documentModel2: string = dmRows2[0]?.value || 'claude-opus-4-6';
+    const documentModel2: string = dmRows2[0]?.value || 'claude-haiku-4-5';
     const { rows: resumePromptRows } = await pool.query(
       "SELECT prompt_text FROM system_prompts WHERE prompt_name='resume_tailor'"
     );
@@ -4722,7 +4722,7 @@ app.post('/api/tailor/:jobId', async (req: Request, res: Response) => {
     resRows.forEach((r: { key: string; value: string }) => { byKey[r.key] = r.value; });
     const resume = byKey['resume'] ?? '';
     if (!resume) { res.status(400).json({ error: 'No base resume saved. Please save your resume first.' }); return; }
-    const tailorModel = byKey['tailor_model'] || 'claude-sonnet-4-5';
+    const tailorModel = byKey['tailor_model'] || 'claude-haiku-4-5';
 
     const result = await tailorResumeWithClaude(job, resume, { targetPages, model: tailorModel });
     const { rows: inserted } = await pool.query(
@@ -4750,7 +4750,7 @@ app.post('/api/tailor-freeform', async (req: Request, res: Response) => {
       description: jobDescription,
     };
     const { rows: modelRows } = await pool.query("SELECT value FROM settings WHERE key='tailor_model'");
-    const tailorModel = modelRows[0]?.value || 'claude-sonnet-4-5';
+    const tailorModel = modelRows[0]?.value || 'claude-haiku-4-5';
     const result = await tailorResumeWithClaude(fakeJob, resume, { targetPages, model: tailorModel });
     res.json({ resume_text: result.resume, cover_letter: result.coverLetter, suggested_edits: result.suggestedEdits ?? '', analysis: result.analysis });
   } catch (e) { res.status(500).json({ error: String(e) }); }
@@ -5209,7 +5209,7 @@ async function tailorJobInBackground(jobId: number): Promise<void> {
   }
 
   const { rows: dmRows } = await pool.query("SELECT value FROM settings WHERE key='document_model'");
-  const documentModel: string = (dmRows[0]?.value as string) || 'claude-opus-4-6';
+  const documentModel: string = (dmRows[0]?.value as string) || 'claude-haiku-4-5';
   const { rows: resumePromptRowsB } = await pool.query(
     "SELECT prompt_text FROM system_prompts WHERE prompt_name='resume_tailor'"
   );
@@ -5600,7 +5600,7 @@ CRITICAL TARGETING RULES:
     const { default: Anthropic } = await import('@anthropic-ai/sdk');
     const client = new Anthropic();
     const message = await client.messages.create({
-      model: 'claude-opus-4-6',
+      model: 'claude-haiku-4-5',
       max_tokens: 8192,
       messages: [{ role: 'user', content: prompt }],
     });
@@ -8282,8 +8282,8 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="sec-title" style="margin:24px 0 12px">AI Model for Documents</div>
   <div style="font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.6">Choose which Claude model powers resume tailoring and cover letter generation. Opus produces the highest-quality, most nuanced output — recommended for roles that matter most.</div>
   <select id="document-model-select" class="input" style="max-width:520px" onchange="setDocumentModel(this.value)">
-    <option value="claude-opus-4-6">Opus (Best Quality &mdash; recommended for dream jobs, slower &mdash; 45&ndash;90 sec)</option>
-    <option value="claude-sonnet-4-6">Sonnet (Balanced &mdash; fast and high quality, recommended for most applications &mdash; 20&ndash;40 sec)</option>
+    <option value="claude-haiku-4-5">Opus (Best Quality &mdash; recommended for dream jobs, slower &mdash; 45&ndash;90 sec)</option>
+    <option value="claude-haiku-4-5">Sonnet (Balanced &mdash; fast and high quality, recommended for most applications &mdash; 20&ndash;40 sec)</option>
   </select>
   <div id="document-model-msg" style="font-size:11px;color:#4ade80;margin-top:8px;display:none">Model preference saved.</div>
 
@@ -11243,8 +11243,8 @@ async function tailorResume(jobId) {
   try {
     var mr2 = await fetch('/api/settings/document_model');
     var md2 = await mr2.json();
-    setTrLoadingText(md2.value || 'claude-opus-4-6');
-  } catch(e2) { setTrLoadingText('claude-opus-4-6'); }
+    setTrLoadingText(md2.value || 'claude-haiku-4-5');
+  } catch(e2) { setTrLoadingText('claude-haiku-4-5'); }
 
   fetchTailoredResume(false);
 }
@@ -11275,8 +11275,8 @@ async function regenerateTailoredResume() {
   try {
     var mr3 = await fetch('/api/settings/document_model');
     var md3 = await mr3.json();
-    setTrLoadingText(md3.value || 'claude-opus-4-6');
-  } catch(e3) { setTrLoadingText('claude-opus-4-6'); }
+    setTrLoadingText(md3.value || 'claude-haiku-4-5');
+  } catch(e3) { setTrLoadingText('claude-haiku-4-5'); }
   fetchTailoredResume(true);
 }
 
@@ -12001,9 +12001,9 @@ async function openCoverLetter(jobId, title, company) {
   try {
     var mr = await fetch('/api/settings/document_model');
     var md = await mr.json();
-    var m = md.value || 'claude-opus-4-6';
+    var m = md.value || 'claude-haiku-4-5';
     setClLoadingText(m);
-  } catch(e) { setClLoadingText('claude-opus-4-6'); }
+  } catch(e) { setClLoadingText('claude-haiku-4-5'); }
 
   fetchCoverLetter(false);
 }
@@ -12034,8 +12034,8 @@ async function regenerateCoverLetter() {
   try {
     var mr = await fetch('/api/settings/document_model');
     var md = await mr.json();
-    setClLoadingText(md.value || 'claude-opus-4-6');
-  } catch(e) { setClLoadingText('claude-opus-4-6'); }
+    setClLoadingText(md.value || 'claude-haiku-4-5');
+  } catch(e) { setClLoadingText('claude-haiku-4-5'); }
   fetchCoverLetter(true);
 }
 
@@ -12274,12 +12274,12 @@ async function loadCriteria() {
     try {
       var dmr = await fetch('/api/settings/document_model');
       var dmd = await dmr.json();
-      var savedDocModel = dmd.value || 'claude-opus-4-6';
+      var savedDocModel = dmd.value || 'claude-haiku-4-5';
       var sel = document.getElementById('document-model-select');
       if (sel) sel.value = savedDocModel;
     } catch(e2) {
       var sel2 = document.getElementById('document-model-select');
-      if (sel2) sel2.value = 'claude-opus-4-6';
+      if (sel2) sel2.value = 'claude-haiku-4-5';
     }
   } catch(e) {
     console.error('loadCriteria failed:', e);

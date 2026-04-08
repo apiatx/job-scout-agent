@@ -233,7 +233,7 @@ ${storyText || '(No stories added yet)'}
 
 export async function generateOutputs(pool: Pool, profile: PositioningProfile, stories: Story[]): Promise<PositioningOutputs> {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const model = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5';
+  const model = process.env.CLAUDE_MODEL || 'claude-haiku-4-5';
   const context = buildProfileContext(profile, stories);
 
   const prompt = `You are an elite executive career coach. Based on the candidate profile below, generate all 8 positioning outputs. These must all be consistent — same voice, same positioning, same story — because they come from one source of truth.
@@ -297,7 +297,7 @@ export async function getOutputs(pool: Pool): Promise<PositioningOutputs | null>
 
 export async function generateObjections(pool: Pool, profile: PositioningProfile, stories: Story[]): Promise<ObjectionHandling> {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const model = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5';
+  const model = process.env.CLAUDE_MODEL || 'claude-haiku-4-5';
   const context = buildProfileContext(profile, stories);
 
   const prompt = `You are an elite executive career coach preparing a candidate for real recruiter and hiring manager objections. Based on the profile below, generate a comprehensive objection handling guide.
@@ -390,7 +390,7 @@ export async function saveNarrative(pool: Pool, narrative: CoreNarrative): Promi
 
 export async function draftNarrative(pool: Pool, profile: PositioningProfile, stories: Story[]): Promise<CoreNarrative> {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const model = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5';
+  const model = process.env.CLAUDE_MODEL || 'claude-haiku-4-5';
   const context = buildProfileContext(profile, stories);
 
   const prompt = `You are an elite executive career coach. Based on the candidate profile, draft their core narrative — the single source of truth that drives all their career messaging.

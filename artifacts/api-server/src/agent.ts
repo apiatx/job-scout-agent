@@ -956,7 +956,7 @@ Respond ONLY with a valid JSON object — no markdown fences, no text outside th
   "suggestedEdits": "## What Changed & Why\\n\\nHere's the reasoning behind every major move made in the tailored resume:\\n\\n### Summary\\n[1-2 sentences on how the summary was repositioned and what JD signals drove it]\\n\\n### Skills Section\\n- **Added**: [keyword] — [why: required in JD / ATS must-match]\\n- **Moved up**: [skill] — [why: JD lists it as primary requirement]\\n- **Removed**: [skill] — [why: not mentioned in JD, used the space for higher-signal terms]\\n\\n### [Company Name] ([years])\\n- **Bullet X rewritten** — original focused on [X]; new version leads with [stronger verb + JD-matched outcome] because the JD signals [specific requirement]\\n- **New bullet added** — covers [topic] because JD explicitly calls out [signal]\\n\\n### [Next Company / Role]\\n- [reasoning for changes made to that role]\\n\\n### What was NOT changed and why\\n[Brief note on anything deliberately kept as-is and the rationale]"
 }`;
 
-  const model = options?.model || 'claude-sonnet-4-5';
+  const model = options?.model || 'claude-haiku-4-5';
   const message = await anthropic.messages.create({
     model,
     max_tokens: 8096,
@@ -1171,7 +1171,7 @@ export async function generateCoverLetterWithClaude(params: {
 }): Promise<CoverLetterResult> {
   const { jobTitle, companyName, jobDescription, resumeText, userName, existingResearch, territoryContext, customInstructions, tailoredResumeText } = params;
   const temperature = params.temperature ?? 1;
-  const MODEL_CL = params.model || 'claude-opus-4-6';
+  const MODEL_CL = params.model || 'claude-haiku-4-5';
 
   // ── STEP 1: Web-search research for specific, impressive company facts ──────
   let research: CoverLetterResearch | null = null;
@@ -1312,7 +1312,7 @@ export async function tailorResumeV2WithClaude(params: {
   resumeSystemPrompt?: string | null;
 }): Promise<TailoredResumeV2Result> {
   const { jobTitle, companyName, jobDescription, resumeText, companyResearchContext, territoryContext, resumeSystemPrompt } = params;
-  const MODEL = params.model || 'claude-opus-4-6';
+  const MODEL = params.model || 'claude-haiku-4-5';
 
   console.log(`[TailorV2] Starting 3-step tailoring for ${jobTitle} @ ${companyName}`);
 

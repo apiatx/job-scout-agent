@@ -8,7 +8,7 @@
  *   Claude = discovery + synthesis ONLY
  *   This module does NOT touch the jobs pipeline, scoring, or Claude tailoring
  *
- * Model: claude-sonnet-4-6 with web_search tool
+ * Model: claude-haiku-4-5 with web_search tool
  *
  * Refresh behaviour:
  *   - Results persisted to `career_intel` DB table
@@ -280,7 +280,7 @@ function rankAndNormaliseCards(
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-const CLAUDE_MODEL = 'claude-sonnet-4-6';
+const CLAUDE_MODEL = 'claude-haiku-4-5';
 
 export async function generateCareerIntel(criteria: CareerIntelCriteria): Promise<CareerIntelResult> {
   const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';

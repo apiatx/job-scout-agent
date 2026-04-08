@@ -7,7 +7,7 @@
  * Series B is the primary target: proven PMF, scaling sales motion, high OTE potential,
  * equity still meaningful before an IPO or acquisition event.
  *
- * Model: claude-sonnet-4-6 with web_search tool
+ * Model: claude-haiku-4-5 with web_search tool
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -166,7 +166,7 @@ function repairTruncatedJson(raw: string): string {
 
 // ── Core generation ────────────────────────────────────────────────────────────
 
-const CLAUDE_MODEL = 'claude-sonnet-4-6';
+const CLAUDE_MODEL = 'claude-haiku-4-5';
 
 export async function generatePreIpo(criteria: PreIpoCriteria): Promise<PreIpoResult> {
   const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';

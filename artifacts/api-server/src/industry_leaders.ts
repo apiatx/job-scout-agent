@@ -149,7 +149,7 @@ Return ONLY valid JSON (no markdown, no code fences):
 
 async function callClaude(ac: any, prompt: string): Promise<any> {
   const response = await ac.messages.create({
-    model: 'claude-opus-4-5',
+    model: 'claude-haiku-4-5',
     max_tokens: 8000,
     messages: [{ role: 'user', content: prompt }],
   });
@@ -208,6 +208,6 @@ export async function generateIndustryLeaders(): Promise<IndustryLeadersResult> 
     generated_at: new Date().toISOString(),
     market_overview: parsed1.market_overview || '',
     sectors: [...parseSectors(parsed1), ...parseSectors(parsed2)],
-    model_used: 'claude-opus-4-5',
+    model_used: 'claude-haiku-4-5',
   };
 }

@@ -154,7 +154,7 @@ function repairTruncatedJson(raw: string): string {
 
 // ── Claude generation ──────────────────────────────────────────────────────────
 
-const CLAUDE_MODEL = 'claude-sonnet-4-6';
+const CLAUDE_MODEL = 'claude-haiku-4-5';
 
 export async function generateDeepValue(criteria: {
   target_roles: string[];
