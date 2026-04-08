@@ -7252,9 +7252,9 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <span class="logo">&#x2B21; JobScout.ai</span>
   <div class="ai-mode-bar">
     <button class="ai-mode-btn" id="aib-claude"  onclick="setAIMode('claude')" title="Claude Haiku 4.5">Claude</button>
-    <button class="ai-mode-btn" id="aib-chatgpt" onclick="setAIMode('chatgpt')" title="GPT-4o Mini">ChatGPT</button>
-    <button class="ai-mode-btn" id="aib-gemini"  onclick="setAIMode('gemini')" title="Gemini 2.5 Flash (gemini-2.5-flash)">Gemini</button>
-    <button class="ai-mode-btn" id="aib-grok"    onclick="setAIMode('grok')" title="Grok 3 Mini Fast">Grok</button>
+    <button class="ai-mode-btn" id="aib-chatgpt" onclick="setAIMode('chatgpt')" title="gpt-5-mini">ChatGPT</button>
+    <button class="ai-mode-btn" id="aib-gemini"  onclick="setAIMode('gemini')" title="gemini-3-flash-preview">Gemini</button>
+    <button class="ai-mode-btn" id="aib-grok"    onclick="setAIMode('grok')" title="grok-4-fast">Grok</button>
   </div>
   <div class="hdr-right">
     <span class="hdr-status" id="hdr-status"></span>

@@ -20,10 +20,10 @@ import type { Pool } from 'pg';
 export type AIMode = 'claude' | 'chatgpt' | 'gemini' | 'grok';
 
 export const AI_CONFIG: Record<AIMode, { label: string; model: string; badge: string }> = {
-  claude:  { label: 'Claude',  model: 'claude-haiku-4-5',                badge: '🟠' },
-  chatgpt: { label: 'ChatGPT', model: 'gpt-4o-mini',                     badge: '🟢' },
-  gemini:  { label: 'Gemini',  model: 'gemini-2.5-flash',               badge: '🔵' },
-  grok:    { label: 'Grok',    model: 'grok-3-mini-fast',                badge: '🟣' },
+  claude:  { label: 'Claude',  model: 'claude-haiku-4-5',        badge: '🟠' },
+  chatgpt: { label: 'ChatGPT', model: 'gpt-5-mini',              badge: '🟢' },
+  gemini:  { label: 'Gemini',  model: 'gemini-3-flash-preview',  badge: '🔵' },
+  grok:    { label: 'Grok',    model: 'grok-4-fast',             badge: '🟣' },
 };
 
 let _pool: Pool | null = null;
@@ -97,10 +97,10 @@ async function routeChatGPT(params: RouterParams): Promise<RouterResponse> {
   if (params.system) msgs.push({ role: 'system', content: params.system });
   msgs.push(...params.messages.map(m => ({ role: m.role, content: m.content })));
   const res = await client.chat.completions.create({
-    model:              AI_CONFIG.chatgpt.model,
-    max_tokens:         params.max_tokens || 1024,
-    messages:           msgs,
-  });
+    model:                    AI_CONFIG.chatgpt.model,
+    max_completion_tokens:    params.max_tokens || 1024,
+    messages:                 msgs,
+  } as any);
   return { content: [{ type: 'text', text: res.choices[0]?.message?.content || '' }] };
 }
 
