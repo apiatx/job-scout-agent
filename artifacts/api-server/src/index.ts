@@ -7253,7 +7253,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div class="ai-mode-bar">
     <button class="ai-mode-btn" id="aib-claude"  onclick="setAIMode('claude')" title="Claude Haiku 4.5">Claude</button>
     <button class="ai-mode-btn" id="aib-chatgpt" onclick="setAIMode('chatgpt')" title="GPT-4o Mini">ChatGPT</button>
-    <button class="ai-mode-btn" id="aib-gemini"  onclick="setAIMode('gemini')" title="Gemini 2.5 Flash">Gemini</button>
+    <button class="ai-mode-btn" id="aib-gemini"  onclick="setAIMode('gemini')" title="Gemini 2.5 Flash (gemini-2.5-flash)">Gemini</button>
     <button class="ai-mode-btn" id="aib-grok"    onclick="setAIMode('grok')" title="Grok 3 Mini Fast">Grok</button>
   </div>
   <div class="hdr-right">

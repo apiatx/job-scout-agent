@@ -22,7 +22,7 @@ export type AIMode = 'claude' | 'chatgpt' | 'gemini' | 'grok';
 export const AI_CONFIG: Record<AIMode, { label: string; model: string; badge: string }> = {
   claude:  { label: 'Claude',  model: 'claude-haiku-4-5',                badge: '🟠' },
   chatgpt: { label: 'ChatGPT', model: 'gpt-4o-mini',                     badge: '🟢' },
-  gemini:  { label: 'Gemini',  model: 'gemini-2.5-flash-preview-05-20', badge: '🔵' },
+  gemini:  { label: 'Gemini',  model: 'gemini-2.5-flash',               badge: '🔵' },
   grok:    { label: 'Grok',    model: 'grok-3-mini-fast',                badge: '🟣' },
 };
 
@@ -66,7 +66,7 @@ interface RouterParams {
 
 async function routeClaude(params: RouterParams): Promise<RouterResponse> {
   const { default: Anthropic } = await import('@anthropic-ai/sdk');
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
+  const apiKey = (process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '').trim();
   if (!apiKey) throw new Error('Claude mode requires ANTHROPIC_API_KEY to be configured.');
   const opts: any = process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL
     ? { baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL }
@@ -90,7 +90,7 @@ async function routeClaude(params: RouterParams): Promise<RouterResponse> {
 
 async function routeChatGPT(params: RouterParams): Promise<RouterResponse> {
   const { default: OpenAI } = await import('openai');
-  const apiKey = process.env.OPENAI_API_KEY || '';
+  const apiKey = (process.env.OPENAI_API_KEY || '').trim();
   if (!apiKey) throw new Error('ChatGPT mode requires OPENAI_API_KEY to be configured in Settings.');
   const client = new OpenAI({ apiKey });
   const msgs: any[] = [];
@@ -106,7 +106,7 @@ async function routeChatGPT(params: RouterParams): Promise<RouterResponse> {
 
 async function routeGemini(params: RouterParams): Promise<RouterResponse> {
   const { GoogleGenAI } = await import('@google/genai');
-  const apiKey = process.env.GEMINI_API_KEY || '';
+  const apiKey = (process.env.GEMINI_API_KEY || '').trim();
   if (!apiKey) throw new Error('Gemini mode requires GEMINI_API_KEY to be configured in Settings.');
   const client = new GoogleGenAI({ apiKey });
   const contents = params.messages.map(m => ({
@@ -125,7 +125,7 @@ async function routeGemini(params: RouterParams): Promise<RouterResponse> {
 
 async function routeGrok(params: RouterParams): Promise<RouterResponse> {
   const { default: OpenAI } = await import('openai');
-  const apiKey = process.env.XAI_API_KEY || '';
+  const apiKey = (process.env.XAI_API_KEY || '').trim();
   if (!apiKey) throw new Error('Grok mode requires XAI_API_KEY to be configured in Settings.');
   const client = new OpenAI({ apiKey, baseURL: 'https://api.x.ai/v1' });
   const msgs: any[] = [];
