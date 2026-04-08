@@ -6113,7 +6113,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
       }
     }
 
-    await setStage(`Scoring ${newJobs.length} new jobs with Claude AI…`);
+    await setStage(`Scoring ${newJobs.length} new jobs with Scout AI…`);
     // Load the candidate's resume for resume-aware scoring
     const { rows: resumeSettingRows } = await pool.query("SELECT value FROM settings WHERE key='resume'");
     const candidateResume: string = resumeSettingRows[0]?.value ?? '';
@@ -7338,7 +7338,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
     <button class="modal-close" onclick="closeOutreach()">&times;</button>
     <div class="modal-title" id="outreach-title">Reach Out</div>
     <div id="outreach-body">
-      <div class="modal-spinner">Loading outreach options with Claude&#8230;</div>
+      <div class="modal-spinner">Loading outreach options with Scout&#8230;</div>
     </div>
   </div>
 </div>
@@ -7745,7 +7745,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="intel-loading" style="display:none">
     <div class="intel-loading-wrap">
       <div class="intel-spinner"></div>
-      <div class="intel-loading-msg">Claude is searching and synthesising company signals&hellip;<br><span style="font-size:11px;color:var(--muted)">This typically takes 30&ndash;60 seconds</span></div>
+      <div class="intel-loading-msg">Scout is searching and synthesising company signals&hellip;<br><span style="font-size:11px;color:var(--muted)">This typically takes 30&ndash;60 seconds</span></div>
     </div>
   </div>
 
@@ -7813,7 +7813,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="pulse-loading" style="display:none">
     <div class="intel-loading-wrap">
       <div class="intel-spinner"></div>
-      <div class="intel-loading-msg">Claude is analyzing hiring signals across your target companies&hellip;<br><span style="font-size:11px;color:var(--muted)">Assessing growth vs hype for each company &mdash; 30&ndash;90 seconds</span></div>
+      <div class="intel-loading-msg">Scout is analyzing hiring signals across your target companies&hellip;<br><span style="font-size:11px;color:var(--muted)">Assessing growth vs hype for each company &mdash; 30&ndash;90 seconds</span></div>
     </div>
   </div>
 
@@ -7890,7 +7890,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="dv-loading" style="display:none">
     <div class="dv-loading-wrap">
       <div class="dv-spinner"></div>
-      <div class="dv-loading-msg">Claude is searching for the most compelling infrastructure companies with undeniable value props&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;60 seconds</span></div>
+      <div class="dv-loading-msg">Scout is searching for the most compelling infrastructure companies with undeniable value props&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;60 seconds</span></div>
     </div>
   </div>
 
@@ -7941,7 +7941,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="preipo-loading" style="display:none">
     <div class="preipo-loading-wrap">
       <div class="preipo-spinner"></div>
-      <div class="preipo-loading-msg">Claude is scanning funding data, growth signals, and hiring intelligence&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;90 seconds</span></div>
+      <div class="preipo-loading-msg">Scout is scanning funding data, growth signals, and hiring intelligence&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 30&ndash;90 seconds</span></div>
     </div>
   </div>
 
@@ -8010,7 +8010,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
   <div id="leaders-loading" style="display:none">
     <div class="leaders-loading-wrap">
       <div class="leaders-spinner"></div>
-      <div class="leaders-loading-msg">Claude is analysing market signals and ranking the top sales-led companies&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 20&ndash;40 seconds</span></div>
+      <div class="leaders-loading-msg">Scout is analysing market signals and ranking the top sales-led companies&hellip;<br><span style="font-size:11px;color:var(--muted)">Typically takes 20&ndash;40 seconds</span></div>
     </div>
   </div>
 
@@ -8601,7 +8601,7 @@ textarea:focus,input:focus{border-color:var(--gold)}
           <span>Step 3: Writing your tailored resume</span>
         </div>
       </div>
-      <div style="font-size:11px;color:var(--muted);margin-top:16px" id="tr-loading-sub">This takes 30&ndash;60 seconds &mdash; three Claude calls for maximum accuracy</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:16px" id="tr-loading-sub">This takes 30&ndash;60 seconds &mdash; three passes for maximum accuracy</div>
     </div>
 
     <!-- Error -->
@@ -10015,7 +10015,7 @@ async function submitManualJob() {
     return;
   }
 
-  if (btn) { btn.disabled = true; btn.textContent = 'Scoring with Claude\u2026'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Scoring with Scout\u2026'; }
 
   try {
     var body = { company: company, description: desc };
@@ -10110,7 +10110,7 @@ async function loadInterviewPrep(jobId) {
 
 async function generateInterviewPrep(jobId) {
   var bodyEl = document.getElementById('prep-modal-body');
-  if (bodyEl) bodyEl.innerHTML = '<div style="text-align:center;padding:40px"><div class="intel-spinner" style="margin:0 auto 12px"></div><div style="color:var(--muted);font-size:13px">Claude is building your battle card&hellip;</div></div>';
+  if (bodyEl) bodyEl.innerHTML = '<div style="text-align:center;padding:40px"><div class="intel-spinner" style="margin:0 auto 12px"></div><div style="color:var(--muted);font-size:13px">Scout is building your battle card&hellip;</div></div>';
   try {
     var res = await fetch('/api/jobs/' + jobId + '/interview-prep', { method: 'POST' });
     var data = await res.json();
@@ -11176,7 +11176,7 @@ async function tailorFromDesc() {
   var msg = document.getElementById('tailor-inline-msg');
   if (!resume) { msg.textContent = 'Please paste your resume first.'; msg.style.color = 'var(--red)'; return; }
   if (!jobDesc) { msg.textContent = 'Please paste a job description.'; msg.style.color = 'var(--red)'; return; }
-  msg.textContent = 'Analyzing JD and tailoring with Claude Sonnet (' + _inlinePageTarget + '-page target)...';
+  msg.textContent = 'Analyzing JD and tailoring with Scout (' + _inlinePageTarget + '-page target)...';
   msg.style.color = 'var(--gold)';
   document.getElementById('tailor-result').style.display = 'none';
   document.getElementById('tailor-analysis-inline').style.display = 'none';
@@ -11269,8 +11269,8 @@ function setTrLoadingText(model) {
   if (!subEl) return;
   var isOpus = model.includes('opus');
   subEl.textContent = isOpus
-    ? 'Writing with Opus \u2014 three Claude calls for maximum accuracy \u2014 45\u201390 seconds'
-    : 'Writing with Sonnet \u2014 three Claude calls for speed and quality \u2014 20\u201340 seconds';
+    ? 'Writing with Opus \u2014 three passes for maximum accuracy \u2014 45\u201390 seconds'
+    : 'Writing with Sonnet \u2014 three passes for speed and quality \u2014 20\u201340 seconds';
 }
 
 async function regenerateTailoredResume() {
@@ -11759,7 +11759,7 @@ async function openOutreach(jobId, title, company) {
   var titleEl = document.getElementById('outreach-title');
   var body = document.getElementById('outreach-body');
   titleEl.textContent = '\u2709 Reach out: ' + title + ' \u2014 ' + company;
-  body.innerHTML = '<div class="modal-spinner">Drafting with Claude\u2026</div>';
+  body.innerHTML = '<div class="modal-spinner">Drafting with Scout\u2026</div>';
   modal.style.display = 'flex';
   try {
     var res = await fetch('/api/jobs/' + jobId + '/outreach-email-draft', { method: 'POST' });
@@ -11937,7 +11937,7 @@ async function submitCustomJob() {
   if (!description || description.length < 50) { statusEl.textContent = 'Please paste a full job description (at least 50 characters).'; statusEl.style.color = '#e55353'; return; }
 
   btn.disabled = true;
-  btn.textContent = 'Scoring with Claude\u2026';
+  btn.textContent = 'Scoring with Scout\u2026';
   statusEl.textContent = 'This usually takes 10-20 seconds\u2026';
   statusEl.style.color = 'var(--muted)';
 
@@ -13731,9 +13731,9 @@ async function refreshNews() {
   var btn = newsEl('news-refresh-btn');
   var metaEl = newsEl('news-meta');
   if (btn) { btn.disabled = true; btn.textContent = 'Fetching\u2026'; }
-  if (metaEl) metaEl.textContent = 'Pulling RSS feeds and analyzing with Claude\u2026';
+  if (metaEl) metaEl.textContent = 'Pulling RSS feeds and analyzing with Scout\u2026';
   var grid = newsEl('news-grid');
-  if (grid) grid.innerHTML = '<div class="news-loading">\uD83E\uDD16 Claude is reading the news\u2026 (30-60 seconds)</div>';
+  if (grid) grid.innerHTML = '<div class="news-loading">\uD83E\uDD16 Scout is reading the news\u2026 (30-60 seconds)</div>';
   try {
     var startRes = await fetch('/api/industry-news/refresh', { method: 'POST' });
     var startData = await startRes.json();
@@ -13947,7 +13947,7 @@ async function runWatchlistScan() {
   var btn = document.getElementById('cw-scan-btn');
   var statusEl = document.getElementById('cw-scan-status');
   if (btn) { btn.disabled = true; btn.textContent = 'Scanning\u2026'; }
-  if (statusEl) statusEl.textContent = 'Claude is searching for open roles at each company\u2026 (30-90s per company)';
+  if (statusEl) statusEl.textContent = 'Scout is searching for open roles at each company\u2026 (30-90s per company)';
   try {
     var res = await fetch('/api/companies/scan-jobs', { method: 'POST' });
     var data = await res.json();
@@ -14151,7 +14151,7 @@ function renderOutputs(data) {
 
 async function generateOutputs() {
   var st = document.getElementById('pos-outputs-status');
-  st.textContent = 'Generating all outputs with Claude... this may take 30-60 seconds.';
+  st.textContent = 'Generating all outputs with Scout... this may take 30-60 seconds.';
   st.style.display = 'block';
   document.getElementById('pos-outputs-container').innerHTML = '';
   try {
@@ -14213,7 +14213,7 @@ async function loadNarrative() {
 
 async function draftNarrative() {
   var st = document.getElementById('pos-narr-status');
-  st.textContent = 'Drafting your core narrative with Claude...';
+  st.textContent = 'Drafting your core narrative with Scout...';
   st.style.display = 'block';
   try {
     var data = await fetch('/api/positioning/draft-narrative', { method:'POST' }).then(function(r){return r.json();});
