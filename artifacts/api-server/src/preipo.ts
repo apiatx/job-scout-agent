@@ -10,7 +10,7 @@
  * Model: claude-haiku-4-5 with web_search tool
  */
 
-import Anthropic from '@anthropic-ai/sdk';
+import { aiRouter } from './ai_router.js';
 import type { Pool } from 'pg';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -169,10 +169,10 @@ function repairTruncatedJson(raw: string): string {
 const CLAUDE_MODEL = 'claude-haiku-4-5';
 
 export async function generatePreIpo(criteria: PreIpoCriteria): Promise<PreIpoResult> {
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
-  const client = new Anthropic({ apiKey });
+
+
+  const client = aiRouter;
   const prompt = buildPreIpoPrompt(criteria);
 
   console.log(`[PreIPO] Generating with ${CLAUDE_MODEL} + web search`);

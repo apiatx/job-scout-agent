@@ -1,6 +1,6 @@
 import Parser from 'rss-parser';
 import { Pool } from 'pg';
-import Anthropic from '@anthropic-ai/sdk';
+import { aiRouter } from './ai_router.js';
 
 const parser = new Parser({
   timeout: 8000,
@@ -96,10 +96,10 @@ export async function analyzeArticleBatch(
 }>> {
   if (!articles.length) return [];
 
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
-  const client = new Anthropic({ apiKey });
+
+
+  const client = aiRouter;
 
   const articlesText = articles.map((a, i) =>
     `[${i + 1}] SOURCE: ${a.source}\nTITLE: ${a.title}\nURL: ${a.url}\nDESCRIPTION: ${a.description || 'N/A'}`

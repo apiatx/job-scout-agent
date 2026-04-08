@@ -1,13 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk';
-// [Removed] Gemini import (GoogleGenAI)
+import { aiRouter as anthropic } from './ai_router.js';
 import type { ScrapedJob } from './scraper.js';
-
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '',
-  ...(process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL
-    ? { baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL }
-    : {}),
-});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SubScores — 5-component system (v2)

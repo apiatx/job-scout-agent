@@ -16,7 +16,7 @@
  *   - POST /api/career-intel/refresh triggers synchronous regeneration
  */
 
-import Anthropic from '@anthropic-ai/sdk';
+import { aiRouter } from './ai_router.js';
 
 // ── Output types ──────────────────────────────────────────────────────────────
 
@@ -283,10 +283,7 @@ function rankAndNormaliseCards(
 const CLAUDE_MODEL = 'claude-haiku-4-5';
 
 export async function generateCareerIntel(criteria: CareerIntelCriteria): Promise<CareerIntelResult> {
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not configured');
-
-  const client = new Anthropic({ apiKey });
+  const client = aiRouter;
   const prompt = buildIntelPrompt(criteria);
 
   console.log(`\n──── CAREER INTEL GENERATION ─────────────────────────────────`);

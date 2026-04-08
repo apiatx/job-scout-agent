@@ -9,7 +9,7 @@
  * The EXACT user prompt is passed to Claude, with a structured JSON output wrapper.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
+import { aiRouter } from './ai_router.js';
 import type { Pool } from 'pg';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -161,12 +161,7 @@ export async function generateDeepValue(criteria: {
   locations: string[];
   min_salary: number | null;
 }): Promise<DeepValueResult> {
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
-  if (!apiKey) {
-    throw new Error('ANTHROPIC_API_KEY not set — configure it in Settings');
-  }
-
-  const client = new Anthropic({ apiKey });
+  const client = aiRouter;
 
   // The EXACT user-specified prompt + structured JSON output instructions
   const userPromptCore = `What cutting edge companies have the clearest "why you need this" case when talking to customers. Only looking at non-saas tools, moreso 'infrastructure' like Cloud infra, AI Infra, data/database, high performance storage, HPC/Compute, semiconductors, photonics, networking, datacenter, etc.`;
@@ -280,10 +275,7 @@ export async function scanWatchlistCompanyJobs(
   companyName: string,
   criteria: { target_roles: string[]; locations: string[] }
 ): Promise<Array<{ title: string; apply_url: string | null; location: string | null }>> {
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
-
-  const client = new Anthropic({ apiKey });
+  const client = aiRouter;
 
   const roles = (criteria.target_roles || []).join(', ') || 'Enterprise Account Executive, Sales Engineer, Strategic Account Executive';
   const locs = (criteria.locations || ['Remote']).join(', ');

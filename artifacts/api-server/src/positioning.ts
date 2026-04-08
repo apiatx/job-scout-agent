@@ -8,7 +8,7 @@
  * Step 5: Core narrative approval and storage
  */
 
-import Anthropic from '@anthropic-ai/sdk';
+import { aiRouter } from './ai_router.js';
 import type { Pool } from 'pg';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -232,7 +232,7 @@ ${storyText || '(No stories added yet)'}
 }
 
 export async function generateOutputs(pool: Pool, profile: PositioningProfile, stories: Story[]): Promise<PositioningOutputs> {
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const client = aiRouter;
   const model = process.env.CLAUDE_MODEL || 'claude-haiku-4-5';
   const context = buildProfileContext(profile, stories);
 
@@ -296,7 +296,7 @@ export async function getOutputs(pool: Pool): Promise<PositioningOutputs | null>
 }
 
 export async function generateObjections(pool: Pool, profile: PositioningProfile, stories: Story[]): Promise<ObjectionHandling> {
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const client = aiRouter;
   const model = process.env.CLAUDE_MODEL || 'claude-haiku-4-5';
   const context = buildProfileContext(profile, stories);
 
@@ -389,7 +389,7 @@ export async function saveNarrative(pool: Pool, narrative: CoreNarrative): Promi
 }
 
 export async function draftNarrative(pool: Pool, profile: PositioningProfile, stories: Story[]): Promise<CoreNarrative> {
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const client = aiRouter;
   const model = process.env.CLAUDE_MODEL || 'claude-haiku-4-5';
   const context = buildProfileContext(profile, stories);
 

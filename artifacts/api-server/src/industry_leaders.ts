@@ -192,8 +192,7 @@ function parseSectors(parsed: any): IndustrySector[] {
 // ── Main generation — two parallel batches of 6 sectors each ─────────────────
 
 export async function generateIndustryLeaders(): Promise<IndustryLeadersResult> {
-  const Sdk = (await import('@anthropic-ai/sdk')).default;
-  const ac = new Sdk({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const { aiRouter: ac } = await import('./ai_router.js');
 
   const batch1 = SECTORS.slice(0, 6);   // AI Infra → Networking
   const batch2 = SECTORS.slice(6);      // Storage → FinTech

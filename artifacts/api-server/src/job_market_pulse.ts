@@ -13,7 +13,7 @@
  * Model: claude-haiku-4-5 with web_search tool
  */
 
-import Anthropic from '@anthropic-ai/sdk';
+import { aiRouter } from './ai_router.js';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -273,10 +273,10 @@ export async function generateJobMarketPulse(
   scoutStats: ScoutCompanyStat[],
   criteria: { target_roles: string[]; industries: string[]; min_salary: number | null },
 ): Promise<JobMarketPulseResult> {
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '';
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not configured');
 
-  const client = new Anthropic({ apiKey });
+
+
+  const client = aiRouter;
   const prompt = buildPulsePrompt(scoutStats, criteria);
   const statMap = new Map(scoutStats.map(s => [s.company_name.toLowerCase(), s]));
 

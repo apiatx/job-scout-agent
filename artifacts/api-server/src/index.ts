@@ -1,4 +1,5 @@
 import express, { type Request, type Response } from 'express';
+import { aiRouter, initAIRouter, getAIMode, setAIMode, AI_CONFIG } from './ai_router.js';
 import { createHash } from 'crypto';
 import pg from 'pg';
 import multer from 'multer';
@@ -1217,8 +1218,7 @@ app.delete('/api/companies/:id', async (req: Request, res: Response) => {
 async function detectAtsWithClaude(companyName: string, websiteHint?: string): Promise<{
   ats_type: string; ats_slug: string | null; careers_url: string | null; confidence: string;
 }[]> {
-  const Anthropic = (await import('@anthropic-ai/sdk')).default;
-  const anthropic = new Anthropic();
+  const anthropic = aiRouter;
 
   const websiteLine = websiteHint ? `\nCompany website hint: ${websiteHint}` : '';
 
@@ -2302,12 +2302,7 @@ Write a preference profile with these 5 parts:
 
 Be direct and specific. Use the actual data points. 1-2 sentences per section. Under 280 words total.`;
 
-    const AnthropicSdk2 = (await import('@anthropic-ai/sdk')).default;
-    const ac2 = new AnthropicSdk2({
-      apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '',
-      ...(process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL ? { baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL } : {}),
-    });
-    const response = await ac2.messages.create({
+    const response = await aiRouter.messages.create({
       model: 'claude-haiku-4-5',
       max_tokens: 450,
       messages: [{ role: 'user', content: prompt }],
@@ -3499,12 +3494,7 @@ Write two short outreach messages:
 
 Do not use generic phrases like "I hope this message finds you well". Be specific. Use first person.`;
 
-    const AnthropicSdk3 = (await import('@anthropic-ai/sdk')).default;
-    const ac3 = new AnthropicSdk3({
-      apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '',
-      ...(process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL ? { baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL } : {}),
-    });
-    const msg = await ac3.messages.create({
+    const msg = await aiRouter.messages.create({
       model: 'claude-haiku-4-5',
       max_tokens: 600,
       messages: [{ role: 'user', content: prompt }],
@@ -3638,12 +3628,7 @@ STRICT RULES — violating any of these makes the email unusable:
 Return ONLY valid JSON — no markdown, no code block:
 {"subject":"...","body_text":"plain text body, use actual newlines between paragraphs"}`;
       try {
-        const AnthropicSdk = (await import('@anthropic-ai/sdk')).default;
-        const ac = new AnthropicSdk({
-          apiKey: anthropicApiKey,
-          ...(process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL ? { baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL } : {}),
-        });
-        const msg = await ac.messages.create({
+        const msg = await aiRouter.messages.create({
           model: 'claude-haiku-4-5',
           max_tokens: 500,
           messages: [{ role: 'user', content: prompt }],
@@ -4456,6 +4441,27 @@ app.put('/api/settings/:key', async (req: Request, res: Response) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+// AI Mode
+app.get('/api/ai-mode', async (_req: Request, res: Response) => {
+  try {
+    const mode = await getAIMode();
+    const config = AI_CONFIG[mode];
+    res.json({ mode, model: config.model, label: config.label });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/ai-mode', async (req: Request, res: Response) => {
+  try {
+    const { mode } = req.body as { mode: string };
+    if (!['claude', 'chatgpt', 'gemini', 'grok'].includes(mode)) {
+      return res.status(400).json({ error: 'Invalid mode. Use: claude | chatgpt | gemini | grok' });
+    }
+    await setAIMode(mode as import('./ai_router.js').AIMode);
+    const config = AI_CONFIG[mode as import('./ai_router.js').AIMode];
+    res.json({ ok: true, mode, model: config.model, label: config.label });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 // Resume
 app.get('/api/resume', async (_req, res: Response) => {
   try {
@@ -5160,12 +5166,7 @@ Write EXACTLY 2-3 sentences in second person. Be specific and action-oriented:
 
 No bullet points. Maximum 3 sentences. Write like a sharp analyst briefing an executive.`;
 
-    const AnthropicSdk = (await import('@anthropic-ai/sdk')).default;
-    const ac = new AnthropicSdk({
-      apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY ?? '',
-      ...(process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL ? { baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL } : {}),
-    });
-    const response = await ac.messages.create({
+    const response = await aiRouter.messages.create({
       model: 'claude-haiku-4-5',
       max_tokens: 250,
       messages: [{ role: 'user', content: prompt }],
@@ -5597,9 +5598,7 @@ CRITICAL TARGETING RULES:
 - Hardware, infrastructure, AI, semiconductor, or data platform companies (not pure SaaS at risk of AI disruption unless they are category leaders)`;
 
   try {
-    const { default: Anthropic } = await import('@anthropic-ai/sdk');
-    const client = new Anthropic();
-    const message = await client.messages.create({
+    const message = await aiRouter.messages.create({
       model: 'claude-haiku-4-5',
       max_tokens: 8192,
       messages: [{ role: 'user', content: prompt }],
@@ -6358,6 +6357,8 @@ initDb()
     // Every external API call (scout, watchlist scan, weekly email, URL resolution)
     // is user-triggered only to prevent unintended charges.
 
+    initAIRouter(pool);
+
     const server = app.listen(PORT, () => {
       console.log(`Job Scout Agent listening on port ${PORT}`);
     });
@@ -6396,8 +6397,16 @@ const HTML = `<!DOCTYPE html>
 body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.5;min-height:100vh;display:flex;flex-direction:column}
 
 /* header */
-header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+header{border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 .logo{font-size:17px;font-weight:700;color:var(--gold);letter-spacing:-0.01em}
+.ai-mode-bar{display:flex;align-items:center;gap:4px;background:#1a1a2e;border:1px solid #333;border-radius:20px;padding:3px}
+.ai-mode-btn{border:none;background:transparent;color:#888;font-size:12px;font-weight:600;padding:5px 13px;border-radius:16px;cursor:pointer;transition:all .18s;letter-spacing:0.02em}
+.ai-mode-btn:hover{background:#252540;color:#ccc}
+.ai-mode-btn.active{color:#fff;font-weight:700}
+.ai-mode-btn.active[id="aib-claude"]{background:#c96442}
+.ai-mode-btn.active[id="aib-chatgpt"]{background:#10a37f}
+.ai-mode-btn.active[id="aib-gemini"]{background:#4285f4}
+.ai-mode-btn.active[id="aib-grok"]{background:#7b3fe4}
 .hdr-right{margin-left:auto;display:flex;align-items:center;gap:12px}
 .hdr-status{font-size:12px;color:var(--muted)}
 .gmail-badge{font-size:11px;padding:3px 10px;border-radius:12px;font-weight:600}
@@ -7241,6 +7250,12 @@ textarea:focus,input:focus{border-color:var(--gold)}
 
 <header>
   <span class="logo">&#x2B21; JobScout.ai</span>
+  <div class="ai-mode-bar">
+    <button class="ai-mode-btn" id="aib-claude"  onclick="setAIMode('claude')" title="Claude Haiku 4.5">Claude</button>
+    <button class="ai-mode-btn" id="aib-chatgpt" onclick="setAIMode('chatgpt')" title="GPT-4o Mini">ChatGPT</button>
+    <button class="ai-mode-btn" id="aib-gemini"  onclick="setAIMode('gemini')" title="Gemini 2.5 Flash">Gemini</button>
+    <button class="ai-mode-btn" id="aib-grok"    onclick="setAIMode('grok')" title="Grok 3 Mini Fast">Grok</button>
+  </div>
   <div class="hdr-right">
     <span class="hdr-status" id="hdr-status"></span>
     <span class="gmail-badge off" id="gmail-badge">Gmail: ---</span>
@@ -14236,10 +14251,35 @@ function copyText(text) {
   navigator.clipboard.writeText(text).then(function(){}).catch(function(){ console.warn('clipboard copy failed'); });
 }
 
+// ── AI Mode ───────────────────────────────────────────────────────────────
+async function loadAIMode() {
+  try {
+    var r = await fetch('/api/ai-mode');
+    var d = await r.json();
+    var mode = d.mode || 'claude';
+    ['claude','chatgpt','gemini','grok'].forEach(function(m) {
+      var b = document.getElementById('aib-' + m);
+      if (b) b.classList.toggle('active', m === mode);
+    });
+  } catch(e) { console.warn('loadAIMode failed', e); }
+}
+
+async function setAIMode(mode) {
+  try {
+    await fetch('/api/ai-mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: mode })
+    });
+    loadAIMode();
+  } catch(e) { console.warn('setAIMode failed', e); }
+}
+
 // ── init ──────────────────────────────────────────────────────────────────
 loadJobs();
 loadStats();
 loadGmailStatus();
+loadAIMode();
 loadCriteria();  // always load settings from DB on page load so they survive refresh/redeploy
 loadAutoRunBadge();
 // If a run was already in progress when page loaded, resume polling
