@@ -145,23 +145,31 @@ Return ONLY valid JSON (no markdown, no code fences):
 }`;
 }
 
-// ── Claude call helper ────────────────────────────────────────────────────────
+// ── AI call helper ────────────────────────────────────────────────────────────
 
-async function callClaude(ac: any, prompt: string): Promise<any> {
+function extractJson(raw: string): string | null {
+  // Strip markdown code fences if present (ChatGPT/Gemini often wrap output)
+  const stripped = raw.replace(/^```(?:json)?\s*/m, '').replace(/\s*```\s*$/m, '').trim();
+  const m = stripped.match(/\{[\s\S]*\}/) || raw.match(/\{[\s\S]*\}/);
+  return m ? m[0] : null;
+}
+
+async function callAI(ac: any, prompt: string): Promise<any> {
+  // Reasoning models (gpt-5-mini, grok-4-1-fast-reasoning) burn completion tokens on
+  // internal thinking — use 32 000 so there is plenty of budget left for JSON output.
   const response = await ac.messages.create({
-    model: 'claude-haiku-4-5',
-    max_tokens: 8000,
+    max_tokens: 32000,
     messages: [{ role: 'user', content: prompt }],
   });
   const raw = response.content[0]?.type === 'text' ? (response.content[0] as any).text : '';
-  const jsonMatch = raw.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    throw new Error(`No JSON found in Claude response. stop_reason: ${response.stop_reason}. Raw start: ${raw.slice(0, 400)}`);
+  const jsonStr = extractJson(raw);
+  if (!jsonStr) {
+    throw new Error(`No JSON found in AI response. Raw start: ${raw.slice(0, 400)}`);
   }
   try {
-    return JSON.parse(jsonMatch[0]);
+    return JSON.parse(jsonStr);
   } catch (e) {
-    throw new Error(`Failed to parse Claude JSON: ${e}. Raw: ${raw.slice(0, 500)}`);
+    throw new Error(`Failed to parse AI JSON: ${e}. Raw: ${raw.slice(0, 500)}`);
   }
 }
 
@@ -192,21 +200,24 @@ function parseSectors(parsed: any): IndustrySector[] {
 // ── Main generation — two parallel batches of 6 sectors each ─────────────────
 
 export async function generateIndustryLeaders(): Promise<IndustryLeadersResult> {
-  const { aiRouter: ac } = await import('./ai_router.js');
+  const { aiRouter: ac, AI_CONFIG, getAIMode } = await import('./ai_router.js');
 
   const batch1 = SECTORS.slice(0, 6);   // AI Infra → Networking
   const batch2 = SECTORS.slice(6);      // Storage → FinTech
 
-  // Run both batches in parallel — each stays well inside the 8K output limit
+  // Run both batches in parallel
   const [parsed1, parsed2] = await Promise.all([
-    callClaude(ac, buildBatchPrompt(batch1, true)),   // batch 1 generates market_overview
-    callClaude(ac, buildBatchPrompt(batch2, false)),  // batch 2 skips it
+    callAI(ac, buildBatchPrompt(batch1, true)),   // batch 1 generates market_overview
+    callAI(ac, buildBatchPrompt(batch2, false)),  // batch 2 skips it
   ]);
+
+  const mode = await getAIMode();
+  const modelUsed = AI_CONFIG[mode]?.model ?? mode;
 
   return {
     generated_at: new Date().toISOString(),
     market_overview: parsed1.market_overview || '',
     sectors: [...parseSectors(parsed1), ...parseSectors(parsed2)],
-    model_used: 'claude-haiku-4-5',
+    model_used: modelUsed,
   };
 }
