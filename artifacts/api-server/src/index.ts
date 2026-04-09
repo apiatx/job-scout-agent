@@ -5732,7 +5732,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     const ghEntries = scoutList.filter(c => c.ats_type === 'greenhouse' && c.identifier);
     if (ghEntries.length > 0) {
       console.log(`[CompanyList] Validating ${ghEntries.length} Greenhouse slugs…`);
-      await Promise.all(ghEntries.map(async (entry) => {
+      await Promise.allSettled(ghEntries.map(async (entry) => {
         const slug = entry.identifier;
         const url = `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs`;
         try {
