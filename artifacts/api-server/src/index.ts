@@ -5784,47 +5784,52 @@ async function runScoutInBackground(runId: number): Promise<void> {
       console.log(`ATS title filter: none (no target roles configured — all titles pass)`);
     }
 
-    // ── Stage 2a: Scrape Greenhouse, Lever, and Workday companies ──
+    // ── Stage 2a: Scrape Greenhouse, Lever, and Workday companies (concurrent batches) ──
     // Uses the Claude-generated company list (or watchlist fallback)
-    for (const entry of scoutList) {
-      try {
+    // Run in concurrent batches of 5 to speed up scraping without overwhelming APIs
+    const ATS_CONCURRENCY = 5;
+    const atsEntries = scoutList.filter(e => e.ats_type !== 'plain');
+    for (let batchStart = 0; batchStart < atsEntries.length; batchStart += ATS_CONCURRENCY) {
+      const batch = atsEntries.slice(batchStart, batchStart + ATS_CONCURRENCY);
+      const results = await Promise.allSettled(batch.map(async (entry) => {
         let jobCount = 0;
         let scraped = false;
         if (entry.ats_type === 'greenhouse' && entry.identifier) {
           const jobs = await scrapeGreenhouseJobs(entry.identifier, entry.name, atsTitleFilter ?? undefined);
           jobCount = jobs.length;
-          allJobs.push(...jobs.map(j => ({ ...j, source: 'Greenhouse' })));
-          perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: jobCount });
-          scraped = true;
+          return { entry, jobs: jobs.map(j => ({ ...j, source: 'Greenhouse' })), jobCount, scraped: true };
         } else if (entry.ats_type === 'lever' && entry.identifier) {
           const jobs = await scrapeLeverJobs(entry.identifier, entry.name, atsTitleFilter ?? undefined);
           jobCount = jobs.length;
-          allJobs.push(...jobs.map(j => ({ ...j, source: 'Lever' })));
-          perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: jobCount });
-          scraped = true;
+          return { entry, jobs: jobs.map(j => ({ ...j, source: 'Lever' })), jobCount, scraped: true };
         } else if (entry.ats_type === 'workday' && entry.identifier) {
-          // Identifier format: "subdomain|careerSiteName" e.g. "nvidia.wd5|NVIDIAExternalCareerSite"
           const pipeIdx = entry.identifier.indexOf('|');
           const rawSub  = pipeIdx >= 0 ? entry.identifier.slice(0, pipeIdx) : entry.identifier;
           const boardSlug = pipeIdx >= 0 ? entry.identifier.slice(pipeIdx + 1) : '';
           const subdomain = rawSub.includes('.myworkdayjobs.com') ? rawSub : `${rawSub}.myworkdayjobs.com`;
           const jobs = await scrapeWorkdayJobs(entry.name, subdomain, boardSlug);
-          // Workday already uses keyword search terms, but apply title filter as a safety pass
           const filteredWorkday = atsTitleFilter ? jobs.filter(j => atsTitleFilter.test(j.title)) : jobs;
           jobCount = filteredWorkday.length;
-          allJobs.push(...filteredWorkday.map(j => ({ ...j, source: 'Workday' })));
-          perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: jobCount });
-          scraped = true;
+          return { entry, jobs: filteredWorkday.map(j => ({ ...j, source: 'Workday' })), jobCount, scraped: true };
         }
-        // "plain" companies: covered by JobSpy broad search below
-        if (!scraped && entry.ats_type !== 'plain') {
-          perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: 0, error: 'Missing or unrecognised identifier' });
+        return { entry, jobs: [] as Job[], jobCount: 0, scraped: false };
+      }));
+
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          const { entry, jobs, jobCount, scraped } = result.value;
+          if (scraped) {
+            allJobs.push(...jobs);
+            perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: jobCount });
+          } else {
+            perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: 0, error: 'Missing or unrecognised identifier' });
+          }
+        } else {
+          const entry = batch[results.indexOf(result)];
+          const errMsg = result.reason instanceof Error ? result.reason.message : String(result.reason);
+          perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: 0, error: errMsg });
+          console.error(`Error scraping ${entry.name}:`, result.reason);
         }
-        companiesScanned++;
-      } catch (e) {
-        const errMsg = e instanceof Error ? e.message : String(e);
-        perCompanyStats.push({ name: entry.name, type: entry.ats_type, jobs: 0, error: errMsg });
-        console.error(`Error scraping ${entry.name}:`, e);
         companiesScanned++;
       }
     }
@@ -6088,10 +6093,38 @@ async function runScoutInBackground(runId: number): Promise<void> {
     console.log(`  Remaining for Claude      : ${preFiltered.length}`);
     console.log(`───────────────────────────────────────────────────────────`);
 
+    // ── Deduplicate pipeline: by URL AND by title+company (catches cross-source dupes) ──
+    {
+      const seenKeys = new Set<string>();
+      const deduped: Job[] = [];
+      for (const j of preFiltered) {
+        const urlKey = j.applyUrl;
+        const titleKey = `${j.title.toLowerCase().trim()}|${j.company.toLowerCase().trim()}`;
+        if (seenKeys.has(urlKey) || seenKeys.has(titleKey)) continue;
+        seenKeys.add(urlKey);
+        seenKeys.add(titleKey);
+        deduped.push(j);
+      }
+      const crossSourceDupes = preFiltered.length - deduped.length;
+      if (crossSourceDupes > 0) {
+        console.log(`\n──── CROSS-SOURCE DEDUP ─────────────────────────────────────`);
+        console.log(`  Removed ${crossSourceDupes} duplicate jobs (same title+company from multiple sources)`);
+        console.log(`───────────────────────────────────────────────────────────`);
+      }
+      preFiltered = deduped;
+    }
+
     // ── Skip jobs already in the DB — only score genuinely new listings ──
-    const { rows: existingRows } = await pool.query('SELECT apply_url FROM jobs');
+    const { rows: existingRows } = await pool.query('SELECT apply_url, LOWER(title) as title_lower, LOWER(company) as company_lower FROM jobs');
     const seenUrls = new Set(existingRows.map((r: any) => r.apply_url as string));
-    const newJobs = preFiltered.filter(j => !seenUrls.has(j.applyUrl));
+    const seenTitleCompany = new Set(existingRows.map((r: any) => `${r.title_lower}|${r.company_lower}`));
+    const newJobs = preFiltered.filter(j => {
+      if (seenUrls.has(j.applyUrl)) return false;
+      // Also skip if same title+company already exists (cross-source dedup)
+      const key = `${j.title.toLowerCase().trim()}|${j.company.toLowerCase().trim()}`;
+      if (seenTitleCompany.has(key)) return false;
+      return true;
+    });
     const skippedAlreadySeen = preFiltered.length - newJobs.length;
     console.log(`\n──── NEW JOB FILTER ─────────────────────────────────────────`);
     console.log(`  Already in DB (skipped): ${skippedAlreadySeen}`);

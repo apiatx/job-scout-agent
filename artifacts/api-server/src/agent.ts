@@ -635,9 +635,9 @@ export async function filterUnsafeCompanies(
   console.log(`\n──── COMPANY SAFETY CHECK ──────────────────────────────────`);
   console.log(`Evaluating ${uniqueCompanies.size} unique non-pre-approved companies...`);
 
-  // Evaluate all unique companies in batches of 10
+  // Evaluate all unique companies in batches of 15
   const companyList = Array.from(uniqueCompanies);
-  const BATCH_SIZE = 10;
+  const BATCH_SIZE = 15;
   for (let i = 0; i < companyList.length; i += BATCH_SIZE) {
     const batch = companyList.slice(i, i + BATCH_SIZE);
     await Promise.all(batch.map((name) => isCompanySafe(name)));
@@ -722,7 +722,8 @@ Pre-approved companies: ${criteria.preApprovedCompanies.join(', ')}`;
   for (let i = 0; i < jobs.length; i += CONCURRENCY) {
     const batch = jobs.slice(i, i + CONCURRENCY);
     console.log(`Scoring batch ${Math.floor(i / CONCURRENCY) + 1}/${Math.ceil(jobs.length / CONCURRENCY)} (${batch.length} jobs)...`);
-    const batchResults = await Promise.all(
+    // Use allSettled so a single failed score doesn't crash the entire batch
+    const batchResults = await Promise.allSettled(
       batch.map((j) => {
         const momentum = momentumMap?.get(j.company.toLowerCase().trim()) ?? null;
         return scoreOne(
@@ -737,7 +738,11 @@ Pre-approved companies: ${criteria.preApprovedCompanies.join(', ')}`;
       })
     );
     for (const r of batchResults) {
-      if (r !== null) results.push(r);
+      if (r.status === 'fulfilled' && r.value !== null) {
+        results.push(r.value);
+      } else if (r.status === 'rejected') {
+        console.error(`  Scoring failed for a job:`, r.reason instanceof Error ? r.reason.message : r.reason);
+      }
     }
   }
 
