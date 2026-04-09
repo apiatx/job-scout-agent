@@ -4400,7 +4400,7 @@ async function reclassifyJobsLocally(): Promise<number> {
         await pool.query(`UPDATE jobs SET opportunity_tier=$1 WHERE id=$2`, [tier, j.id]);
         updated++;
       }
-    } catch { /* skip malformed rows */ }
+    } catch (e) { console.warn(`Row ${j.id} reclassify skipped:`, e instanceof Error ? e.message : e); }
   }
   return updated;
 }
