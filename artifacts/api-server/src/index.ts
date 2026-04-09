@@ -6216,34 +6216,38 @@ async function runScoutInBackground(runId: number): Promise<void> {
     console.log(`───────────────────────────────────────────────────────────`);
 
     for (const m of matches) {
-      const matchedJob = newJobs.find(j => j.applyUrl === m.applyUrl);
-      const source = matchedJob?.source ?? '';
-      const datePosted = matchedJob?.datePosted ?? null;
-      const loc = (m.location ?? '').trim();
-      let finalTier: string;
+      try {
+        const matchedJob = newJobs.find(j => j.applyUrl === m.applyUrl);
+        const source = matchedJob?.source ?? '';
+        const datePosted = matchedJob?.datePosted ?? null;
+        const loc = (m.location ?? '').trim();
+        let finalTier: string;
 
-      // FIX 2: Workday "X Locations" — pass through to Claude scoring (no city/state data)
-      const isWorkdayMultiLoc = /^\d+\s+Locations?$/i.test(loc);
-      if (isWorkdayMultiLoc) {
-        console.log(`  PASS (multi-location Workday — sending to Claude): "${loc}" for ${m.company} "${m.title}"`);
-      }
-      // Apply location check + deterministic tier logic using our computeTier
-      const locationOk = isWorkdayMultiLoc || checkJobLocation(loc, criteria.locations, false, allowedWorkModes);
-      if (!locationOk) {
-        finalTier = 'Probably Skip';
-      } else if (m.subScores && m.matchScore) {
-        finalTier = computeTier(m.matchScore, m.aiRisk, m.subScores, m.title, m.company, loc, tierSettings);
-      } else {
-        finalTier = m.opportunityTier ?? 'unscored';
-      }
+        // FIX 2: Workday "X Locations" — pass through to Claude scoring (no city/state data)
+        const isWorkdayMultiLoc = /^\d+\s+Locations?$/i.test(loc);
+        if (isWorkdayMultiLoc) {
+          console.log(`  PASS (multi-location Workday — sending to Claude): "${loc}" for ${m.company} "${m.title}"`);
+        }
+        // Apply location check + deterministic tier logic using our computeTier
+        const locationOk = isWorkdayMultiLoc || checkJobLocation(loc, criteria.locations, false, allowedWorkModes);
+        if (!locationOk) {
+          finalTier = 'Probably Skip';
+        } else if (m.subScores && m.matchScore) {
+          finalTier = computeTier(m.matchScore, m.aiRisk, m.subScores, m.title, m.company, loc, tierSettings);
+        } else {
+          finalTier = m.opportunityTier ?? 'unscored';
+        }
 
-      const momWarning: string | null = null;
-      await pool.query(
-        `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, original_url, original_title, original_description, description, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_score, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
-         ON CONFLICT (apply_url) DO NOTHING`,
-        [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.applyUrl, m.title, m.description ?? null, m.description ?? null, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskScore ?? null, m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), null, null, momWarning, datePosted]
-      );
+        const momWarning: string | null = null;
+        await pool.query(
+          `INSERT INTO jobs (scout_run_id, title, company, location, salary, apply_url, original_url, original_title, original_description, description, why_good_fit, match_score, source, is_hardware, ai_risk, ai_risk_score, ai_risk_reason, opportunity_tier, sub_scores, gemini_grounding_metadata, ingestion_confidence, momentum_warning, date_posted)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+           ON CONFLICT (apply_url) DO NOTHING`,
+          [runId, m.title, m.company, m.location, m.salary ?? null, m.applyUrl, m.applyUrl, m.title, m.description ?? null, m.description ?? null, m.whyGoodFit, m.matchScore, source, m.isHardware ?? false, m.aiRisk ?? 'unknown', m.aiRiskScore ?? null, m.aiRiskReason ?? null, finalTier, JSON.stringify(m.subScores ?? null), null, null, momWarning, datePosted]
+        );
+      } catch (insertErr) {
+        console.error(`Failed to insert job "${m.title}" @ ${m.company}:`, insertErr instanceof Error ? insertErr.message : insertErr);
+      }
     }
 
     // ── Background URL health check (non-blocking) ──────────────────────────
