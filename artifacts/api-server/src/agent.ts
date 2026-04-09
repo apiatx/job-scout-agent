@@ -237,6 +237,7 @@ COMPONENT 5 — territoryFit (0-10 points):
   3:  Territory mentioned but is adjacent/transferable — candidate could likely cover it
   0:  Hard geographic territory clearly OUTSIDE candidate's preferred region (e.g., title says "Northeast", "Midwest", "Pacific Northwest", "TOLA", "West Coast" and candidate is Southeast-based)
   CRITICAL: If the title contains a specific region name like "(Northeast)", "(Midwest)", "(TOLA)", "(Pacific NW)", "(Southwest)", "(Northwest)" — and the candidate's preferred locations are Southeast US — score territoryFit = 0. Do NOT default to 7 just because the job listing says "Remote".
+  NOTE: Also check the job DESCRIPTION for territory/region requirements, not just the title. Many enterprise roles mention specific territory assignments deep in the JD text (e.g., "covering the Northeast region" or "based in the Bay Area"). If the description specifies a territory outside the candidate's preferred region, score accordingly even if the title looks neutral.
 
 ADDITIONAL FIELDS:
   realVsFake (0-10): Confidence this is a genuine open role. 10=specific unique JD, 0=generic evergreen template. This is a hard-skip gate and NOT added to matchScore.
