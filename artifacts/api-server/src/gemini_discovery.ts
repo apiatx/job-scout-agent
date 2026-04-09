@@ -327,7 +327,8 @@ async function claudeJobSearchFallback(
   const prompt = buildSearchPrompt(criteria, Math.min(maxResults, 20));
 
   // Try Sonnet first (best web search quality), then Haiku as secondary
-  const claudeModels = ['claude-haiku-4-5', 'claude-haiku-4-5'];
+  // Try Haiku first; fall back to Sonnet if Haiku fails
+  const claudeModels = ['claude-haiku-4-5', 'claude-sonnet-4-5-20241022'];
 
   for (const claudeModel of claudeModels) {
     try {

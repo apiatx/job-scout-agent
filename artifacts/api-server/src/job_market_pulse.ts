@@ -354,13 +354,14 @@ export function buildStats(stats: ScoutCompanyStat[], criteria: { target_roles: 
     .slice(0, 8)
     .map(([role, count]) => ({ role, count }));
 
-  void salarySum; void salaryCnt; void salaryHits; void criteria;
+  const avgSalary = salaryCnt > 0 ? Math.round(salarySum / salaryCnt) : 0;
+  void salaryHits; void criteria;
 
   return {
     top_roles,
-    avg_salary_by_sector: [],
+    avg_salary_by_sector: avgSalary > 0 ? [{ sector: 'Overall', avg_salary: avgSalary }] : [],
     total_companies_tracked: stats.length,
     total_jobs_30d: totalJobs,
-    salary_floor_hit_pct: 0,
+    salary_floor_hit_pct: salaryCnt > 0 ? Math.round((salaryCnt / stats.length) * 100) : 0,
   };
 }

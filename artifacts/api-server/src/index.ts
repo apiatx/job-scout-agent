@@ -1638,7 +1638,7 @@ app.get('/api/jobs', async (req: Request, res: Response) => {
 app.post('/api/jobs/re-validate', async (_req, res: Response) => {
   try {
     res.json({ ok: true, message: 'Canonical URL resolution started in background' });
-    runCanonicalResolutionInBackground(pool).catch(() => {});
+    runCanonicalResolutionInBackground(pool).catch((e) => console.error('[Validate] Background canonical resolution failed:', e instanceof Error ? e.message : e));
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     res.status(500).json({ error: msg });
@@ -2262,8 +2262,19 @@ app.put('/api/jobs/:id/track-action', async (req: Request, res: Response) => {
     if (!field || !valid.includes(field)) {
       res.status(400).json({ error: 'Invalid field. Must be: ' + valid.join(', ') }); return;
     }
+    // Use a safe mapping instead of interpolating field directly into SQL
+    const fieldMap: Record<string, string> = {
+      researched_at: 'researched_at',
+      tailored_at: 'tailored_at',
+      reached_out_at: 'reached_out_at',
+      hm_identified_at: 'hm_identified_at',
+    };
+    const safeField = fieldMap[field];
+    if (!safeField) { res.status(400).json({ error: 'Invalid field' }); return; }
+    const jobId = Number(req.params.id);
+    if (!jobId || isNaN(jobId)) { res.status(400).json({ error: 'Invalid job ID' }); return; }
     const { rows } = await pool.query(
-      `UPDATE jobs SET ${field} = NOW() WHERE id = $1 RETURNING *`, [req.params.id]
+      `UPDATE jobs SET ${safeField} = NOW() WHERE id = $1 RETURNING *`, [jobId]
     );
     if (!rows.length) { res.status(404).json({ error: 'Job not found' }); return; }
     res.json(rows[0]);
@@ -2837,7 +2848,7 @@ Only include people who appear to currently work at ${companyName} in leadership
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'gemini',NOW(),NOW()+INTERVAL '90 days')
                  ON CONFLICT (company_name, person_name) DO UPDATE SET person_title=EXCLUDED.person_title, linkedin_url=EXCLUDED.linkedin_url, department=EXCLUDED.department, seniority_level=EXCLUDED.seniority_level, region=EXCLUDED.region, last_verified_at=NOW(), expires_at=NOW()+INTERVAL '90 days'`,
                 [companyName, companyDomain, l.person_name, l.person_title, l.linkedin_url || null, l.department || null, l.seniority_level || null, l.region || null]
-              ).catch(() => {});
+              ).catch((e) => console.warn('[HiringManager] Cache upsert failed for', l.person_name, ':', e instanceof Error ? e.message : e));
             }
             console.log(`[HiringManager] Cached ${leaders.length} leadership profiles for ${companyName}`);
           }
@@ -3554,7 +3565,7 @@ app.post('/api/jobs/:id/outreach-email-draft', async (req: Request, res: Respons
                 const fd = await fr.json() as any;
                 if (fd.data?.email) {
                   hmEmailToUse = fd.data.email;
-                  await pool.query(`UPDATE hiring_managers SET email=$1, email_source='hunter', updated_at=NOW() WHERE id=$2`, [hmEmailToUse, row.hm_id]).catch(() => {});
+                  await pool.query(`UPDATE hiring_managers SET email=$1, email_source='hunter', updated_at=NOW() WHERE id=$2`, [hmEmailToUse, row.hm_id]).catch((e) => console.error('[HM] Failed to update hiring manager email:', e instanceof Error ? e.message : e));
                   console.log(`[OutreachDraft] Hunter email-finder found: ${hmEmailToUse} for ${row.hm_name}`);
                 }
               }
@@ -3679,7 +3690,7 @@ app.post('/api/jobs/:id/outreach-email-send', async (req: Request, res: Response
       + '</div>';
     const send = await sendGmailEmail(to, subject, html);
     if (send.ok) {
-      await pool.query(`UPDATE jobs SET reached_out_at = COALESCE(reached_out_at, NOW()) WHERE id = $1`, [jobId]).catch(() => {});
+      await pool.query(`UPDATE jobs SET reached_out_at = COALESCE(reached_out_at, NOW()) WHERE id = $1`, [jobId]).catch((e) => console.error('[Outreach] Failed to update reached_out_at:', e instanceof Error ? e.message : e));
       res.json({ success: true });
     } else if (send.status === 403) {
       res.status(403).json({ error: 'Gmail permissions are outdated. Disconnect and reconnect Gmail to grant send scope.' });
@@ -4116,7 +4127,7 @@ app.post('/api/jobs/targeted-scan', async (req: Request, res: Response) => {
       }
 
       const newIds = savedJobs.map(j => j.id as number);
-      if (newIds.length > 0) checkUrlHealthInBackground(newIds).catch(() => {});
+      if (newIds.length > 0) checkUrlHealthInBackground(newIds).catch((e) => console.error('[TargetedScan] Background URL check failed:', e instanceof Error ? e.message : e));
     }
 
     // Fetch already-scored DB jobs for the requested companies and merge
@@ -5655,7 +5666,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     };
 
     const setStage = async (stage: string) => {
-      await pool.query(`UPDATE scout_runs SET current_stage=$1 WHERE id=$2`, [stage, runId]).catch(() => {});
+      await pool.query(`UPDATE scout_runs SET current_stage=$1 WHERE id=$2`, [stage, runId]).catch((e) => console.error('[Scout] Stage update failed:', e instanceof Error ? e.message : e));
     };
 
     // Load companies table for fallback only (Watchlist — no longer drives scout)
@@ -5819,7 +5830,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
     }
 
     await setStage(`ATS done (${allJobs.length} found) — searching LinkedIn & Indeed via JobSpy…`);
-    await pool.query(`UPDATE scout_runs SET jobs_in_pipeline=$1 WHERE id=$2`, [allJobs.length, runId]).catch(() => {});
+    await pool.query(`UPDATE scout_runs SET jobs_in_pipeline=$1 WHERE id=$2`, [allJobs.length, runId]).catch((e) => console.error('[Scout] Pipeline count update failed:', e instanceof Error ? e.message : e));
     // ── Stage 2b: JobSpy — LinkedIn + Indeed + (Glassdoor/ZipRecruiter via proxy) ──
     try {
       const jobSpyResults = await runJobSpyScraper({
@@ -5849,7 +5860,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
 
     // [Removed] Gemini Discovery block (Stage 2c)
     await setStage(`JobSpy done (${allJobs.length} total) — preparing to score…`);
-    await pool.query(`UPDATE scout_runs SET jobs_in_pipeline=$1 WHERE id=$2`, [allJobs.length, runId]).catch(() => {});
+    await pool.query(`UPDATE scout_runs SET jobs_in_pipeline=$1 WHERE id=$2`, [allJobs.length, runId]).catch((e) => console.error('[Scout] Pipeline count update failed:', e instanceof Error ? e.message : e));
 
     console.log(`\n──── SCRAPE RESULTS ────────────────────────────────────────`);
     console.log(`Total scraped: ${allJobs.length} raw listings from ${companiesScanned} companies`);
@@ -6192,7 +6203,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
         // Chain: URL health check → canonical resolution (canonical runs after health check so url_ok is populated)
         checkUrlHealthInBackground(newIds)
           .then(() => runCanonicalResolutionInBackground(pool, newIds))
-          .catch(() => {});
+          .catch((e) => console.error('[Scout] Background URL check/resolution failed:', e instanceof Error ? e.message : e));
       }
     }
 

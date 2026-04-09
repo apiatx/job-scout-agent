@@ -135,6 +135,7 @@ export default function SearchCriteria() {
   });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -167,16 +168,19 @@ export default function SearchCriteria() {
   const handleSave = useCallback(async () => {
     setSaving(true);
     setSaved(false);
+    setSaveError(false);
     try {
-      await fetch("/api/criteria", {
+      const resp = await fetch("/api/criteria", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(criteria),
       });
+      if (!resp.ok) throw new Error('Save failed');
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch {
-      // handle error silently
+      setSaveError(true);
+      setTimeout(() => setSaveError(false), 3000);
     } finally {
       setSaving(false);
     }
@@ -365,6 +369,7 @@ export default function SearchCriteria() {
           {saving ? "Saving..." : "Save Settings"}
         </Button>
         {saved && <span className="text-sm text-green-600">Settings saved!</span>}
+        {saveError && <span className="text-sm text-red-600">Failed to save. Please try again.</span>}
       </div>
     </div>
   );
