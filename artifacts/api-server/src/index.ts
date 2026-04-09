@@ -4435,7 +4435,14 @@ app.post('/api/scout/run', async (_req, res: Response) => {
     const run = rows[0];
     res.json({ runId: run.id, message: 'Scout run started' });
     scoutRunning = true;
-    runScoutInBackground(run.id).catch(console.error).finally(() => { scoutRunning = false; });
+    const SCOUT_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours
+    Promise.race([
+      runScoutInBackground(run.id),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Scout run timed out after 2 hours')), SCOUT_TIMEOUT_MS)),
+    ]).catch(e => {
+      console.error('Scout run error:', e);
+      pool.query("UPDATE scout_runs SET status='failed', error=$1, completed_at=NOW() WHERE id=$2", [e instanceof Error ? e.message : String(e), run.id]).catch(() => {});
+    }).finally(() => { scoutRunning = false; });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
