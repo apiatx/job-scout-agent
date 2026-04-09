@@ -5485,6 +5485,7 @@ async function checkUrlHealthInBackground(jobIds?: number[]): Promise<void> {
           await pool.query(`UPDATE jobs SET url_ok=$1, url_checked_at=NOW() WHERE id=$2`, [isOk, id]);
           if (isOk) ok++; else broken++;
         } catch {
+          clearTimeout(timer);
           // Timeout or network error — leave url_ok as null (not marked broken)
           skipped++;
         }
