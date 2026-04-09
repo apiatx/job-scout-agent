@@ -1639,7 +1639,7 @@ app.get('/api/jobs', async (req: Request, res: Response) => {
 app.post('/api/jobs/re-validate', async (_req, res: Response) => {
   try {
     res.json({ ok: true, message: 'Canonical URL resolution started in background' });
-    runCanonicalResolutionInBackground(pool).catch((e) => console.error('[Validate] Background canonical resolution failed:', e instanceof Error ? e.message : e));
+    runCanonicalResolutionInBackground(pool).catch(e => console.error('Canonical resolution error:', e));
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     res.status(500).json({ error: msg });
