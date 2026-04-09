@@ -311,7 +311,8 @@ Only include REAL, currently open positions. Do not make up job listings.`;
     const arrMatch = jsonStr.match(/\[[\s\S]*\]/);
     if (!arrMatch) return [];
 
-    const parsed = JSON.parse(arrMatch[0]);
+    let parsed;
+    try { parsed = JSON.parse(arrMatch[0]); } catch { return []; }
     if (!Array.isArray(parsed)) return [];
     return parsed.map((r: any) => ({
       title: r.title || '',
