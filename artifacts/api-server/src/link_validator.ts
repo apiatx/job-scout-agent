@@ -167,15 +167,14 @@ async function fetchFromGreenhouseApiBySlugAndId(slug: string, jobId: string, jo
     `https://boards.greenhouse.io/${slug}/jobs/${jobId}.json`,
   ];
   for (const apiUrl of apiUrls) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
     try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 10000);
       const res = await fetch(apiUrl, {
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobScout/1.0)', Accept: 'application/json' },
         redirect: 'follow',
         signal: ctrl.signal,
       });
-      clearTimeout(timer);
       if (!res.ok) continue;
       const data = await res.json() as Record<string, unknown>;
       if (!data.title && !data.content) continue;
@@ -190,14 +189,14 @@ async function fetchFromGreenhouseApiBySlugAndId(slug: string, jobId: string, jo
       const title = (data.title as string) || undefined;
       if (!title && !desc) continue;
       return { title, location, description: desc || undefined, postedAt: (data.updated_at as string) || undefined, pageType: 'job_detail', sourceApi: 'greenhouse' };
-    } catch { /* try next */ }
+    } catch { /* try next */ } finally { clearTimeout(timer); }
   }
 
   // ── Title-based fallback: job ID was fake/stale — search full board by title ──
   if (!jobTitle) return null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12000);
   try {
-    const ctrl = new AbortController();
-    setTimeout(() => ctrl.abort(), 12000);
     const boardRes = await fetch(`https://boards-api.greenhouse.io/v1/boards/${slug}/jobs?content=true`, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobScout/1.0)', Accept: 'application/json' },
       signal: ctrl.signal,
@@ -237,7 +236,7 @@ async function fetchFromGreenhouseApiBySlugAndId(slug: string, jobId: string, jo
     };
   } catch {
     return null;
-  }
+  } finally { clearTimeout(timer); }
 }
 
 /**
@@ -263,14 +262,13 @@ async function fetchFromLeverApi(url: string): Promise<FetchedJobData | null> {
   if (!match) return null;
   const [, company, jobId] = match;
   const apiUrl = `https://api.lever.co/v0/postings/${company}/${jobId}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10000);
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 10000);
     const res = await fetch(apiUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobScout/1.0)', Accept: 'application/json' },
       signal: ctrl.signal,
     });
-    clearTimeout(timer);
     if (!res.ok) return null;
     const data = await res.json() as Record<string, unknown>;
     const cats = data.categories as Record<string, unknown> | undefined;
@@ -293,7 +291,7 @@ async function fetchFromLeverApi(url: string): Promise<FetchedJobData | null> {
     };
   } catch {
     return null;
-  }
+  } finally { clearTimeout(timer); }
 }
 
 /**
@@ -301,9 +299,9 @@ async function fetchFromLeverApi(url: string): Promise<FetchedJobData | null> {
  * Extracts best-effort title and description from page HTML.
  */
 async function fetchFromHtml(url: string): Promise<FetchedJobData | null> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12000);
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 12000);
     const res = await fetch(url, {
       method: 'GET',
       redirect: 'follow',
@@ -313,7 +311,6 @@ async function fetchFromHtml(url: string): Promise<FetchedJobData | null> {
         Accept: 'text/html',
       },
     });
-    clearTimeout(timer);
     if (!res.ok) return null;
 
     const html = await res.text();
@@ -371,7 +368,7 @@ async function fetchFromHtml(url: string): Promise<FetchedJobData | null> {
     };
   } catch {
     return null;
-  }
+  } finally { clearTimeout(timer); }
 }
 
 // ── Ashby matcher constants ────────────────────────────────────────────────────
@@ -553,14 +550,13 @@ export async function fetchFromAshbyApiWithTitle(
   // Strip trailing ?… from posting ID
   const postingIdFromUrl = postingIdRaw.replace(/\?.*$/, '');
 
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12000);
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 12000);
     const res = await fetch(
       `https://api.ashbyhq.com/posting-api/job-board/${encodeURIComponent(boardName)}`,
       { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobScout/1.0)', 'Accept': 'application/json' }, signal: ctrl.signal },
     );
-    clearTimeout(timer);
     if (!res.ok) return null;
 
     const data = await res.json() as Record<string, unknown>;
@@ -584,7 +580,7 @@ export async function fetchFromAshbyApiWithTitle(
     };
   } catch {
     return null;
-  }
+  } finally { clearTimeout(timer); }
 }
 
 /**
@@ -725,23 +721,22 @@ Use web search to find the URL. Return ONLY the single best URL on its own line,
     if (candidateTrust === 'aggregator') return null;
 
     // Liveness check
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 7000);
     try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 7000);
       const headRes = await fetch(candidateUrl, {
         method: 'HEAD',
         redirect: 'follow',
         signal: ctrl.signal,
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JobScout/1.0)' },
       });
-      clearTimeout(timer);
       if (headRes.status < 400) {
         const sourceLabel = candidateTrust === 'ats_direct'    ? 'claude_resolved_ats'
           : candidateTrust === 'company_career'                ? 'claude_resolved_company'
           :                                                      'claude_resolved';
         return { url: candidateUrl, source: sourceLabel };
       }
-    } catch { /* not live */ }
+    } catch { /* not live */ } finally { clearTimeout(timer); }
   } catch (e) {
     console.warn(`[Recovery] Claude web search failed: ${e instanceof Error ? e.message : e}`);
   }
