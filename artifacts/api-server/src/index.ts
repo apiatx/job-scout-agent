@@ -1603,16 +1603,22 @@ app.get('/api/jobs', async (req: Request, res: Response) => {
       [minScore]
     );
 
-    // Attach salary estimates for jobs missing salary
-    for (const j of rows) {
-      if (!j.salary || j.salary === 'Unknown' || j.salary === 'N/A' || (j.salary as string).trim() === '') {
-        const { rows: est } = await pool.query(
-          `SELECT estimate_json FROM salary_estimates WHERE LOWER(job_title) = LOWER($1) AND LOWER(company_name) = LOWER($2) AND created_at > NOW() - INTERVAL '7 days' ORDER BY created_at DESC LIMIT 1`,
-          [j.title, j.company]
-        );
-        if (est.length > 0) {
-          (j as Record<string, unknown>).salary_estimate = est[0].estimate_json;
-        }
+    // Batch salary estimates instead of N+1 queries
+    const needSalaryRows = rows.filter((j: any) => !j.salary || j.salary === 'Unknown' || j.salary === 'N/A' || (j.salary as string).trim() === '');
+    if (needSalaryRows.length > 0) {
+      const { rows: allEstimates } = await pool.query(
+        `SELECT LOWER(job_title) as lt, LOWER(company_name) as lc, estimate_json
+         FROM salary_estimates
+         WHERE created_at > NOW() - INTERVAL '7 days'`
+      );
+      const estimateMap = new Map<string, unknown>();
+      for (const est of allEstimates) {
+        estimateMap.set(`${est.lt}||${est.lc}`, est.estimate_json);
+      }
+      for (const j of needSalaryRows) {
+        const key = `${(j.title as string)?.toLowerCase()}||${(j.company as string)?.toLowerCase()}`;
+        const est = estimateMap.get(key);
+        if (est) (j as Record<string, unknown>).salary_estimate = est;
       }
     }
 
