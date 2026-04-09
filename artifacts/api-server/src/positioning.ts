@@ -260,7 +260,8 @@ Be specific, metric-rich, and consistent. Do not use placeholder text. Use the a
     messages: [{ role: 'user', content: prompt }]
   });
 
-  const raw = (message.content[0] as { type: string; text: string }).text;
+  const block = message.content[0];
+  const raw = (block && 'text' in block) ? (block as { text: string }).text : '';
   const jsonMatch = raw.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error('Claude did not return valid JSON for positioning outputs');
   const outputs = JSON.parse(jsonMatch[0]);
@@ -335,7 +336,8 @@ Generate 5-8 objections most relevant to this specific candidate. Be honest — 
     messages: [{ role: 'user', content: prompt }]
   });
 
-  const raw = (message.content[0] as { type: string; text: string }).text;
+  const block = message.content[0];
+  const raw = (block && 'text' in block) ? (block as { text: string }).text : '';
   const jsonMatch = raw.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error('Claude did not return valid JSON for objection handling');
   const parsed = JSON.parse(jsonMatch[0]);
@@ -412,7 +414,8 @@ Return ONLY a valid JSON object:
     messages: [{ role: 'user', content: prompt }]
   });
 
-  const raw = (message.content[0] as { type: string; text: string }).text;
+  const block = message.content[0];
+  const raw = (block && 'text' in block) ? (block as { text: string }).text : '';
   const jsonMatch = raw.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error('Claude did not return valid JSON for narrative draft');
   const draft = JSON.parse(jsonMatch[0]);
