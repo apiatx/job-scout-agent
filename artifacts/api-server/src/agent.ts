@@ -585,17 +585,41 @@ export async function rescoreJobOpportunity(
 
 const companySafetyCache = new Map<string, boolean>();
 
-async function isCompanySafe(companyName: string): Promise<boolean> {
+async function isCompanySafe(companyName: string, industryContext?: string): Promise<boolean> {
   const cached = companySafetyCache.get(companyName);
   if (cached !== undefined) return cached;
 
   try {
+    const industryHint = industryContext
+      ? `\nThe candidate is specifically targeting roles in these industries: ${industryContext}. Factor this into your assessment — companies operating in or selling to these verticals are YES.`
+      : '';
     const message = await anthropic.messages.create({
       model: 'claude-haiku-4-5',
       max_tokens: 8,
       messages: [{
         role: 'user',
-        content: `Does "${companyName}" sell technology products or services to businesses (B2B)? This includes: SaaS software, cloud platforms, cybersecurity, networking, data/analytics, developer tools, sales/marketing tech, HR tech, fintech, infrastructure software, AI tools, hardware + software, or any enterprise/mid-market software. Answer YES for any legitimate B2B tech or software company. Answer NO only for: hospitals/health systems, insurance agencies, car dealerships, restaurants, retail/consumer brands, non-profits, staffing agencies, real estate brokers, construction firms, utilities, or government entities. Answer only YES or NO.`,
+        content: `Is "${companyName}" a company that sells technology products or services to businesses (B2B)?${industryHint}
+
+YES if the company is any of these:
+- SaaS / cloud platform / infrastructure software vendor
+- Cybersecurity, networking, or data/analytics company
+- Developer tools, DevOps, or observability platform
+- Sales tech, marketing tech, HR tech, or fintech
+- AI/ML tools or platforms
+- Hardware + software (servers, storage, semiconductors, IoT)
+- Enterprise or mid-market software of any kind
+- IT services or consulting firm selling to enterprises
+
+NO if the company is any of these:
+- Hospital, health system, or medical practice (not health-tech vendor)
+- Insurance agency, car dealership, restaurant chain
+- Retail / consumer brand (not B2B)
+- Non-profit, charity, or religious organization
+- Staffing / temp agency (not HR-tech vendor)
+- Real estate brokerage, construction firm
+- Utility company, government entity, school district
+
+Answer only YES or NO.`,
       }],
     });
 
@@ -618,7 +642,8 @@ async function isCompanySafe(companyName: string): Promise<boolean> {
  */
 export async function filterUnsafeCompanies(
   jobs: ScrapedJob[],
-  preApprovedCompanies: string[]
+  preApprovedCompanies: string[],
+  industries?: string[]
 ): Promise<ScrapedJob[]> {
   const preApprovedLower = new Set(preApprovedCompanies.map((n) => n.toLowerCase()));
 
@@ -640,7 +665,8 @@ export async function filterUnsafeCompanies(
   const BATCH_SIZE = 15;
   for (let i = 0; i < companyList.length; i += BATCH_SIZE) {
     const batch = companyList.slice(i, i + BATCH_SIZE);
-    await Promise.all(batch.map((name) => isCompanySafe(name)));
+    const industryContext = industries?.length ? industries.join(', ') : undefined;
+    await Promise.all(batch.map((name) => isCompanySafe(name, industryContext)));
   }
 
   // Log results
