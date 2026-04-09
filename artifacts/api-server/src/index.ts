@@ -5749,6 +5749,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
             entry.identifier = `https://www.${safeName}.com/careers`;
           }
         } catch {
+          clearTimeout(timer);
           const safeName = entry.name.toLowerCase().replace(/\s+/g, '');
           console.log(`  ✗ ${slug} invalid (timeout) → converting to plain`);
           entry.ats_type = 'plain';
