@@ -6252,7 +6252,7 @@ async function runScoutInBackground(runId: number): Promise<void> {
         // Chain: URL health check → canonical resolution (canonical runs after health check so url_ok is populated)
         checkUrlHealthInBackground(newIds)
           .then(() => runCanonicalResolutionInBackground(pool, newIds))
-          .catch((e) => console.error('[Scout] Background URL check/resolution failed:', e instanceof Error ? e.message : e));
+          .catch(e => console.error('Background URL/canonical resolution error:', e));
       }
     }
 
