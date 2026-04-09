@@ -261,6 +261,8 @@ ADDITIONAL FIELDS:
 
 LOCATION NOTE: "Remote" alone = anywhere. "Remote, [City]" = must live near that city.
 
+CRITICAL: Think step by step through each component before writing the JSON. Do NOT default every field to mid-range values. Be decisive — most jobs should score clearly high or clearly low on each component, not cluster around the middle.
+
 ═══════════════════════════════════════════════════
 REQUIRED OUTPUT — JSON ONLY, NO MARKDOWN
 ═══════════════════════════════════════════════════
