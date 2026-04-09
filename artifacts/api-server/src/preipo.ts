@@ -217,7 +217,7 @@ export async function generatePreIpo(criteria: PreIpoCriteria): Promise<PreIpoRe
   parsed.grounding_sources_count = groundingCount;
 
   // Sort by momentum_score descending
-  parsed.companies.sort((a, b) => (b.momentum_score ?? 0) - (a.momentum_score ?? 0));
+  if (Array.isArray(parsed.companies)) { parsed.companies.sort((a, b) => (b.momentum_score ?? 0) - (a.momentum_score ?? 0)); }
 
   console.log(`[PreIPO] Success: ${parsed.companies.length} companies via ${CLAUDE_MODEL}`);
   return parsed;
